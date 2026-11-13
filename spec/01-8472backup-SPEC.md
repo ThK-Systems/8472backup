@@ -1,6 +1,6 @@
 # 8472backup — Project Specification for Codex
 
-Version: 0.18 — Chunk, object, and pack terminology; English glossary, 2026-11-13
+Version: 0.23 — Development ID algorithm and configuration roadmap, 2026-11-13
 
 Status: requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 
@@ -13,6 +13,8 @@ The architectural directions adopted after reviewing Borg 2 take precedence over
 MUST denotes a requirement, SHOULD a recommendation, OPEN an unresolved decision, and DEFERRED work outside the current implementation scope. An algorithm candidate is not an approved implementation dependency.
 
 Use the terminology in the [English glossary](99-GLOSSARY.md), especially the distinction between chunks, objects, and packs. The glossary explains the existing model; it does not select unresolved formats or algorithms.
+
+The [configuration roadmap](03-CONFIGURATION-ROADMAP.md) records planned client/server settings and unresolved configuration candidates. It does not define configuration syntax or authorize implementation.
 
 Thomas Kuhlmann is the project owner, architect, and principal developer. He retains ownership of requirements, architecture, review, and acceptance. He must be able to understand every line of project code and maintain the project without Codex or any AI service.
 
@@ -33,6 +35,7 @@ After setup, scheduled backup, protection enforcement, retention, and eligible s
 - Implementation language: Python.
 - Project, distribution, and command name: `8472backup`. Python import-package name: `p8472backup`, where `p` stands for Project. Program names may begin with a digit; normal Python import identifiers may not.
 - Keep the dependency set small and use the Python standard library where practical.
+- xxHash is excluded as a project algorithm. Do not add a direct dependency on `libxxhash` or Python xxHash bindings.
 - All external runtime dependencies MUST be available as Debian 13 (`trixie`) packages. Evaluate the APIs and versions actually packaged there. Build and development/test dependencies are exempt from this package-availability restriction. The existing no-pip instruction remains in force; this exception does not select an installation method for development tools.
 - Performance-critical runtime dependencies SHOULD expose established C or C++ implementations through Python bindings. Other native implementations require an explicit review against this preference.
 - Server: Linux, running as a systemd service.
@@ -96,7 +99,7 @@ Transport authentication is separate from encryption keys and stable UUIDs. SSH 
 | Backup encryption | AES-256 with established AEAD; only clients hold data decryption keys | GCM versus OCB, library, envelope format, usage limits |
 | Key lifecycle | Session-derived encryption keys, separate stable identity key material | KDF, session identifier format, concurrency rules |
 | Passphrase protection | Argon2id required for the client's master passphrase | Library, parameters, key wrapping, unattended unlocking |
-| Deduplication identifiers | Cryptographic keyed plaintext identifiers | Final algorithm and output length, quantum-security assessment, domain separation, format |
+| Deduplication identifiers | Development uses HMAC-SHA-256 over plaintext; fixed 32-byte binary IDs; no user-configurable algorithm | Pre-release algorithm review, key derivation, domain separation, authenticated context, format; migration deferred |
 | Snapshots | Independent snapshot roots and a final server-controlled publication step | Serialization, index engine, durable commit mechanism |
 | Physical storage | Packs of independently encrypted objects from the first snapshot increment, following Borg 2's logical/physical separation | Layout, sizes, recovery, concurrency |
 | Cleanup | Server uses committed object membership without decryption | Reference counting versus tracing; concurrency protocol |
@@ -159,7 +162,9 @@ OPEN: KDF, identifier length, key hierarchy, nonce layout, session lifetime, usa
 
 ### 7.4 Stable identifiers remain independent of sessions
 
-Deduplication identifiers MUST remain stable within their configured host/set key domain across writing sessions. Derive them from plaintext using a secret identifier key and a cryptographic hash/MAC. HMAC-SHA2 and keyed BLAKE3 are candidates subject to the Debian Trixie dependency policy; the final algorithm and output length remain OPEN pending quantum-security assessment.
+Deduplication identifiers MUST remain stable within their configured host/set key domain across writing sessions. During development, use HMAC-SHA-256 over plaintext with a secret identifier key, through Python's standard-library `hmac` and `hashlib` modules. The ID width is fixed at 32 binary bytes, displayed as 64 hexadecimal characters when needed. The object-ID algorithm is not configurable on either client or server. The development choice may be revisited before release through an explicit code change, with keyed BLAKE3 as a possible candidate. Migration design and implementation are DEFERRED; no migration machinery is requested now. Changing code must not silently reinterpret existing repository identities. Key derivation, role separation, and exact authenticated encoding remain subject to explicit design review.
+
+This development choice adds no runtime dependency. See the [Python HMAC documentation](https://docs.python.org/3.12/library/hmac.html). Other algorithms are not alternative configuration values for object IDs; a pre-release code change is a separate decision.
 
 Session-specific ciphertext MUST NOT define the logical deduplication identity. Existing objects with the same logical ID are reused rather than replaced by a new encryption of the same plaintext.
 
@@ -241,6 +246,25 @@ Pack requirements:
 The first snapshot increment MUST use real chunks and physical packs. An individual-file-per-object placeholder is not the agreed starting point. OPEN: sizing, buffering, naming, index engine, recovery format, and concurrency.
 
 Next review step (proposal, not an accepted byte format): represent a pack as a sequence of object records, each with a server-readable header followed by the opaque encrypted object bytes. Candidate header fields are a record marker, format version, object ID, and stored payload length. This would let the keyless server locate objects and reconstruct a location index from intact packs. Reconstruction does not authenticate plaintext, restore authoritative snapshot membership, or make incomplete records committed. Field widths, bounds, integrity checks, authentication binding, and handling of damaged records remain OPEN. Review this framing principle first, then snapshot publication and interrupted-write recovery in separate small steps.
+
+#### Common object-header proposal (OPEN)
+
+Thomas specifies the following field widths for the common-header draft. Optional type-specific subheaders remain under discussion:
+
+| Field | Proposed encoding | Review notes |
+| --- | --- | --- |
+| `type` | 2-byte unsigned integer (`uint16`) | Object role. Numeric assignments remain open. |
+| `version` | 2-byte unsigned integer (`uint16`) | Persistent-format version, separate from the application release. The relationship between common framing and type-specific payload versions remains open. |
+| `id` | 32 binary bytes | HMAC-SHA-256 plaintext identifier during development. The algorithm is not user-configurable; there is no ID-length field. |
+| Stored length in bytes | 8-byte unsigned integer (encoding proposal) | Thomas requests a maximum stored object-body size of 16G, interpreted here as 16 GiB (17,179,869,184 bytes). A 4-byte unsigned integer cannot represent this limit. The 8-byte field is a conventional encoding candidate; the accepted size ceiling remains 16 GiB regardless of field capacity. |
+
+The listed common-header fields total 44 bytes. Suggested length semantics (OPEN): count all bytes following the common header up to the next record, including any type-specific subheader and the entire stored cryptographic envelope, including authentication tags. This allows a structural scan without interpreting each object's type. Reject lengths above the 16 GiB stored-body ceiling when reading or writing; framing validation must also check that the declared bytes are available. This framing ceiling does not change the chunk-size defaults in chapter 8.2. Integer byte order remains open.
+
+The current proposal retains one stored-body length. A separate encrypted per-object metadata slot is not required by the agreed model and is not selected here. In the newer [Borg 2 pack format](https://borgbackup.readthedocs.io/en/master/internals/packs.html), the metadata slot contains object bookkeeping such as type, compression settings, and original size. Separately encrypting it permits metadata-only authenticated reads without reading/decrypting the data slot. This is distinct from file-metadata objects containing paths, attributes, and chunk references, which already have their own object identities in our model. Reconsider separate slots only for a concrete requirement. Borg's pair of 4-byte length fields cannot represent our permitted 16 GiB body sizes; a future split must preserve suitable widths and explicit bounds.
+
+Object IDs identify content across object roles within the applicable key domain; identical content of the same role intentionally reuses an ID. Preserve role separation and stable plaintext-based identity. Do not introduce a separate chunk identifier or a ciphertext-based replacement ID.
+
+Keep type-specific subheaders conditional on concrete requirements. Their visibility and encoding, integer byte order, record markers, corruption detection, and safe recovery remain open. Authenticate the cleartext header through the object's AEAD context as required by chapter 7; the plaintext-derived object ID is not itself authentication of that header. No byte layout is accepted by recording this proposal.
 
 ## 9. Snapshots and authoritative server metadata
 
@@ -501,6 +525,8 @@ Each set has a local backup-description file, conceptually similar to a borgmati
 
 OPEN: syntax, file locations, schema, supported rule vocabulary, and scheduling configuration location. Do not assume existing `retentions` semantics without review.
 
+See the [configuration roadmap](03-CONFIGURATION-ROADMAP.md) for planned settings, their authority and scope, and candidates that still need a decision.
+
 ## 16. Restore and read-only mounting
 
 - Restore is initiated on a client with the required recovery keys.
@@ -675,4 +701,4 @@ The adopted Borg 2 ideas guide the design as written here. New external developm
 
 Read this specification and inspect the actual repository and its instructions. Begin with archive and repository design as described in chapter 20. Summarize established requirements, work through concrete snapshot and object examples, and identify the few decisions needed for the first local backup/restore increment. Propose a small initial design and dedicated behavioural tests, including durability and encryption boundaries. Do not scaffold the complete product or silently decide the unresolved storage and cryptographic formats. Proceed with implementation in reviewable increments as directed by Thomas.
 
-Apply AES-256 AEAD with session-derived encryption keys, stable keyed identifiers, independent snapshot roots, server-owned membership, late server publication, per-file content-defined chunking with the agreed initial sizes, physical packs, and the version 1.0 `file` backend boundary as the agreed direction. Argon2id is mandatory for the client's master passphrase. GCM versus OCB, identifier hash and output length, session KDF, chunker choice, compression choice, pack format and parameters, and other storage formats remain subject to the explicitly OPEN decisions and the quantum-security review. Detailed object-format design is deferred to a later discussion. Do not implement native remote backends or a dynamic plugin platform in the initial increment.
+Apply AES-256 AEAD with session-derived encryption keys, HMAC-SHA-256 object IDs of 32 bytes during development, independent snapshot roots, server-owned membership, late server publication, per-file content-defined chunking with the agreed initial sizes, physical packs, and the version 1.0 `file` backend boundary as the agreed direction. Argon2id is mandatory for the client's master passphrase. GCM versus OCB, identifier-key derivation and role separation, session KDF, chunker choice, compression choice, pack format and parameters, and other storage formats remain subject to the explicitly OPEN decisions and the quantum-security review. The object-ID algorithm is not user-configurable; a pre-release code change remains possible, and migration is deferred. Detailed object-format design is deferred to a later discussion. Do not implement native remote backends or a dynamic plugin platform in the initial increment.
