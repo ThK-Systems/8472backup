@@ -44,7 +44,7 @@ lines-after-imports = 2
 known-first-party = ["8472backup"]
 
 [tool.mypy]
-python_version = "3.9"
+python_version = "3.12"
 strict = true
 disallow_untyped_defs = true
 disallow_incomplete_defs = true
@@ -65,11 +65,11 @@ python_functions = ["test_*"]
 pythonpath = ["."]
 
 [build-system]
-requires = ["setuptools>=82.0.1", "setuptools-scm"]
+requires = ["setuptools>=82.0.1", "setuptools-scm>=10.3.4"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-py-modules = ["retentions"]
+py-modules = ["8472backup"]
 
 [tool.setuptools_scm]
 version_scheme = "post-release"
