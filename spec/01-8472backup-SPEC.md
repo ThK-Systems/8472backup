@@ -1,6 +1,6 @@
 # 8472backup — Project Specification for Codex
 
-Version: 0.8 — SSH access to server service, 2026-11-02
+Version: 0.18 — Chunk, object, and pack terminology; English glossary, 2026-11-13
 
 Status: requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 
@@ -11,6 +11,8 @@ This is the single authoritative Codex specification for 8472backup. It consolid
 The architectural directions adopted after reviewing Borg 2 take precedence over older, less specific ideas: AEAD, session-derived encryption keys, independent snapshot roots, late server-controlled publication, and a storage-backend boundary. This precedence does not import Borg's different trust model or silently approve unresolved algorithms, formats, pack layouts, or dependencies. The requirements below express the resolved consolidation; do not combine them with superseded drafts.
 
 MUST denotes a requirement, SHOULD a recommendation, OPEN an unresolved decision, and DEFERRED work outside the current implementation scope. An algorithm candidate is not an approved implementation dependency.
+
+Use the terminology in the [English glossary](99-GLOSSARY.md), especially the distinction between chunks, objects, and packs. The glossary explains the existing model; it does not select unresolved formats or algorithms.
 
 Thomas Kuhlmann is the project owner, architect, and principal developer. He retains ownership of requirements, architecture, review, and acceptance. He must be able to understand every line of project code and maintain the project without Codex or any AI service.
 
@@ -29,12 +31,17 @@ After setup, scheduled backup, protection enforcement, retention, and eligible s
 ## 3. Scope and platform
 
 - Implementation language: Python.
+- Project, distribution, and command name: `8472backup`. Python import-package name: `p8472backup`, where `p` stands for Project. Program names may begin with a digit; normal Python import identifiers may not.
+- Keep the dependency set small and use the Python standard library where practical.
+- All external runtime dependencies MUST be available as Debian 13 (`trixie`) packages. Evaluate the APIs and versions actually packaged there. Build and development/test dependencies are exempt from this package-availability restriction. The existing no-pip instruction remains in force; this exception does not select an installation method for development tools.
+- Performance-critical runtime dependencies SHOULD expose established C or C++ implementations through Python bindings. Other native implementations require an explicit review against this preference.
 - Server: Linux, running as a systemd service.
 - Version 1.0 reference client: Linux.
-- Tentative minimum interpreter: Python 3.12; the exact minimum remains OPEN until dependencies and useful language/library features are evaluated.
+- Minimum interpreter: Python 3.12. This minimum is agreed; implementations must also respect the APIs available in the Debian Trixie dependency versions.
 - Later clients: other operating systems where the required Python modules and operating-system facilities are available. Identical feature availability across platforms is not required.
 - Platform-specific paths, file metadata, process operations, and mounting SHOULD have clear boundaries without speculative abstraction frameworks.
-- Established Python modules may bind native libraries. The project does not require a pure-Python dependency stack. Do not introduce project-owned C, Cython, Rust, or Go code without a demonstrated need and an explicit architectural decision.
+- Established Python modules may bind native libraries. The project does not require a pure-Python dependency stack. Do not introduce project-owned C, C++, Cython, Rust, or Go code without a demonstrated need and an explicit architectural decision.
+- A Go library may be considered only as a last resort when suitable packaged C/C++ options cannot meet the requirements. Establish the concrete need and review Debian availability, Python integration, and maintenance before adopting it.
 - Full non-Linux support is outside version 1.0.
 
 Performance and storage efficiency comparable to Borg are goals requiring benchmarks, not pre-existing guarantees.
@@ -86,17 +93,18 @@ Transport authentication is separate from encryption keys and stable UUIDs. SSH 
 
 | Area | Direction | Remaining decisions |
 | --- | --- | --- |
-| Backup encryption | Established AEAD implementation; only clients hold data decryption keys | Cipher, library, envelope format, usage limits |
+| Backup encryption | AES-256 with established AEAD; only clients hold data decryption keys | GCM versus OCB, library, envelope format, usage limits |
 | Key lifecycle | Session-derived encryption keys, separate stable identity key material | KDF, session identifier format, concurrency rules |
-| Passphrase protection | Argon2id as the intended password-based KDF | Library, parameters, key wrapping, unattended unlocking |
-| Deduplication identifiers | Keyed plaintext identifiers; keyed BLAKE3 is a strong candidate | Final algorithm, domain separation, format |
+| Passphrase protection | Argon2id required for the client's master passphrase | Library, parameters, key wrapping, unattended unlocking |
+| Deduplication identifiers | Cryptographic keyed plaintext identifiers | Final algorithm and output length, quantum-security assessment, domain separation, format |
 | Snapshots | Independent snapshot roots and a final server-controlled publication step | Serialization, index engine, durable commit mechanism |
-| Physical storage | Evaluate packs of independently encrypted objects | Whether to use packs initially; layout, sizes, recovery |
+| Physical storage | Packs of independently encrypted objects from the first snapshot increment, following Borg 2's logical/physical separation | Layout, sizes, recovery, concurrency |
 | Cleanup | Server uses committed object membership without decryption | Reference counting versus tracing; concurrency protocol |
+| Client/server communication | Common framed binary request/response protocol over SSH, with a separate push/pull connection-setup boundary | Framing, serialization, operation sequencing, and authenticated session context |
 | Storage backend | Server defines available backends; client selects from them or uses defaults. Version 1.0 only provides `file` (`file`) | Interface, server definitions, future selection syntax and scope |
 | Additional native backends | Future server-side cloud, SFTP, S3, and similar implementations | DEFERRED: much, much later; not version 1.0 |
 
-These directions supersede generic older options. In particular, do not introduce a global long-lived encryption nonce counter, a client-replaceable global snapshot manifest, or client-controlled protection timestamps. Pack adoption, the index engine, and reference counting versus tracing remain OPEN rather than being selected automatically from Borg.
+These directions supersede generic older options. In particular, do not introduce a global long-lived encryption nonce counter, a client-replaceable global snapshot manifest, or client-controlled protection timestamps. Packs are adopted as the physical-storage direction, but their concrete format and parameters remain OPEN. The index engine and reference counting versus tracing also remain OPEN rather than being selected automatically from Borg.
 
 ## 7. Cryptography and recovery key material
 
@@ -117,7 +125,7 @@ These roles MUST NOT be collapsed into one raw key used interchangeably. Indepen
 
 ### 7.2 Authenticated encryption
 
-Cryptographic primitives MUST come from established implementations; do not invent or implement cryptographic primitives ourselves. Use an established AEAD implementation rather than assembling encryption and authentication primitives ourselves. AES-256-OCB and ChaCha20-Poly1305 are candidates motivated by Borg 2; the final choice requires checking maintained Python libraries, platform availability, license compatibility, and performance.
+Cryptographic primitives MUST come from established implementations; do not invent or implement cryptographic primitives ourselves. Use AES-256 through an established AEAD implementation rather than assembling encryption and authentication primitives ourselves. GCM versus OCB remains OPEN for later review, including the packaged Python libraries, platform availability, license compatibility, usage limits, and performance.
 
 An encrypted object MUST bind its ciphertext to the intended object identity, object role, format, and repository/key scope through an explicit authenticated context. Additional authenticated data (AAD) is suitable for fields that need authentication without encryption.
 
@@ -151,7 +159,7 @@ OPEN: KDF, identifier length, key hierarchy, nonce layout, session lifetime, usa
 
 ### 7.4 Stable identifiers remain independent of sessions
 
-Deduplication identifiers MUST remain stable within their configured host/set key domain across writing sessions. Derive them from plaintext using a secret identifier key. Keyed BLAKE3 is a candidate; the final selection remains OPEN.
+Deduplication identifiers MUST remain stable within their configured host/set key domain across writing sessions. Derive them from plaintext using a secret identifier key and a cryptographic hash/MAC. HMAC-SHA2 and keyed BLAKE3 are candidates subject to the Debian Trixie dependency policy; the final algorithm and output length remain OPEN pending quantum-security assessment.
 
 Session-specific ciphertext MUST NOT define the logical deduplication identity. Existing objects with the same logical ID are reused rather than replaced by a new encryption of the same plaintext.
 
@@ -161,13 +169,21 @@ Host/set isolation follows chapter 4. There is no cross-host deduplication, and 
 
 ### 7.5 Passphrases and recovery secrets
 
-Argon2id is the intended approach for deriving a key from a user passphrase to protect stored recovery/key material. It is not the per-chunk encryption algorithm and MUST NOT be run for every data chunk.
+Argon2id MUST be used to derive the protection key from the client's master passphrase for stored recovery/key material. It is not the per-chunk encryption algorithm and MUST NOT be run for every data chunk.
 
 Keep durable backup secrets independent of the user's passphrase where practical, so a passphrase change can rewrap key material without re-encrypting all backup contents. Exact wrapping and recovery procedures remain OPEN.
 
 Parameters, salt generation, resource bounds, migration, and unattended unlocking must be specified and validated. A passphrase change is not equivalent to revoking already disclosed backup keys.
 
+### 7.6 Quantum-security review
+
+Evaluate quantum resistance for each cryptographic role, using established primitives available under the Debian Trixie dependency policy. Distinguish symmetric encryption, keyed identifiers, and derivation from high-entropy secrets from asymmetric key exchange and signatures. Assess key-search, forgery, and collision requirements separately; an algorithm name or digest length alone is not a complete security claim.
+
+HKDF-SHA256 is a candidate for deriving session keys from high-entropy secret material; the final KDF/hash selection remains OPEN. Argon2id remains mandatory for the master passphrase. Evaluate the system OpenSSH's hybrid post-quantum key exchange for both push and pull; supported algorithms, enforcement/fallback policy, and authentication-signature coverage remain OPEN.
+
 ## 8. Object processing, deduplication, and physical storage
+
+A chunk is a logical piece of file content. Each file-content chunk corresponds to one data object; metadata and snapshot roots are objects as well. An object is the general independently identified, immutable unit referenced by snapshots and stored in packs. For a data object, chunk ID and object ID denote the same logical identifier, not two separate identifiers. Compression and encryption produce its stored representation without changing that identity. A pack groups object records physically. Use `chunk` when discussing file-content boundaries and `object` when discussing storage and references that also apply to metadata.
 
 ### 8.1 Processing
 
@@ -181,20 +197,26 @@ source bytes -> content-defined chunks -> keyed plaintext identifiers
 
 The server can identify existing objects without knowing plaintext. Stable IDs do not require deterministic encryption.
 
+LZ4 and Zstandard are compression candidates with native Debian Trixie bindings. The default algorithm, selectable levels, and handling of incompressible chunks remain OPEN.
+
 ### 8.2 Small files and chunking
 
+- Apply content-defined chunking to each source file separately, following Borg 2's file-content model. A data chunk contains the whole content of one small file or a contiguous part of one larger file; it never combines content from different source files.
 - Empty files require metadata but no data chunk.
 - A non-empty file smaller than the chunking threshold can be one chunk, without padding.
 - The final chunk may be smaller than the nominal minimum.
-- Small objects may be physically packed together without coupling unrelated files into one logical plaintext chunk.
+- File paths and attributes are stored in encrypted file metadata together with the ordered data-chunk references. Identical chunks may be reused across files and snapshots within the permitted key scope.
+- Objects from different source files may share a physical pack while remaining separate logical objects.
 
-Chunking parameters and container/pack layout remain OPEN. Delta chains between successive chunk versions are not required for version 1.0.
+Adopt initial data-chunk defaults of 512 KiB minimum, approximately 2 MiB target, and 8 MiB maximum, with the small-file and final-chunk exceptions above. In a later increment, these sizes are to become configurable on the server and communicated to the source client before chunking. Configuration scope, validation limits, and parameter exchange remain OPEN. Changes affect future chunking and may reduce deduplication across the transition; they do not rewrite earlier snapshots.
+
+Chunker-specific parameters, metadata chunk sizes, and container/pack layout remain OPEN. Delta chains between successive chunk versions are not required for version 1.0.
 
 Use established chunking implementations through Python modules. Chunker selection, parameters, and any optimizations must be evaluated rather than inferred from Borg compatibility. Performance targets require measurements.
 
 ### 8.3 Physical packs and location indexes
 
-Packs are a strong candidate, not a mandatory initial format. Evaluate them before selecting the storage layout.
+Packs of independently encrypted objects are the adopted physical-storage direction for version 1.0. Follow Borg 2's separation between file-content chunks and their physical grouping without assuming Borg format compatibility or importing its exact pack format.
 
 The intended separation is:
 
@@ -206,7 +228,7 @@ Packing MUST NOT merge unrelated files into one logical plaintext chunk or coupl
 
 For our architecture, server-side assembly of already encrypted objects is a candidate: the server can manage physical layout without receiving plaintext or decryption keys. Client-side packing is not required merely because Borg uses it.
 
-If packs are adopted:
+Pack requirements:
 
 - Prefer self-describing bounded object framing that allows location-index reconstruction from stored bytes.
 - Distinguish a reconstructed location index from cryptographically verified content and authoritative snapshot membership.
@@ -216,7 +238,9 @@ If packs are adopted:
 - Persist replacement containers and crash-safe index changes before removing old containers.
 - Missing or corrupt indexes MUST NOT authorize speculative deletion.
 
-OPEN: pack adoption for version 1.0 and the first increment, sizing, buffering, naming, index engine, recovery format, and concurrency.
+The first snapshot increment MUST use real chunks and physical packs. An individual-file-per-object placeholder is not the agreed starting point. OPEN: sizing, buffering, naming, index engine, recovery format, and concurrency.
+
+Next review step (proposal, not an accepted byte format): represent a pack as a sequence of object records, each with a server-readable header followed by the opaque encrypted object bytes. Candidate header fields are a record marker, format version, object ID, and stored payload length. This would let the keyless server locate objects and reconstruct a location index from intact packs. Reconstruction does not authenticate plaintext, restore authoritative snapshot membership, or make incomplete records committed. Field widths, bounds, integrity checks, authentication binding, and handling of damaged records remain OPEN. Review this framing principle first, then snapshot publication and interrupted-write recovery in separate small steps.
 
 ## 9. Snapshots and authoritative server metadata
 
@@ -230,7 +254,7 @@ Snapshots MAY share unchanged data and metadata objects within the permitted ded
 
 Restore MUST NOT depend on replaying earlier snapshots. Deleting the first snapshot cannot invalidate a retained later snapshot.
 
-Avoid a design that requires replacing a single client-controlled global manifest on every backup. A database transaction may still be appropriate for server metadata; independent roots do not forbid databases or eliminate transactions.
+Avoid a design that requires replacing a single client-controlled global manifest on every backup. Independent roots still require a durable server-owned catalogue and a crash-safe publication mechanism. SQLite has been explicitly rejected; the concrete catalogue persistence mechanism remains OPEN.
 
 OPEN: snapshot ID generation, root/content ID relationship, metadata chunking, serialization, and metadata reuse strategy.
 
@@ -324,7 +348,7 @@ The server commit time, never a client-supplied date, starts minimum protection.
 
 Define persistent states for staging, data and index persistence, accepted membership, commit publication, logical pruning, garbage collection, and pack compaction. A cache or location-index rebuild does not reconstruct authoritative historical protection state.
 
-OPEN: serialization, snapshot/root identifiers, index/database engine, transaction mechanism, fsync and atomicity boundaries, data integrity checks for opaque ciphertext, and corruption recovery. Do not select SQLite, a pack format, or another engine merely because it is convenient.
+OPEN: serialization, snapshot/root identifiers, catalogue and index persistence, transaction mechanism, fsync and atomicity boundaries, data integrity checks for opaque ciphertext, and corruption recovery. SQLite is excluded. Review the concrete persistence and pack formats before implementation.
 
 ## 12. Retention, minimum protection, and garbage collection
 
@@ -369,7 +393,7 @@ Protection must be enforced by server authority even when a compromised client s
 
 ### 13.1 Backup modes and scheduled pull
 
-The backup mode is configured on the backup host (client) per host: `mode = "pull"` by default, or `mode = "push"` when explicitly selected. The setting applies to the host's backup sets. The precise client configuration file location, schema, and wire representation are OPEN. Both modes use the same server-side authorization, snapshot commit, retention, minimum protection, and safe garbage-collection rules.
+The backup mode is configured on the backup host (client) per host: `mode = "pull"` by default, or `mode = "push"` when explicitly selected. The setting applies uniformly to all of the host's backup sets; per-set mode selection or overrides are not supported. The precise client configuration file location, schema, and wire representation are OPEN. Both modes use the same server-side authorization, snapshot commit, retention, minimum protection, and safe garbage-collection rules.
 
 At initial registration the client transmits its current configuration file to the server. The server validates the host mode and records it as part of registration. A host registered with `mode = "push"` is never added to pull scheduling and is not contacted for pull backups; an omitted mode defaults to `pull` and the server schedules it. Once registered in push mode, switching to pull requires the dedicated client command described below. Registration must not expose backup decryption keys or passphrases to the server. Exact serialization, validation and configuration fields remain OPEN.
 
@@ -377,7 +401,7 @@ In pull mode the server schedules the host's backup sets. When a scheduled pull 
 
 The server does not periodically pull or probe that host merely to discover a switch back. To return to pull, the operator changes the client configuration to `mode = "pull"` and proactively invokes a dedicated client command that informs the server over an authenticated connection. The server then adds the host back to its pull scheduling list. The exact command name and protocol are OPEN. Repeated requests should be safe, and failed requests must be reported so the operator can retry. Missing, invalid, or unreadable configuration must not silently be interpreted as a request to change mode. Mode is scheduling configuration, not an authorization boundary.
 
-OPEN: exact persisted representation, mode acknowledgement, retry and reconciliation behaviour, and handling of already-running or overlapping operations.
+OPEN: exact persisted representation, mode acknowledgement, retry and reconciliation behaviour, and handling of already-running or overlapping operations. Detailed mode-switching workflows and commands will be designed later; switching always applies to the whole client.
 
 The server schedules hosts and sets, connects to a client through SSH, and invokes a restricted client operation. The client reads local configuration, processes source data, and returns encrypted objects and protocol metadata.
 
@@ -408,13 +432,15 @@ backup client <-> SSH <-> server sshd <-> restricted 8472backup SSH command
                                       <-> local Unix-domain socket <-> 8472backup server service
 ```
 
-The systemd-managed server service is a separate long-running process. On SSH authentication, `sshd` starts a restricted per-connection command; the command exchanges framed protocol bytes with the client over standard input/output and relays requests and responses over the local Unix-domain socket to the server service. SSH provides the network transport; a separate TCP listener or SSH TCP port-forwarding tunnel is not required by this design. Prevent PTY allocation and unneeded forwarding on restricted keys. Keep protocol output separate from diagnostics.
+The systemd-managed server service is a separate long-running process. On SSH authentication, `sshd` starts a restricted per-connection command; the command exchanges the common framed binary protocol with the client over standard input/output and relays requests and responses over the local Unix-domain socket to the server service. SSH provides the network transport; a separate TCP listener or SSH TCP port-forwarding tunnel is not required by this design. Prevent PTY allocation and unneeded forwarding on restricted keys. Keep protocol output separate from diagnostics.
 
 The server service owns authorization, repository state, snapshot publication, retention, and protection. It must bind every operation to the authenticated host and applicable permissions. The SSH gateway must convey the authenticated identity using a server-controlled, trustworthy mapping from the accepted key or equivalent credential. A client-asserted UUID, hostname, request field, or untrusted `SSH_ORIGINAL_COMMAND` is not proof of identity. Restrict and protect the socket and the gateway-to-service trust boundary; do not assume a Unix socket or its shared OS account automatically authenticates individual SSH keys. The detailed identity mapping, local peer authorization, framing, and deployment remain OPEN and must be reviewed before implementation. Do not grant clients direct general-purpose access to the socket or repository.
 
 For pull, the running server service initiates SSH to the client and invokes the restricted client command. That direction also does not require an additional TCP tunnel. This section specifies the intended design, not a claim that it is implemented.
 
 ### 13.4 Protocol requirements
+
+Use a common framed binary request/response protocol for client/server operations over SSH standard input/output, following the Borg 1.4 transport approach. HTTP is not the client/server application protocol. This adopts the transport principle, not Borg protocol compatibility or a particular serialization library; MessagePack and the exact wire format remain unselected. Later HTTP(S) connections to an S3 or similar backend belong to the separate storage-backend path in the server process.
 
 - Version the protocol and negotiate supported capabilities.
 - Define explicit operations and permission checks in both directions.
@@ -424,7 +450,20 @@ For pull, the running server service initiates SSH to the client and invokes the
 - Verify SSH peer identity; do not disable host-key checking as a convenience default.
 - Specify reconnect, abort, duplicate request, and commit acknowledgement behaviour.
 
-OPEN: framing, serialization, session admission, authenticated identity mapping, and detailed gateway/socket protocol. SSH and the restricted-command-to-local-socket path are the agreed transport direction; the exact RPC design is not selected.
+OPEN: exact framing, serialization, operation sequencing, session admission, authenticated identity mapping, and detailed gateway/socket protocol. SSH, the framed binary request/response approach, and the restricted-command-to-local-socket path are agreed; concrete message formats remain unselected.
+
+### 13.5 Push/pull boundary and common backup sessions
+
+Push/pull MUST have its own small, explicit boundary for mode-specific scheduling and invocation, connection establishment, and handoff to the common backup session:
+
+- Push: the source CLI starts SSH to the server. The restricted server-side helper relays the common protocol over the local Unix-domain socket to the running server service.
+- Pull (default): the running server service starts SSH to the source host and invokes the restricted source CLI. The service exchanges the common protocol directly over the SSH subprocess's standard input/output.
+- Both paths provide a bidirectional byte stream and a server-validated host/set authorization context to the same backup protocol and archive logic. The detailed authorization handoff remains OPEN.
+- At the start of the common backup session, the client sends the captured, validated configuration for the run to the server. This client-to-server exchange and server validation precede object-existence queries and source-data transfer in both push and pull. The run uses that same fixed configuration version as specified in chapter 15.
+- The source client always reads, chunks, compresses, and encrypts source data. The server always controls admission, repository state, snapshot publication, retention, and cleanup. Starting the SSH connection does not exchange those application roles or grant additional permissions.
+- Object-existence queries, transfer, membership submission, commit, and failure handling MUST use the same semantics and common implementation in both modes. Archive and repository code must not branch on which side started SSH.
+
+Keep this boundary explicit in Python and limited to the concrete push/pull paths. The storage-backend boundary is separate: server-side `file` operations and any future backend HTTP(S) calls do not depend on who initiated the backup connection.
 
 ## 14. Initialization, registration, and identity recovery
 
@@ -448,7 +487,7 @@ The passphrase-protection and key-separation direction is defined in chapter 7. 
 
 ## 15. Backup descriptions and configuration
 
-Each set has a local backup-description file, conceptually similar to a borgmatic configuration. It defines source selections, exclusions, and requested retention.
+Each set has a local backup-description file, conceptually similar to a borgmatic configuration but with a smaller configuration vocabulary and less verbosity. It defines source selections, exclusions, and requested retention. The exact syntax and schema remain OPEN.
 
 - Descriptions can change between runs.
 - Read and validate one fixed configuration version per run.
@@ -495,6 +534,7 @@ Tests must exercise behaviour and invariants, not merely mirror implementation. 
 | Client claims another host identity | Gateway and server derive authority from authenticated credentials; cross-host access is denied |
 | Client invokes an unauthorized operation | Server rejects it; protected snapshots and repository state remain unchanged |
 | Client disconnects during a gateway session | Incomplete work is handled safely and committed history remains intact |
+| Equivalent source data backed up through push and pull | Common protocol and archive logic give the same reuse, restoration, commit, and protection behaviour |
 | Registration with mode omitted | Pull is the default; server schedules the host |
 | Registration with `mode = "push"` | Server records push mode and never schedules the host for pull; push backup remains available |
 | Initially push host requests pull | Dedicated authenticated client command reactivates pull scheduling |
@@ -527,7 +567,7 @@ Tests must exercise behaviour and invariants, not merely mirror implementation. 
 | Ciphertext, object role, ID, or authenticated context modified | Verification fails; no accepted corrupt restoration |
 | Restore from another authorized recovery client | Durable recovery secrets and stored metadata suffice; original source host not required |
 | Client tries to replace committed membership | Earlier retained history and its dependencies remain unchanged |
-| Location index lost when packs are used | Documented rebuild without inventing authoritative protection state |
+| Pack location index lost | Documented rebuild without inventing authoritative protection state |
 | Version 1.0 client supplies no backend selection | Default `file` works without a client selector |
 | Server defines `file` with a chosen path | Backup and restore use the server-defined location |
 | Storage path is on a suitable mounted filesystem | Same `file` backend, subject to the documented filesystem contract |
@@ -547,7 +587,7 @@ Include candidate ciphers, keyed hashes, chunkers, object overhead, and pack beh
 - Keep comments, identifiers, tests, and project documentation in English.
 - Keep modules explicit and comprehensible. Avoid speculative frameworks, clever metaprogramming, or hidden generated logic.
 - Record accepted decisions and recovery procedures in Git; chat history must not be essential project documentation.
-- Use established libraries through Python modules. Check license compatibility, platform availability, maintenance, and data-copy overhead before selecting them.
+- Use established libraries through Python modules under the Debian Trixie dependency policy in chapter 3. Check the packaged version, native implementation, license compatibility, platform availability, maintenance, and data-copy overhead before selecting them.
 - Use appropriate automated tests, Ruff, and mypy; exact configuration and supported Python matrix remain to be chosen.
 - Report what changed, why, what was checked, and what remains unresolved.
 - Preserve existing work and public interfaces. Never silently change safety semantics to get tests passing.
@@ -559,7 +599,7 @@ Resolve routine reversible details autonomously while keeping consequential OPEN
 ## 20. Incremental implementation — archive design first
 
 1. Start with archive/repository design: agree independent snapshot roots, object membership, key boundaries, durable commit invariants, and the small `file` backend boundary; prototype uncertain library choices.
-2. Implement a local round trip: backup, second snapshot with reuse, verify, and restore.
+2. Begin implementation with the server-side repository core for snapshot creation and persistence, driven directly by tests using real file contents, real chunking, physical packs, and complete snapshots. Exercise a local round trip: backup, second snapshot with reuse, verify, and restore.
 3. Establish transactional repository behaviour, protected retention, GC, and failure tests.
 4. Add authenticated SSH operations, registration, server-initiated pull and client-initiated push backup sessions, and set management.
 5. Integrate configuration, scheduling, service operation, and operational failure handling.
@@ -567,6 +607,10 @@ Resolve routine reversible details autonomously while keeping consequential OPEN
 7. Benchmark, harden, package, document recovery, and validate in controlled real use.
 
 This order may change by agreement. Early prototypes are not production backup tools. Safety boundaries must shape the initial model even when features arrive later.
+
+The immediate focus is the server-side snapshot core with real chunks, packs, and snapshots. Tests take the client role and exercise the actual archive-processing and server-storage code; a placeholder `client.py` or dummy-client application is not part of the initial scope. The source-side processing used by tests remains separate from the keyless server. Review the first object/pack format, catalogue persistence, cryptographic choices, and commit sequence before implementation; any experimental format must be identified as such. Incomplete platform support or other explicitly bounded gaps may remain, but synthetic opaque payloads alone are not the main end-to-end test. Use a package hierarchy that leaves clear homes for archive processing, server policy, storage, and transport as the project grows. The exact module layout remains a proposal; no implementation scaffolding or test code is authorized by this planning step alone.
+
+The non-normative [project structure proposal](02-PROJECT-STRUCTURE.md) describes the proposed package hierarchy and first test-driven snapshot increment. Package naming, file-based catalogue details, and the exact module breakdown require review; this specification remains the requirements authority.
 
 ### 20.1 Initial focus: archive design and dedicated tests
 
@@ -600,7 +644,7 @@ Future backends MUST preserve client-side encryption, immutable retained history
 
 External deletion by a provider or someone with direct backend administrator access is outside the client-compromise guarantee, just as direct filesystem administration is in the local model.
 
-OPEN for that later phase: authoritative metadata placement, whether packs are mandatory for some targets, backend migration, caching, and recovery when external storage is unavailable. Replication, multi-target redundancy, and tiering are not implied requirements.
+OPEN for that later phase: authoritative metadata placement, backend-specific pack requirements, backend migration, caching, and recovery when external storage is unavailable. Replication, multi-target redundancy, and tiering are not implied requirements.
 
 Other DEFERRED or uncommitted ideas include full non-Linux clients, Borg-history import, optional labels/protection tags, soft deletion/undelete, and additional orchestration. They do not enlarge version 1.0 by implication. A client-controlled protection tag is never a replacement for server-enforced minimum retention.
 
@@ -631,4 +675,4 @@ The adopted Borg 2 ideas guide the design as written here. New external developm
 
 Read this specification and inspect the actual repository and its instructions. Begin with archive and repository design as described in chapter 20. Summarize established requirements, work through concrete snapshot and object examples, and identify the few decisions needed for the first local backup/restore increment. Propose a small initial design and dedicated behavioural tests, including durability and encryption boundaries. Do not scaffold the complete product or silently decide the unresolved storage and cryptographic formats. Proceed with implementation in reviewable increments as directed by Thomas.
 
-Apply AEAD with session-derived encryption keys, stable keyed identifiers, independent snapshot roots, server-owned membership, late server publication, and the version 1.0 `file` backend boundary as the agreed direction. Argon2id is the intended passphrase KDF; cipher choice, keyed BLAKE3 selection, chunker choice, pack adoption, and storage formats remain subject to the explicitly OPEN decisions. Do not implement native remote backends or a dynamic plugin platform in the initial increment.
+Apply AES-256 AEAD with session-derived encryption keys, stable keyed identifiers, independent snapshot roots, server-owned membership, late server publication, per-file content-defined chunking with the agreed initial sizes, physical packs, and the version 1.0 `file` backend boundary as the agreed direction. Argon2id is mandatory for the client's master passphrase. GCM versus OCB, identifier hash and output length, session KDF, chunker choice, compression choice, pack format and parameters, and other storage formats remain subject to the explicitly OPEN decisions and the quantum-security review. Detailed object-format design is deferred to a later discussion. Do not implement native remote backends or a dynamic plugin platform in the initial increment.
