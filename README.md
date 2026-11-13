@@ -1,6 +1,6 @@
 # 8472backup
 
-A planned pull-based backup system with client-side encryption, deduplication, and server-enforced retention.
+A planned push/pull-based backup system with client-side encryption, deduplication, and server-enforced retention.
 
 Currently in the early design phase. No usable implementation is available yet.
 
