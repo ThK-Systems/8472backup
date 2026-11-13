@@ -1,0 +1,76 @@
+[project]
+name = "8472backup"
+dynamic = ["version"]
+description = "Backup system with client-side encryption, deduplication, push/pull and server-enforced retention to protect backup history from compromised clients."
+authors = [{ name = "Thomas Kuhlmann", email = "mail@thomas-kuhlmann.de" }]
+readme = "README.md"
+license = "AGPL-3.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.12,<4"
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.15.10",
+    "mypy>=1.11.0",
+    "pytest>=8.3.0",
+    "pytest-cov>=7.1.0",
+    "debugpy>=1.8.0",
+]
+
+[tool.ruff]
+line-length = 240
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "UP", "N", "RET", "ARG", "ANN", "S"]
+fixable = ["ALL"]
+per-file-ignores = { "tests/*.py" = [
+    "ANN",
+    "ARG001",
+    "ARG005",
+    "S101",
+    "S108",
+] }
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "lf"
+
+[tool.ruff.lint.isort]
+combine-as-imports = true
+force-single-line = false
+lines-after-imports = 2
+known-first-party = ["8472backup"]
+
+[tool.mypy]
+python_version = "3.9"
+strict = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+warn_unused_ignores = true
+warn_return_any = true
+warn_redundant_casts = true
+warn_unreachable = true
+strict_optional = true
+no_implicit_optional = true
+exclude = '(^tests/|^tests_.*|^test_.*|^/tests/|^/tests_.*)'
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = "-v --tb=short --maxfail=3 --cache-clear"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+pythonpath = ["."]
+
+[build-system]
+requires = ["setuptools>=82.0.1", "setuptools-scm"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["retentions"]
+
+[tool.setuptools_scm]
+version_scheme = "post-release"
+local_scheme = "no-local-version"

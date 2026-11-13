@@ -1,0 +1,13 @@
+.vscode/
+.venv/
+__pycache__/
+build/
+*.pyc
+*.pyo
+*.egg-info/
+*.egg
+.coverage
+.mypy_cache/
+.pytest_cache/
+.VSCodeCounter
+playground
