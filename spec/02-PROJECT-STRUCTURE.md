@@ -2,6 +2,10 @@
 
 Status: proposal for Thomas's review, 2026-11-13. This document does not authorize implementation or establish an on-disk format. The main specification remains authoritative.
 
+Explicitly approved increment, 2026-11-19: the immutable `Object` class and its focused tests occupy `src/p8472backup/archive/objects.py` and `test/unit/archive/test_objects.py`. Its `to_header()` and `from_header()` methods implement the common header codec; payload handling remains unimplemented. The remaining hierarchy is still a proposal.
+
+Also explicitly approved: the immutable `Pack` header class in `src/p8472backup/storage/file/packs.py`, with four focused tests in `test/unit/storage/file/test_packs.py`. It implements the 14-byte header; record I/O and compaction remain unimplemented.
+
 ## 1. Agreed starting point
 
 - Python 3.12 is the minimum version.
@@ -45,7 +49,7 @@ src/
       backup.py
       restore.py
       mount.py
-tests/
+test/
   unit/
     archive/
     server/
@@ -67,7 +71,7 @@ This is an intended organization as functionality grows. Create modules with the
 | `transport` | Shared protocol and the separate push/pull connection setup. |
 | `cli` | Eventual command parsing and process entry points. |
 
-Use ordinary modules and explicit calls. Folder boundaries do not imply interfaces, dependency injection, or class hierarchies. VS Code uses one workspace root and a consistent source path for navigation, type checking, and test discovery.
+Use concrete domain classes with explicit methods and ordinary package modules. `Object` owns its validated header state and serialization methods. Folder boundaries do not imply interfaces, dependency injection, or inheritance hierarchies. VS Code uses one workspace root and a consistent source path for navigation, type checking, and test discovery.
 
 ## 3. First real snapshot increment
 
@@ -106,8 +110,8 @@ Before coding, review the minimal object/pack framing, snapshot record serializa
 
 ## 5. Existing project metadata
 
-The current `pyproject.toml` parses as TOML and sets both the Python requirement and mypy target to Python 3.12. Its `py-modules` setting describes a single-file module; the proposed hierarchy instead needs package discovery under `src/`. When creating the packages, align package discovery, import sorting, and test/source-path configuration with `p8472backup`.
+The current `pyproject.toml` sets both the Python requirement and mypy target to Python 3.12. Package discovery uses `src/`, import sorting recognizes `p8472backup`, and pytest discovers tests under `test/` with `src/` on its import path. Mypy's `mypy_path` uses `$MYPY_CONFIG_FILE_DIR/src`, independently of pytest's path configuration, so individual-file checks resolve `p8472backup`. These settings support the first header codec and its tests.
 
 The current dependency entries specify lower bounds, not exact version pins. They are not constrained to Trixie's tool versions under the clarified development-dependency policy. The build requirement for `setuptools-scm` is now explicitly `>=10.3.4`. A build or installed-tool compatibility check is separate from checking published version and Python metadata.
 
-No changes to `pyproject.toml`, CI, application modules, or test code are made by this proposal.
+Create further modules with their approved implementation increments; the remaining proposal does not request empty scaffolding.

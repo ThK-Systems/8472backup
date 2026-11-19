@@ -21,7 +21,7 @@ Status: medium-term inventory, 2026-11-13. The [main specification](01-8472backu
 
 | Setting | Status | Scope and current direction |
 | --- | --- | --- |
-| Minimum protection duration | Planned | Per host repository, server-controlled; default seven days from server commit. Changes must preserve the agreed protection guarantees. Rules for applying duration changes to existing snapshots remain open. |
+| Minimum protection duration | Planned | Per host repository, server-controlled; default seven days from server commit. Effective expiry is the maximum of the stored snapshot protection deadline and the snapshot commit time plus the currently configured interval. Retention cannot delete a snapshot before this effective deadline. |
 | Chunk sizes | Planned | Server-defined minimum, target, and maximum, communicated to the source before chunking. Initial defaults: 512 KiB, approximately 2 MiB, and 8 MiB. Larger configurations are possible within supported implementation and stored-object limits. Host/set configuration scope and validation remain open. |
 | Pull schedule | Planned | Server schedules pull backups for hosts/sets. Push hosts use an external client-side scheduler and are not scheduled for pull. Scheduling syntax, configuration ownership, and overlap handling remain open. |
 | Repository and service locations | Candidate | Server repository roots and Unix-socket location, with explicit service-account and access rules. Exact deployment options remain open. |

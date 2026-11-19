@@ -1,6 +1,6 @@
 # 8472backup — Project Specification for Codex
 
-Version: 0.23 — Development ID algorithm and configuration roadmap, 2026-11-13
+Version: 0.29 — Effective snapshot protection and captured configuration, 2026-11-19
 
 Status: requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 
@@ -33,6 +33,7 @@ After setup, scheduled backup, protection enforcement, retention, and eligible s
 ## 3. Scope and platform
 
 - Implementation language: Python.
+- Use object-oriented domain code with concrete classes that own their state and relevant methods. `Object` represents an archive object's current header state and provides `to_header()` and `from_header()`. Prefer simple concrete classes over speculative interfaces or inheritance hierarchies.
 - Project, distribution, and command name: `8472backup`. Python import-package name: `p8472backup`, where `p` stands for Project. Program names may begin with a digit; normal Python import identifiers may not.
 - Keep the dependency set small and use the Python standard library where practical.
 - xxHash is excluded as a project algorithm. Do not add a direct dependency on `libxxhash` or Python xxHash bindings.
@@ -245,26 +246,32 @@ Pack requirements:
 
 The first snapshot increment MUST use real chunks and physical packs. An individual-file-per-object placeholder is not the agreed starting point. OPEN: sizing, buffering, naming, index engine, recovery format, and concurrency.
 
-Next review step (proposal, not an accepted byte format): represent a pack as a sequence of object records, each with a server-readable header followed by the opaque encrypted object bytes. Candidate header fields are a record marker, format version, object ID, and stored payload length. This would let the keyless server locate objects and reconstruct a location index from intact packs. Reconstruction does not authenticate plaintext, restore authoritative snapshot membership, or make incomplete records committed. Field widths, bounds, integrity checks, authentication binding, and handling of damaged records remain OPEN. Review this framing principle first, then snapshot publication and interrupted-write recovery in separate small steps.
+The agreed common header below identifies an object and declares its stored body length. Additional per-object boundary markers are excluded. Within a sequence of object records, the next record starts at the current record offset plus 44 bytes plus its declared body length. A marker byte sequence could also occur in a body and would not by itself prove a valid boundary. A sequential reader must validate the header and available body bytes; a detected invalid or truncated record stops that walk rather than triggering heuristic searches inside the body. A corrupted length that still appears plausible may require integrity verification to detect. Integrity checks, recovery using independently known locations, interrupted-write handling, and the complete pack layout remain OPEN. A structural index reconstruction does not authenticate plaintext, restore authoritative snapshot membership, or make incomplete records committed.
 
-#### Common object-header proposal (OPEN)
+#### Pack header (agreed development format)
 
-Thomas specifies the following field widths for the common-header draft. Optional type-specific subheaders remain under discussion:
+The approved header uses a 2-byte unsigned pack-format version, a 4-byte unsigned `object_count`, and an 8-byte unsigned `body_length`, totaling 14 bytes without padding, with little-endian integers (`<HIQ`). Version is initially `1`, independent of the object-format version. `object_count` counts complete records; `body_length` counts bytes in all records, including their 44-byte object headers. These fields use different units and need different capacities.
 
-| Field | Proposed encoding | Review notes |
-| --- | --- | --- |
-| `type` | 2-byte unsigned integer (`uint16`) | Object role. Numeric assignments remain open. |
-| `version` | 2-byte unsigned integer (`uint16`) | Persistent-format version, separate from the application release. The relationship between common framing and type-specific payload versions remains open. |
-| `id` | 32 binary bytes | HMAC-SHA-256 plaintext identifier during development. The algorithm is not user-configurable; there is no ID-length field. |
-| Stored length in bytes | 8-byte unsigned integer (encoding proposal) | Thomas requests a maximum stored object-body size of 16G, interpreted here as 16 GiB (17,179,869,184 bytes). A 4-byte unsigned integer cannot represent this limit. The 8-byte field is a conventional encoding candidate; the accepted size ceiling remains 16 GiB regardless of field capacity. |
+The immutable `Pack` class in `src/p8472backup/storage/file/packs.py` implements `to_header()` and `from_header()`, returning bytes and a `Pack` instance respectively. The header describes a non-empty pack: the count is between 1 and 2^32 - 1, and body length must fit an unsigned 64-bit integer. Its body must be large enough for all object headers and no larger than the combined maximum possible record sizes. The complete file length would be 14 plus `body_length`. The class validates header state only; record I/O, pack size targets, naming, integrity checking, and finalization still require review and implementation approval. Four focused tests cover the wire format, header size, supported version, and inconsistent counts or lengths.
 
-The listed common-header fields total 44 bytes. Suggested length semantics (OPEN): count all bytes following the common header up to the next record, including any type-specific subheader and the entire stored cryptographic envelope, including authentication tags. This allows a structural scan without interpreting each object's type. Reject lengths above the 16 GiB stored-body ceiling when reading or writing; framing validation must also check that the declared bytes are available. This framing ceiling does not change the chunk-size defaults in chapter 8.2. Integer byte order remains open.
+#### Common object header (agreed development format)
+
+All integer fields are unsigned and little endian, with no alignment padding. The common object-format version is initially `1`, independent of the application release. Optional type-specific subheaders and payload schemas remain under discussion.
+
+| Offset | Field | Encoding | Meaning |
+| --- | --- | --- | --- |
+| 0 | `type` | 2-byte unsigned integer (`uint16`) | `1`: data object containing one file chunk; `2`: metadata object describing files, attributes, and chunk references; `3`: snapshot root. Other values are unsupported. |
+| 2 | `version` | 2-byte unsigned integer (`uint16`) | Common object-format version, currently `1`. Other versions are unsupported. |
+| 4 | `id` | 32 binary bytes | HMAC-SHA-256 plaintext identifier during development. The algorithm is not user-configurable; there is no ID-length field. |
+| 36 | `length` | 8-byte unsigned integer (`uint64`) | Number of stored body bytes following the header, including any subheader and the entire cryptographic envelope. Maximum: 16 GiB (17,179,869,184 bytes). |
+
+The common header is exactly 44 bytes (`<HH32sQ` in Python's `struct` notation). The header codec rejects unsupported types and versions, IDs of an incorrect length, negative body lengths, and lengths above 16 GiB. Decoding requires exactly 44 input bytes. At this layer, a declared body length of zero is representable; validity of the actual body and cryptographic envelope requires later validation. The codec does not read or allocate the body and does not authenticate it or recompute its ID. A future pack reader must also check that the declared bytes are available. This framing ceiling does not change the chunk-size defaults in chapter 8.2.
 
 The current proposal retains one stored-body length. A separate encrypted per-object metadata slot is not required by the agreed model and is not selected here. In the newer [Borg 2 pack format](https://borgbackup.readthedocs.io/en/master/internals/packs.html), the metadata slot contains object bookkeeping such as type, compression settings, and original size. Separately encrypting it permits metadata-only authenticated reads without reading/decrypting the data slot. This is distinct from file-metadata objects containing paths, attributes, and chunk references, which already have their own object identities in our model. Reconsider separate slots only for a concrete requirement. Borg's pair of 4-byte length fields cannot represent our permitted 16 GiB body sizes; a future split must preserve suitable widths and explicit bounds.
 
 Object IDs identify content across object roles within the applicable key domain; identical content of the same role intentionally reuses an ID. Preserve role separation and stable plaintext-based identity. Do not introduce a separate chunk identifier or a ciphertext-based replacement ID.
 
-Keep type-specific subheaders conditional on concrete requirements. Their visibility and encoding, integer byte order, record markers, corruption detection, and safe recovery remain open. Authenticate the cleartext header through the object's AEAD context as required by chapter 7; the plaintext-derived object ID is not itself authentication of that header. No byte layout is accepted by recording this proposal.
+Keep type-specific subheaders conditional on concrete requirements. Their visibility and encoding, corruption detection, and safe recovery remain open. Authenticate the cleartext header through the object's AEAD context as required by chapter 7; the plaintext-derived object ID is not itself authentication of that header. Approval of the common header does not select the object body, encryption envelope, or complete pack format.
 
 ## 9. Snapshots and authoritative server metadata
 
@@ -274,6 +281,8 @@ Each completed snapshot MUST have its own stable identity and an encrypted root 
 
 The encrypted snapshot root references file-metadata objects, which in turn reference data objects. The authoritative server record separately captures the complete required object membership. This describes logical relationships, not a prescribed serialization or tree shape.
 
+The root is an ordinary client-encrypted object of type `3`, with an object ID and a pack location. A pack containing a root does not contain the whole snapshot by implication: the referenced metadata and data objects may reside in other packs and be shared with other snapshots. The server-owned catalogue records the snapshot identity and root ID; the location index resolves that root ID to a pack and byte range. Client restoration follows the decrypted references. The server preserves all accepted dependencies using its separately recorded membership without decrypting the root.
+
 Snapshots MAY share unchanged data and metadata objects within the permitted deduplication scope. Logical objects required by retained snapshots MUST NOT be changed in place by a client.
 
 Restore MUST NOT depend on replaying earlier snapshots. Deleting the first snapshot cannot invalidate a retained later snapshot.
@@ -281,6 +290,8 @@ Restore MUST NOT depend on replaying earlier snapshots. Deleting the first snaps
 Avoid a design that requires replacing a single client-controlled global manifest on every backup. Independent roots still require a durable server-owned catalogue and a crash-safe publication mechanism. SQLite has been explicitly rejected; the concrete catalogue persistence mechanism remains OPEN.
 
 OPEN: snapshot ID generation, root/content ID relationship, metadata chunking, serialization, and metadata reuse strategy.
+
+Each snapshot MUST also have its own snapshot-specific metadata, distinct from source file attributes. The client-encrypted snapshot description must retain the configuration used for the run; descriptive text, source-side timing, and summary statistics are possible additional fields whose schema remains OPEN. The snapshot root carries or references this metadata; inline placement versus separate metadata objects is not decided here. The server separately owns authoritative commit time, scope, membership, and protection state. Client-reported snapshot timestamps cannot determine protection expiry. No snapshot metadata implementation is authorized by this clarification.
 
 ### 9.2 File metadata and consistency
 
@@ -302,6 +313,8 @@ Membership may be declared by a client, but the server MUST validate existence a
 Server-readable object membership reveals relationships among opaque objects. This is an intentional consequence of our server-enforced protection model; it is not a promise to hide the entire object graph from the server.
 
 The authoritative snapshot catalogue and its committed dependencies MUST NOT be replaceable by a client. Define storage, checking, and recovery for this authority separately from rebuildable location indexes and caches.
+
+The snapshot header does not contain `object_count`. The count belongs to the per-snapshot object catalogue; its encoding remains OPEN. This does not change the separate pack header's object count.
 
 ## 10. Storage backend in version 1.0
 
@@ -381,11 +394,15 @@ Each repository has a server-controlled minimum protection duration. Default: se
 For a completed snapshot:
 
 ```text
-protected_by_server = server_now < server_commit_time + protection_period
+effective_protected_until = max(snapshot.protected_until,
+                                snapshot.committed_at + current_server_protection_interval)
+protected_by_server = server_now < effective_protected_until
 keep_snapshot = retention_selects_snapshot OR protected_by_server
 ```
 
 `server_commit_time` is assigned by the server when completion is committed. A client-provided historical timestamp may be preserved separately but cannot determine protection expiry.
+
+The stored `snapshot.protected_until` is server-controlled. Evaluate the effective expiry using the currently configured server interval as shown above. A shorter current interval cannot undercut the stored protection deadline; a longer current interval can extend effective protection for existing snapshots. Deletion through retention is permitted only after effective protection has expired and retention no longer selects the snapshot.
 
 Protection covers every object required for complete restoration, including data chunks first stored long before the snapshot. Object age does not determine whether an object can be deleted.
 
@@ -397,7 +414,7 @@ After a completed backup, the server automatically evaluates the set's retention
 
 The server MUST enforce protection at every application-level deletion path, not merely during a scheduled prune job. No ordinary client or maintenance API may bypass it. A host administrator with direct filesystem control remains outside this guarantee.
 
-OPEN: exact calendar/count retention semantics, timezone handling, changes to server protection duration, treatment of retired sets, and any explicit administrator override. Preserve the last completed snapshot automatically only if Thomas adopts that additional policy; it is not currently an agreed requirement.
+OPEN: exact calendar/count retention semantics, timezone handling, treatment of retired sets, and any explicit administrator override. Preserve the last completed snapshot automatically only if Thomas adopts that additional policy; it is not currently an agreed requirement.
 
 ### 12.1 Liveness and garbage collection
 
@@ -406,6 +423,8 @@ Logical snapshot removal and physical object reclamation may be separate operati
 The server MUST derive liveness from its authoritative records for retained snapshots and active operations. It MUST NOT rely solely on traversing client-encrypted file metadata or on a client-replaceable reference cache.
 
 Tracing and reference counting remain alternatives to evaluate. Borg 2's choice of garbage collection does not automatically settle our implementation.
+
+Pack compaction reclaims space occupied by objects that are no longer required by retained snapshots or active operations. Copy the still-live object records unchanged into replacement packs; do not decrypt, recompress, or change their object IDs. Persist the replacements and switch their location-index entries durably before removing old packs, accounting for active readers. A wholly unused pack can be removed without copying; a wholly live pack needs no reclamation. Snapshot roots, metadata, and data have the same liveness protection. Exact selection thresholds, concurrency, crash recovery, and publication mechanics remain OPEN; compaction is not implemented by the header increment.
 
 Any rebuild of acceleration indexes MUST preserve the distinction between cached locations and indispensable server authority. Do not infer historical protection timestamps or overwrite committed membership from client-provided metadata during repair.
 
@@ -519,11 +538,14 @@ Each set has a local backup-description file, conceptually similar to a borgmati
 - New includes affect future snapshots; exclusions do not rewrite previous snapshots.
 - Retention changes may affect older snapshots, subject to server protection.
 - Save the used description encrypted as part of the snapshot for reproducibility.
+- The set identity groups runs whose configuration may differ. Each snapshot preserves its own captured configuration inside the client-encrypted snapshot description; later edits do not replace that historical configuration.
 - Pass the server the validated operational retention metadata needed to evaluate policy without decrypting the description.
 - An invalid description fails the run and cannot become an empty/default deletion policy.
 - The host-level backup mode defaults to `pull` and can be set to `push`; exact file placement remains OPEN.
 
 OPEN: syntax, file locations, schema, supported rule vocabulary, and scheduling configuration location. Do not assume existing `retentions` semantics without review.
+
+OPEN: visibility of source-selection configuration during the separate pre-run configuration exchange. Encrypting the archived copy in the snapshot does not hide fields separately disclosed to the server. Resolve whether the exchange sends the full configuration or only required operational fields before claiming that source paths and exclusions are hidden from the server.
 
 See the [configuration roadmap](03-CONFIGURATION-ROADMAP.md) for planned settings, their authority and scope, and candidates that still need a decision.
 
@@ -636,6 +658,8 @@ This order may change by agreement. Early prototypes are not production backup t
 
 The immediate focus is the server-side snapshot core with real chunks, packs, and snapshots. Tests take the client role and exercise the actual archive-processing and server-storage code; a placeholder `client.py` or dummy-client application is not part of the initial scope. The source-side processing used by tests remains separate from the keyless server. Review the first object/pack format, catalogue persistence, cryptographic choices, and commit sequence before implementation; any experimental format must be identified as such. Incomplete platform support or other explicitly bounded gaps may remain, but synthetic opaque payloads alone are not the main end-to-end test. Use a package hierarchy that leaves clear homes for archive processing, server policy, storage, and transport as the project grows. The exact module layout remains a proposal; no implementation scaffolding or test code is authorized by this planning step alone.
 
+Explicitly approved on 2026-11-19: implement the common header codec as the immutable concrete class `Object` in `src/p8472backup/archive/objects.py`, with focused tests in `test/unit/archive/test_objects.py`. `to_header()` returns the serialized header; the class method `from_header()` returns an `Object`, not a tuple of fields. Construction validates the header state. Configure mypy's source search path relative to `pyproject.toml` so individual-file checking finds the package. Payload handling is discussion-only and is not authorized for implementation by this increment. The remaining pack and snapshot implementation still requires explicit approval.
+
 The non-normative [project structure proposal](02-PROJECT-STRUCTURE.md) describes the proposed package hierarchy and first test-driven snapshot increment. Package naming, file-based catalogue details, and the exact module breakdown require review; this specification remains the requirements authority.
 
 ### 20.1 Initial focus: archive design and dedicated tests
@@ -695,10 +719,12 @@ Borg 2 is inspiration, not a dependency or compatibility target. Its development
 
 Server-readable authoritative membership and server-enforced protection are project-specific requirements. They take precedence over Borg's different client-trust assumptions.
 
+When Thomas refers to Borg 2, use the current upstream development state and identify the inspected version or revision. The distribution-packaged Borg version is not the conceptual reference. Runtime dependency availability remains a separate concern under chapter 3.
+
 The adopted Borg 2 ideas guide the design as written here. New external development-documentation changes are reference material, not automatic amendments to this specification. Review concepts and code before reuse, and check licensing before incorporating source code.
 
 ## 24. First instruction to Codex
 
 Read this specification and inspect the actual repository and its instructions. Begin with archive and repository design as described in chapter 20. Summarize established requirements, work through concrete snapshot and object examples, and identify the few decisions needed for the first local backup/restore increment. Propose a small initial design and dedicated behavioural tests, including durability and encryption boundaries. Do not scaffold the complete product or silently decide the unresolved storage and cryptographic formats. Proceed with implementation in reviewable increments as directed by Thomas.
 
-Apply AES-256 AEAD with session-derived encryption keys, HMAC-SHA-256 object IDs of 32 bytes during development, independent snapshot roots, server-owned membership, late server publication, per-file content-defined chunking with the agreed initial sizes, physical packs, and the version 1.0 `file` backend boundary as the agreed direction. Argon2id is mandatory for the client's master passphrase. GCM versus OCB, identifier-key derivation and role separation, session KDF, chunker choice, compression choice, pack format and parameters, and other storage formats remain subject to the explicitly OPEN decisions and the quantum-security review. The object-ID algorithm is not user-configurable; a pre-release code change remains possible, and migration is deferred. Detailed object-format design is deferred to a later discussion. Do not implement native remote backends or a dynamic plugin platform in the initial increment.
+Apply AES-256 AEAD with session-derived encryption keys, HMAC-SHA-256 object IDs of 32 bytes during development, independent snapshot roots, server-owned membership, late server publication, per-file content-defined chunking with the agreed initial sizes, physical packs, and the version 1.0 `file` backend boundary as the agreed direction. Argon2id is mandatory for the client's master passphrase. GCM versus OCB, identifier-key derivation and role separation, session KDF, chunker choice, compression choice, pack format and parameters, and other storage formats remain subject to the explicitly OPEN decisions and the quantum-security review. The object-ID algorithm is not user-configurable; a pre-release code change remains possible, and migration is deferred. The common header is agreed; object-body and pack formats require further review. Do not implement native remote backends or a dynamic plugin platform in the initial increment.
