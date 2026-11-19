@@ -120,7 +120,7 @@ Before coding, review the minimal object/pack framing, snapshot record serializa
 
 ## 5. Existing project metadata
 
-The current `pyproject.toml` sets both the Python requirement and mypy target to Python 3.12. Package discovery uses `src/`, import sorting recognizes `p8472backup`, and pytest discovers tests under `test/` with `src/` on its import path. Mypy's `mypy_path` uses `$MYPY_CONFIG_FILE_DIR/src`, independently of pytest's path configuration, so individual-file checks resolve `p8472backup`. These settings support the first header codec and its tests.
+The current `pyproject.toml` sets both the Python requirement and mypy target to Python 3.12. Package discovery uses `src/`, import sorting recognizes `p8472backup`, and pytest discovers tests under `test/` with `src/` on its import path. Mypy's `mypy_path` uses `$MYPY_CONFIG_FILE_DIR/src`, independently of pytest's path configuration, so individual-file checks resolve `p8472backup`. The lint workflow installs `pytest>=8.3.0` alongside Ruff and mypy because `mypy .` also checks the test modules and needs to resolve their pytest imports and typed decorators. These settings support the first header codec and its tests.
 
 The current dependency entries specify lower bounds, not exact version pins. They are not constrained to Trixie's tool versions under the clarified development-dependency policy. The build requirement for `setuptools-scm` is now explicitly `>=10.3.4`. A build or installed-tool compatibility check is separate from checking published version and Python metadata.
 
