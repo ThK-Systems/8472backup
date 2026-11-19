@@ -23,7 +23,7 @@ line-length = 240
 [tool.ruff.lint]
 select = ["E", "W", "F", "I", "UP", "N", "RET", "ARG", "ANN", "S"]
 fixable = ["ALL"]
-per-file-ignores = { "tests/*.py" = [
+per-file-ignores = { "test/**/*.py" = [
     "ANN",
     "ARG001",
     "ARG005",
@@ -41,10 +41,11 @@ line-ending = "lf"
 combine-as-imports = true
 force-single-line = false
 lines-after-imports = 2
-known-first-party = ["8472backup"]
+known-first-party = ["p8472backup"]
 
 [tool.mypy]
 python_version = "3.12"
+mypy_path = "$MYPY_CONFIG_FILE_DIR/src"
 strict = true
 disallow_untyped_defs = true
 disallow_incomplete_defs = true
@@ -62,14 +63,14 @@ addopts = "-v --tb=short --maxfail=3 --cache-clear"
 testpaths = ["test"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
-pythonpath = ["."]
+pythonpath = ["src"]
 
 [build-system]
 requires = ["setuptools>=82.0.1", "setuptools-scm>=10.3.4"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools]
-py-modules = ["8472backup"]
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.setuptools_scm]
 version_scheme = "post-release"
