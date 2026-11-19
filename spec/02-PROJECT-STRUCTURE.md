@@ -6,12 +6,16 @@ Explicitly approved increment, 2026-11-19: the immutable `Object` class and its 
 
 Also explicitly approved: the immutable `Pack` header class in `src/p8472backup/storage/file/packs.py`, with four focused tests in `test/unit/storage/file/test_packs.py`. It implements the 14-byte header; record I/O and compaction remain unimplemented.
 
+Also explicitly approved: data-only immutable `Snapshot` and `ObjectCatalogue` classes in `src/p8472backup/server/snapshots.py`. Custom methods, validation, and serialization are deferred; this increment adds no new tests for generated dataclass behavior.
+
+Also explicitly approved: the data-only immutable `ObjectLocation` class in `src/p8472backup/storage/file/index.py` and an opt-in native-hash/LMDB comparison in `test/benchmark/compare_location_indexes.py`. The comparison libraries are optional benchmark tools, not selected runtime dependencies. Production index methods and persistence remain unimplemented. See [benchmark notes](04-LOCATION-INDEX-BENCHMARK.md).
+
 ## 1. Agreed starting point
 
 - Python 3.12 is the minimum version.
 - Start with real file contents, content-defined chunks, physical packs, and complete snapshots.
 - Tests perform the client-side work and drive the real server repository operations. No placeholder client application is needed.
-- SQLite is excluded.
+- SQLite is permitted for location-index benchmarking following Thomas's explicit reconsideration. No production database is selected, and a database must not substitute for real chunks, packs, or snapshots.
 - Runtime dependencies must be available as Debian Trixie packages. Build and development/test tools are exempt from that availability restriction. Their installation method is not decided here; the existing no-pip instruction remains in force.
 - The source-side processing and the keyless server retain their separate responsibilities even when the tests run them in one process.
 
@@ -29,6 +33,7 @@ src/
       compression.py
       crypto.py
     server/
+      snapshots.py
       repository.py
       catalogue.py
       retention.py

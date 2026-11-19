@@ -1,0 +1,258 @@
+{
+  "recorded_on": "2026-11-19",
+  "environment": {
+    "python": "3.13.5",
+    "platform": "Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.41",
+    "directory": "/home/tkn/8472backup",
+    "entry_bytes": 56
+  },
+  "packages": {
+    "python3-plyvel": "1.5.1-1+b3",
+    "libleveldb1d": "1.23-5+b2",
+    "libsnappy1v5": "1.2.2-1"
+  },
+  "memory_limit_enforced": false,
+  "notes": "Same WSL2 ext4 virtual disk. end_resident_mib is a current reading before closing remaining handles, not peak components. See 05-PLYVEL-EVALUATION.md.",
+  "runs": [
+    {
+      "backend": "plyvel",
+      "version": "1.5.1",
+      "plyvel_options": {
+        "lru_cache_size": 4194304,
+        "write_buffer_size": 1048576,
+        "max_open_files": 64,
+        "bloom_filter_bits": 10,
+        "compression": null,
+        "paranoid_checks": true
+      },
+      "mode": "pull",
+      "cache": "OS cache uncontrolled",
+      "entries_per_client": 100000,
+      "backup_clients": 3,
+      "mount_clients": 2,
+      "baseline_mib": 25.11,
+      "peak_rss_mib": 52.62,
+      "end_resident_mib": {
+        "RssAnon": 14.84,
+        "RssFile": 25.21
+      },
+      "within_64_mib": true,
+      "within_128_mib": true,
+      "load_s": 0.1423,
+      "elapsed_s": 1.0171,
+      "checked_queries": 100000,
+      "lookup_us_mean": 17.141,
+      "persist_s_sum": 0.0193
+    },
+    {
+      "backend": "plyvel",
+      "version": "1.5.1",
+      "plyvel_options": {
+        "lru_cache_size": 4194304,
+        "write_buffer_size": 1048576,
+        "max_open_files": 64,
+        "bloom_filter_bits": 10,
+        "compression": null,
+        "paranoid_checks": true
+      },
+      "mode": "pull",
+      "cache": "DONTNEED requested; not guaranteed cold",
+      "entries_per_client": 100000,
+      "backup_clients": 3,
+      "mount_clients": 2,
+      "baseline_mib": 25.11,
+      "peak_rss_mib": 51.12,
+      "end_resident_mib": {
+        "RssAnon": 12.45,
+        "RssFile": 25.3
+      },
+      "within_64_mib": true,
+      "within_128_mib": true,
+      "load_s": 0.0456,
+      "elapsed_s": 0.8863,
+      "checked_queries": 100000,
+      "lookup_us_mean": 16.103,
+      "persist_s_sum": 0.0211
+    },
+    {
+      "backend": "plyvel",
+      "version": "1.5.1",
+      "plyvel_options": {
+        "lru_cache_size": 4194304,
+        "write_buffer_size": 1048576,
+        "max_open_files": 64,
+        "bloom_filter_bits": 10,
+        "compression": null,
+        "paranoid_checks": true
+      },
+      "mode": "push",
+      "cache": "OS cache uncontrolled",
+      "entries_per_client": 100000,
+      "backup_clients": 3,
+      "mount_clients": 2,
+      "baseline_mib": 25.11,
+      "peak_rss_mib": 57.99,
+      "end_resident_mib": {
+        "RssAnon": 12.94,
+        "RssFile": 44.43
+      },
+      "within_64_mib": true,
+      "within_128_mib": true,
+      "load_s": 0.0412,
+      "elapsed_s": 4.1973,
+      "checked_queries": 100000,
+      "lookup_us_mean": 203.153,
+      "persist_s_sum": 0.0553
+    },
+    {
+      "backend": "plyvel",
+      "version": "1.5.1",
+      "plyvel_options": {
+        "lru_cache_size": 4194304,
+        "write_buffer_size": 1048576,
+        "max_open_files": 64,
+        "bloom_filter_bits": 10,
+        "compression": null,
+        "paranoid_checks": true
+      },
+      "mode": "push",
+      "cache": "DONTNEED requested; not guaranteed cold",
+      "entries_per_client": 100000,
+      "backup_clients": 3,
+      "mount_clients": 2,
+      "baseline_mib": 25.11,
+      "peak_rss_mib": 58.18,
+      "end_resident_mib": {
+        "RssAnon": 12.81,
+        "RssFile": 44.74
+      },
+      "within_64_mib": true,
+      "within_128_mib": true,
+      "load_s": 0.0408,
+      "elapsed_s": 4.0596,
+      "checked_queries": 100000,
+      "lookup_us_mean": 196.63,
+      "persist_s_sum": 0.0356
+    },
+    {
+      "backend": "plyvel",
+      "version": "1.5.1",
+      "plyvel_options": {
+        "lru_cache_size": 4194304,
+        "write_buffer_size": 1048576,
+        "max_open_files": 64,
+        "bloom_filter_bits": 10,
+        "compression": null,
+        "paranoid_checks": true
+      },
+      "mode": "pull",
+      "cache": "OS cache uncontrolled",
+      "entries_per_client": 1000000,
+      "backup_clients": 3,
+      "mount_clients": 2,
+      "baseline_mib": 25.23,
+      "peak_rss_mib": 208.32,
+      "end_resident_mib": {
+        "RssAnon": 12.88,
+        "RssFile": 60.0
+      },
+      "within_64_mib": false,
+      "within_128_mib": false,
+      "load_s": 0.1826,
+      "elapsed_s": 1.952,
+      "checked_queries": 100000,
+      "lookup_us_mean": 22.863,
+      "persist_s_sum": 0.012
+    },
+    {
+      "backend": "plyvel",
+      "version": "1.5.1",
+      "plyvel_options": {
+        "lru_cache_size": 4194304,
+        "write_buffer_size": 1048576,
+        "max_open_files": 64,
+        "bloom_filter_bits": 10,
+        "compression": null,
+        "paranoid_checks": true
+      },
+      "mode": "pull",
+      "cache": "DONTNEED requested; not guaranteed cold",
+      "entries_per_client": 1000000,
+      "backup_clients": 3,
+      "mount_clients": 2,
+      "baseline_mib": 25.23,
+      "peak_rss_mib": 208.4,
+      "end_resident_mib": {
+        "RssAnon": 12.44,
+        "RssFile": 96.65
+      },
+      "within_64_mib": false,
+      "within_128_mib": false,
+      "load_s": 0.0699,
+      "elapsed_s": 2.5727,
+      "checked_queries": 100000,
+      "lookup_us_mean": 39.434,
+      "persist_s_sum": 0.013
+    },
+    {
+      "backend": "plyvel",
+      "version": "1.5.1",
+      "plyvel_options": {
+        "lru_cache_size": 4194304,
+        "write_buffer_size": 1048576,
+        "max_open_files": 64,
+        "bloom_filter_bits": 10,
+        "compression": null,
+        "paranoid_checks": true
+      },
+      "mode": "push",
+      "cache": "OS cache uncontrolled",
+      "entries_per_client": 1000000,
+      "backup_clients": 3,
+      "mount_clients": 2,
+      "baseline_mib": 25.23,
+      "peak_rss_mib": 340.23,
+      "end_resident_mib": {
+        "RssAnon": 13.07,
+        "RssFile": 297.26
+      },
+      "within_64_mib": false,
+      "within_128_mib": false,
+      "load_s": 0.0601,
+      "elapsed_s": 5.1304,
+      "checked_queries": 100000,
+      "lookup_us_mean": 245.108,
+      "persist_s_sum": 0.0123
+    },
+    {
+      "backend": "plyvel",
+      "version": "1.5.1",
+      "plyvel_options": {
+        "lru_cache_size": 4194304,
+        "write_buffer_size": 1048576,
+        "max_open_files": 64,
+        "bloom_filter_bits": 10,
+        "compression": null,
+        "paranoid_checks": true
+      },
+      "mode": "push",
+      "cache": "DONTNEED requested; not guaranteed cold",
+      "entries_per_client": 1000000,
+      "backup_clients": 3,
+      "mount_clients": 2,
+      "baseline_mib": 25.23,
+      "peak_rss_mib": 339.01,
+      "end_resident_mib": {
+        "RssAnon": 12.88,
+        "RssFile": 324.89
+      },
+      "within_64_mib": false,
+      "within_128_mib": false,
+      "load_s": 0.0435,
+      "elapsed_s": 5.0578,
+      "checked_queries": 100000,
+      "lookup_us_mean": 240.613,
+      "persist_s_sum": 0.0575
+    }
+  ]
+}

@@ -1,6 +1,6 @@
 # 8472backup — Purpose, Scope, and Architecture
 
-Specification version: 0.34 — Provisional data without a separate staging structure, 2026-11-19
+Specification version: 0.41 — Include SQLite in location-index evaluation, 2026-11-19
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 
@@ -47,6 +47,10 @@ After setup, scheduled backup, protection enforcement, retention, and eligible s
 - Full non-Linux support is outside version 1.0.
 
 Performance and storage efficiency comparable to Borg are goals requiring benchmarks, not pre-existing guarantees.
+
+Design for HDD-backed backup storage and low available RAM on modest server hardware. The location-index design must not assume that complete indexes for all clients fit in physical memory; an individual index may also exceed available RAM. Evaluate bounded application buffers, batched lookups, and disk-access locality. Compare warm-cache and cold-HDD behavior and measure actual memory use before selecting the index engine. LMDB and the current Borg 2 in-memory hash-index approach are evaluation references, not adopted implementations or dependencies. Thomas explicitly excludes `borghash` as a production dependency because upstream declares its API unstable and provides no migration tools for its serialized tables. Its recorded measurements remain comparison evidence; a custom replacement is not authorized by this exclusion.
+
+Target 64–128 MiB of working memory across all server operations combined, not per client, index, or request. Include simultaneous push operations and one or two mount readers; pull backups may process clients serially. Indexes, catalogues, payload/transport buffers, and interpreter overhead share this budget. The initial index benchmark measures the complete operation process, but does not implement a production memory limiter or account for unimplemented server functions. A memory-mapping size is not a RAM limit. Reclaimable mapped file pages must be distinguished from anonymous allocations when assessing whether an engine can work under a hard limit.
 ## 4. Domain model and identity
 
 The agreed interpretation is:

@@ -1,6 +1,6 @@
 # 8472backup — Verification and Development
 
-Specification version: 0.34 — Provisional data without a separate staging structure, 2026-11-19
+Specification version: 0.41 — Include SQLite in location-index evaluation, 2026-11-19
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 
@@ -55,6 +55,10 @@ Tests must exercise behaviour and invariants, not merely mirror implementation. 
 Use integration tests and targeted fault injection for durability claims. Compare restored bytes and agreed metadata, not only command exit codes.
 
 Benchmark representative unchanged backups, local edits in large files, many small files, restore, mount, and cleanup. Record environment, storage, cache state, CPU, memory, throughput, and repository growth. Do not claim Borg-equivalent performance without comparable measurements.
+
+Plyvel/LevelDB is an additional evaluation candidate, not an adopted runtime dependency or repository format. SQLite has also been approved for evaluation; see the [SQLite assessment](06-SQLITE-EVALUATION.md). The manual comparison defaults to LMDB, Plyvel, and SQLite; rejected borghash remains available only as an explicit historical reference. See the [Plyvel assessment](05-PLYVEL-EVALUATION.md) for API, concurrency, memory accounting, and measured limitations.
+
+The opt-in `test/benchmark/compare_location_indexes.py` compares the current Borg 2 hash-table library with LMDB using synthetic 32-byte keys and 24-byte location values. Measure serial pull clients and concurrent push clients, both with up to two additional mount readers. Apply the 64–128 MiB target to the combined operation process, including its interpreter, native allocations, and resident mapped pages. Report budget violations; this benchmark does not enforce an operating-system memory limit. Dataset preparation is isolated from operation measurements. Keep it outside normal pytest collection. The [benchmark notes](04-LOCATION-INDEX-BENCHMARK.md) describe setup, measured results, and limitations; neither candidate is selected for production.
 
 Use purpose-written Python tests, temporary directories, representative data, and fault injection alongside each increment. Add actual process interruption and restart tests when persistent commit/recovery exists: simulated failures alone do not establish crash durability.
 

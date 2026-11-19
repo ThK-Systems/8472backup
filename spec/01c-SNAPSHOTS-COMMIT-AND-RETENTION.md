@@ -1,6 +1,6 @@
 # 8472backup — Snapshots, Commit, and Retention
 
-Specification version: 0.34 — Provisional data without a separate staging structure, 2026-11-19
+Specification version: 0.41 — Include SQLite in location-index evaluation, 2026-11-19
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 
@@ -10,6 +10,10 @@ requirements and agreed architectural direction; early design phase. No producti
 
 Each completed snapshot MUST have its own stable identity and an encrypted root object describing how to reach its complete recoverable file selection.
 
+Approved data-only implementation, 2026-11-19: `server/snapshots.py` defines immutable dataclasses `Snapshot` and `ObjectCatalogue`. `Snapshot` contains `snapshot_id`, `client_id`, and `backup_set_id` as `UUID` values; `root_id` as `bytes`; `committed_at` and `protected_until` as `datetime` values; an `object_catalog` reference; and `version`, initially 1. `ObjectCatalogue` contains `object_ids` as a `frozenset[bytes]`. These are in-memory data types, not a selected binary representation. Custom methods, runtime validation, protection calculations, and serialization are deferred. The intended root-ID length, UTC timestamps, and membership invariants remain design requirements for later validation.
+
+Snapshot annotations use the shared `ObjectId` alias from `archive/objects.py`: `root_id: ObjectId` and `ObjectCatalogue.object_ids: frozenset[ObjectId]`. The underlying values remain bytes; snapshot validation is still deferred.
+
 The encrypted snapshot root references file-metadata objects, which in turn reference data objects. The authoritative server record separately captures the complete required object membership. This describes logical relationships, not a prescribed serialization or tree shape.
 
 The root is an ordinary client-encrypted object of type `3`, with an object ID and a pack location. A pack containing a root does not contain the whole snapshot by implication: the referenced metadata and data objects may reside in other packs and be shared with other snapshots. The server-owned catalogue records the snapshot identity and root ID; the location index resolves that root ID to a pack and byte range. Client restoration follows the decrypted references. The server preserves all accepted dependencies using its separately recorded membership without decrypting the root.
@@ -18,7 +22,7 @@ Snapshots MAY share unchanged data and metadata objects within the permitted ded
 
 Restore MUST NOT depend on replaying earlier snapshots. Deleting the first snapshot cannot invalidate a retained later snapshot.
 
-Avoid a design that requires replacing a single client-controlled global manifest on every backup. Independent roots still require a durable server-owned catalogue and a crash-safe publication mechanism. SQLite has been explicitly rejected; the concrete catalogue persistence mechanism remains OPEN.
+Avoid a design that requires replacing a single client-controlled global manifest on every backup. Independent roots still require a durable server-owned catalogue and a crash-safe publication mechanism. The concrete catalogue persistence mechanism remains OPEN. SQLite is now permitted for location-index evaluation only; it has not been selected for the authoritative snapshot catalogue.
 
 OPEN: snapshot ID generation, root/content ID relationship, metadata chunking, serialization, and metadata reuse strategy.
 
@@ -116,7 +120,7 @@ The server commit time, never a client-supplied date, starts minimum protection.
 
 Define persistent states for staging, data and index persistence, accepted membership, commit publication, logical pruning, garbage collection, and pack compaction. A cache or location-index rebuild does not reconstruct authoritative historical protection state.
 
-OPEN: serialization, snapshot/root identifiers, catalogue and index persistence, transaction mechanism, fsync and atomicity boundaries, data integrity checks for opaque ciphertext, and corruption recovery. SQLite is excluded. Review the concrete persistence and pack formats before implementation.
+OPEN: serialization, snapshot/root identifiers, catalogue and index persistence, transaction mechanism, fsync and atomicity boundaries, data integrity checks for opaque ciphertext, and corruption recovery. SQLite may be benchmarked as a location-index candidate. This does not select a production engine or authorize catalogue persistence. Review the concrete persistence and pack formats before implementation.
 
 ### 11.1 Backup-run locking
 

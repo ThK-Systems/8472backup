@@ -21,6 +21,7 @@ Status: project terminology, 2026-11-13. These definitions explain the model in 
 | **Pack header** | The agreed 14-byte prefix: format version (2 bytes), object count (4 bytes), and body length (8 bytes), all unsigned little endian. Body length includes every object header and stored body. The current `Pack` class represents and validates these fields; it does not yet read or write pack records. |
 | **Compaction** | Physical space reclamation by copying still-live object records unchanged from partly unused packs into replacements, durably updating their locations, and removing old packs when safe. It preserves object IDs and snapshot contents. |
 | **Location index** | The repository-level mapping for one backup client from an object ID to its pack, offset, and stored length, interpreted within the applicable key domain. Mutations are serialized under that client's repository mutation lock. It locates stored bytes; it does not describe files or establish snapshot membership. Index reconstruction is distinct from cryptographic verification. |
+| **Object location** | The immutable `ObjectLocation` record: a 32-byte object ID, numeric pack ID, absolute offset of the object header, and complete stored record length including that header. Each integer requires 8 unsigned bytes, totaling 56 raw bytes with the key. Python instance memory and the persistent index representation are separate concerns. Repository and key-domain context is external. |
 
 ### Usage example
 

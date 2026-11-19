@@ -1,0 +1,207 @@
+{
+  "recorded_on": "2026-11-19",
+  "environment": {
+    "python": "3.13.5",
+    "platform": "Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.41",
+    "directory": "/home/tkn/8472backup",
+    "entry_bytes": 56
+  },
+  "library": "SQLite 3.46.1",
+  "debian_package": "libsqlite3-0 3.46.1-7+deb13u2",
+  "settings": {
+    "journal_mode": "wal",
+    "synchronous": 2,
+    "cache_size": -4096,
+    "mmap_size": 0,
+    "connections_per_active_client": 1,
+    "schema": "WITHOUT ROWID, 32-byte key, 24-byte location BLOB"
+  },
+  "memory_limit_enforced": false,
+  "notes": "RSS excludes unmapped filesystem cache, controller and preparation. DONTNEED is advisory. WAL-reset fix backport status unverified. See 06-SQLITE-EVALUATION.md.",
+  "runs": [
+    {
+      "backend": "sqlite3",
+      "version": "3.46.1",
+      "plyvel_options": null,
+      "mode": "pull",
+      "cache": "OS cache uncontrolled",
+      "entries_per_client": 100000,
+      "backup_clients": 3,
+      "mount_clients": 2,
+      "baseline_mib": 24.12,
+      "peak_rss_mib": 45.1,
+      "end_resident_mib": {
+        "RssAnon": 29.23,
+        "RssFile": 12.25
+      },
+      "within_64_mib": true,
+      "within_128_mib": true,
+      "load_s": 0.0024,
+      "elapsed_s": 1.0529,
+      "checked_queries": 100000,
+      "lookup_us_mean": 21.098,
+      "persist_s_sum": 0.0465
+    },
+    {
+      "backend": "sqlite3",
+      "version": "3.46.1",
+      "plyvel_options": null,
+      "mode": "pull",
+      "cache": "DONTNEED requested; not guaranteed cold",
+      "entries_per_client": 100000,
+      "backup_clients": 3,
+      "mount_clients": 2,
+      "baseline_mib": 24.12,
+      "peak_rss_mib": 41.62,
+      "end_resident_mib": {
+        "RssAnon": 28.21,
+        "RssFile": 12.38
+      },
+      "within_64_mib": true,
+      "within_128_mib": true,
+      "load_s": 0.0218,
+      "elapsed_s": 1.7138,
+      "checked_queries": 100000,
+      "lookup_us_mean": 33.046,
+      "persist_s_sum": 0.0152
+    },
+    {
+      "backend": "sqlite3",
+      "version": "3.46.1",
+      "plyvel_options": null,
+      "mode": "push",
+      "cache": "OS cache uncontrolled",
+      "entries_per_client": 100000,
+      "backup_clients": 3,
+      "mount_clients": 2,
+      "baseline_mib": 24.12,
+      "peak_rss_mib": 46.32,
+      "end_resident_mib": {
+        "RssAnon": 34.2,
+        "RssFile": 12.12
+      },
+      "within_64_mib": true,
+      "within_128_mib": true,
+      "load_s": 0.0022,
+      "elapsed_s": 12.2607,
+      "checked_queries": 100000,
+      "lookup_us_mean": 606.373,
+      "persist_s_sum": 0.0395
+    },
+    {
+      "backend": "sqlite3",
+      "version": "3.46.1",
+      "plyvel_options": null,
+      "mode": "push",
+      "cache": "DONTNEED requested; not guaranteed cold",
+      "entries_per_client": 100000,
+      "backup_clients": 3,
+      "mount_clients": 2,
+      "baseline_mib": 24.12,
+      "peak_rss_mib": 46.62,
+      "end_resident_mib": {
+        "RssAnon": 34.25,
+        "RssFile": 12.38
+      },
+      "within_64_mib": true,
+      "within_128_mib": true,
+      "load_s": 0.0474,
+      "elapsed_s": 14.3315,
+      "checked_queries": 100000,
+      "lookup_us_mean": 703.59,
+      "persist_s_sum": 0.5127
+    },
+    {
+      "backend": "sqlite3",
+      "version": "3.46.1",
+      "plyvel_options": null,
+      "mode": "pull",
+      "cache": "OS cache uncontrolled",
+      "entries_per_client": 1000000,
+      "backup_clients": 3,
+      "mount_clients": 2,
+      "baseline_mib": 23.83,
+      "peak_rss_mib": 44.88,
+      "end_resident_mib": {
+        "RssAnon": 27.7,
+        "RssFile": 12.12
+      },
+      "within_64_mib": true,
+      "within_128_mib": true,
+      "load_s": 0.0031,
+      "elapsed_s": 1.5238,
+      "checked_queries": 100000,
+      "lookup_us_mean": 30.128,
+      "persist_s_sum": 0.0861
+    },
+    {
+      "backend": "sqlite3",
+      "version": "3.46.1",
+      "plyvel_options": null,
+      "mode": "pull",
+      "cache": "DONTNEED requested; not guaranteed cold",
+      "entries_per_client": 1000000,
+      "backup_clients": 3,
+      "mount_clients": 2,
+      "baseline_mib": 23.83,
+      "peak_rss_mib": 44.86,
+      "end_resident_mib": {
+        "RssAnon": 27.65,
+        "RssFile": 12.25
+      },
+      "within_64_mib": true,
+      "within_128_mib": true,
+      "load_s": 0.0168,
+      "elapsed_s": 11.8346,
+      "checked_queries": 100000,
+      "lookup_us_mean": 213.942,
+      "persist_s_sum": 0.0401
+    },
+    {
+      "backend": "sqlite3",
+      "version": "3.46.1",
+      "plyvel_options": null,
+      "mode": "push",
+      "cache": "OS cache uncontrolled",
+      "entries_per_client": 1000000,
+      "backup_clients": 3,
+      "mount_clients": 2,
+      "baseline_mib": 23.96,
+      "peak_rss_mib": 46.5,
+      "end_resident_mib": {
+        "RssAnon": 34.25,
+        "RssFile": 12.25
+      },
+      "within_64_mib": true,
+      "within_128_mib": true,
+      "load_s": 0.0021,
+      "elapsed_s": 12.8123,
+      "checked_queries": 100000,
+      "lookup_us_mean": 633.389,
+      "persist_s_sum": 0.1771
+    },
+    {
+      "backend": "sqlite3",
+      "version": "3.46.1",
+      "plyvel_options": null,
+      "mode": "push",
+      "cache": "DONTNEED requested; not guaranteed cold",
+      "entries_per_client": 1000000,
+      "backup_clients": 3,
+      "mount_clients": 2,
+      "baseline_mib": 23.96,
+      "peak_rss_mib": 46.5,
+      "end_resident_mib": {
+        "RssAnon": 34.12,
+        "RssFile": 12.38
+      },
+      "within_64_mib": true,
+      "within_128_mib": true,
+      "load_s": 0.0165,
+      "elapsed_s": 8.6045,
+      "checked_queries": 100000,
+      "lookup_us_mean": 418.651,
+      "persist_s_sum": 0.0945
+    }
+  ]
+}
