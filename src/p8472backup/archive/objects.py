@@ -6,7 +6,11 @@ from dataclasses import dataclass
 from struct import Struct
 
 
-_HEADER = Struct("<HH32sQ")
+type ObjectId = bytes
+
+OBJECT_ID_SIZE = 32
+
+_HEADER = Struct(f"<HH{OBJECT_ID_SIZE}sQ")
 
 HEADER_SIZE = _HEADER.size
 FORMAT_VERSION = 1
@@ -22,7 +26,7 @@ class Object:
     """Immutable object header state; payload handling is not implemented yet."""
 
     object_type: int
-    object_id: bytes
+    object_id: ObjectId
     length: int
     version: int = FORMAT_VERSION
 
@@ -34,8 +38,8 @@ class Object:
             raise ValueError(f"Unsupported object type: {self.object_type}")
         if type(self.object_id) is not bytes:
             raise TypeError("Object ID must be bytes")
-        if len(self.object_id) != 32:
-            raise ValueError("Object ID must contain exactly 32 bytes")
+        if len(self.object_id) != OBJECT_ID_SIZE:
+            raise ValueError(f"Object ID must contain exactly {OBJECT_ID_SIZE} bytes")
         if not 0 <= self.length <= MAX_OBJECT_BODY_SIZE:
             raise ValueError("Object body length must be between 0 and 16 GiB")
 
@@ -51,7 +55,7 @@ class Object:
 
         object_type: int
         version: int
-        object_id: bytes
+        object_id: ObjectId
         length: int
         object_type, version, object_id, length = _HEADER.unpack(header)
         return cls(object_type=object_type, object_id=object_id, length=length, version=version)
