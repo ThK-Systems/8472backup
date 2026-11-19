@@ -58,6 +58,12 @@ test/
     test_snapshots.py
 spec/
   01-8472backup-SPEC.md
+  01a-PURPOSE-SCOPE-ARCHITECTURE.md
+  01b-CRYPTOGRAPHY-OBJECTS-AND-PACKS.md
+  01c-SNAPSHOTS-COMMIT-AND-RETENTION.md
+  01d-COMMUNICATION-CONFIGURATION-AND-OPERATIONS.md
+  01e-VERIFICATION-AND-DEVELOPMENT.md
+  01f-FUTURE-WORK-AND-REFERENCES.md
   02-PROJECT-STRUCTURE.md
 ```
 
@@ -101,10 +107,9 @@ repository/
   packs/<key-domain>/
   index/<key-domain>/
   snapshots/<set-id>/
-  staging/<run-id>/
 ```
 
-These are roles and namespaces, not a chosen serialization or naming scheme. Snapshot publication follows durable pack and index persistence and a durable write of the complete server record. The publication operation must be crash-safe, must not replace an existing committed snapshot, and must have defined retry semantics.
+These are roles and namespaces, not a chosen serialization or naming scheme. Unfinished work is represented by the run state and provisional versions of the existing structures; a separate staging structure or directory is not required. Snapshot publication follows durable pack and index persistence and a durable write of the complete server record. The publication operation must be crash-safe, must not replace an existing committed snapshot, and must have defined retry semantics.
 
 Before coding, review the minimal object/pack framing, snapshot record serialization, catalogue publication/recovery sequence, and first concrete chunker/hash/compression/AEAD choices. Real packs require a concrete initial format; any experimental format and its compatibility limits must be explicit. Do not fill those gaps by silently choosing a format or by substituting synthetic end-to-end payloads.
 

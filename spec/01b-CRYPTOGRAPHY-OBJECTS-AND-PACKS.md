@@ -1,0 +1,167 @@
+# 8472backup — Cryptography, Objects, and Packs
+
+Specification version: 0.34 — Provisional data without a separate staging structure, 2026-11-19
+
+requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
+
+## 7. Cryptography and recovery key material
+
+### 7.1 SSH and stored backup encryption are separate
+
+SSH protects communication and authenticates peers. It does not provide the required confidentiality of stored backups from the backup server.
+
+The client MUST compress and encrypt backup objects before transfer. Restore and mount MUST decrypt and verify on the client. The server MUST NOT receive data decryption keys.
+
+There are separate roles for:
+
+- transport authentication credentials;
+- stable secret material for deduplication identifiers;
+- secret material for deriving encryption keys;
+- passphrase-derived keys used to protect stored secret material.
+
+These roles MUST NOT be collapsed into one raw key used interchangeably. Independent keys may be generated or derived through an established KDF with explicit domain separation. Exact construction remains OPEN.
+
+### 7.2 Authenticated encryption
+
+Cryptographic primitives MUST come from established implementations; do not invent or implement cryptographic primitives ourselves. Use AES-256 through an established AEAD implementation rather than assembling encryption and authentication primitives ourselves. GCM versus OCB remains OPEN for later review, including the packaged Python libraries, platform availability, license compatibility, usage limits, and performance.
+
+An encrypted object MUST bind its ciphertext to the intended object identity, object role, format, and repository/key scope through an explicit authenticated context. Additional authenticated data (AAD) is suitable for fields that need authentication without encryption.
+
+Define what is authenticated directly in the envelope and what is bound through references. Reject unexpected object types and unsupported formats. Authentication failure MUST NOT produce accepted restored data.
+
+The exact envelope, authenticated fields, algorithm identifiers, parsing bounds, and decompression limits remain OPEN and must be specified before committing an on-disk format.
+
+### 7.3 Session-derived encryption keys
+
+Adopt session-derived keys as the intended approach for backup object encryption. A session here is a cryptographic writing session, not an SSH session and not necessarily an entire snapshot.
+
+For each new writing session:
+
+1. Generate a fresh session identifier using a cryptographically secure random source.
+2. Derive a session encryption key from durable secret material, the session identifier, and explicit protocol/algorithm context using an established KDF.
+3. Allocate nonces uniquely for every encryption under that key.
+4. Store the public information needed to reconstruct the key and nonce with each object or in an unambiguous, recoverable envelope structure.
+
+This avoids a single persistent encryption counter shared across all backup runs. It does not remove nonce uniqueness or algorithm usage limits.
+
+Requirements:
+
+- Never reuse a session-key/nonce pair for a new encryption.
+- Independent writers MUST have independent sessions or another explicitly proven nonce allocation scheme.
+- Restarted or retried writing MUST NOT resume an old session with a reset counter. A fresh session is the intended default.
+- Define usage limits and start a new session before reaching them.
+- Restore MUST work using durable recovery secrets and stored public session information; it MUST NOT require retaining a separate secret for every historical session.
+- Do not claim forward secrecy: compromise of the durable derivation secret can expose historical data encrypted under keys derived from it.
+
+OPEN: KDF, identifier length, key hierarchy, nonce layout, session lifetime, usage limits, and envelope overhead. Do not copy a cryptographic construction merely because Borg uses it; review it for our libraries and threat model.
+
+### 7.4 Stable identifiers remain independent of sessions
+
+Deduplication identifiers MUST remain stable within their configured host/set key domain across writing sessions. During development, use HMAC-SHA-256 over plaintext with a secret identifier key, through Python's standard-library `hmac` and `hashlib` modules. The ID width is fixed at 32 binary bytes, displayed as 64 hexadecimal characters when needed. The object-ID algorithm is not configurable on either client or server. The development choice may be revisited before release through an explicit code change, with keyed BLAKE3 as a possible candidate. Migration design and implementation are DEFERRED; no migration machinery is requested now. Changing code must not silently reinterpret existing repository identities. Key derivation, role separation, and exact authenticated encoding remain subject to explicit design review.
+
+This development choice adds no runtime dependency. See the [Python HMAC documentation](https://docs.python.org/3.12/library/hmac.html). Other algorithms are not alternative configuration values for object IDs; a pre-release code change is a separate decision.
+
+Session-specific ciphertext MUST NOT define the logical deduplication identity. Existing objects with the same logical ID are reused rather than replaced by a new encryption of the same plaintext.
+
+The server cannot verify a keyed plaintext ID against plaintext without the key. A malicious client can therefore submit bad new content; server authorization and immutability MUST still prevent it from replacing objects required by earlier retained snapshots.
+
+Host/set isolation follows chapter 4. There is no cross-host deduplication, and independently keyed sets have independent identifier namespaces. Define identifier domain separation for object roles.
+
+### 7.5 Passphrases and recovery secrets
+
+Argon2id MUST be used to derive the protection key from the client's master passphrase for stored recovery/key material. It is not the per-chunk encryption algorithm and MUST NOT be run for every data chunk.
+
+Keep durable backup secrets independent of the user's passphrase where practical, so a passphrase change can rewrap key material without re-encrypting all backup contents. Exact wrapping and recovery procedures remain OPEN.
+
+Parameters, salt generation, resource bounds, migration, and unattended unlocking must be specified and validated. A passphrase change is not equivalent to revoking already disclosed backup keys.
+
+### 7.6 Quantum-security review
+
+Evaluate quantum resistance for each cryptographic role, using established primitives available under the Debian Trixie dependency policy. Distinguish symmetric encryption, keyed identifiers, and derivation from high-entropy secrets from asymmetric key exchange and signatures. Assess key-search, forgery, and collision requirements separately; an algorithm name or digest length alone is not a complete security claim.
+
+HKDF-SHA256 is a candidate for deriving session keys from high-entropy secret material; the final KDF/hash selection remains OPEN. Argon2id remains mandatory for the master passphrase. Evaluate the system OpenSSH's hybrid post-quantum key exchange for both push and pull; supported algorithms, enforcement/fallback policy, and authentication-signature coverage remain OPEN.
+## 8. Object processing, deduplication, and physical storage
+
+A chunk is a logical piece of file content. Each file-content chunk corresponds to one data object; metadata and snapshot roots are objects as well. An object is the general independently identified, immutable unit referenced by snapshots and stored in packs. For a data object, chunk ID and object ID denote the same logical identifier, not two separate identifiers. Compression and encryption produce its stored representation without changing that identity. A pack groups object records physically. Use `chunk` when discussing file-content boundaries and `object` when discussing storage and references that also apply to metadata.
+
+### 8.1 Processing
+
+The intended pipeline is:
+
+```text
+source bytes -> content-defined chunks -> keyed plaintext identifiers
+            -> query existing identifiers -> compress missing chunks
+            -> authenticated encryption -> transfer and durable storage
+```
+
+The server can identify existing objects without knowing plaintext. Stable IDs do not require deterministic encryption.
+
+LZ4 and Zstandard are compression candidates with native Debian Trixie bindings. The default algorithm, selectable levels, and handling of incompressible chunks remain OPEN.
+
+### 8.2 Small files and chunking
+
+- Apply content-defined chunking to each source file separately, following Borg 2's file-content model. A data chunk contains the whole content of one small file or a contiguous part of one larger file; it never combines content from different source files.
+- Empty files require metadata but no data chunk.
+- A non-empty file smaller than the chunking threshold can be one chunk, without padding.
+- The final chunk may be smaller than the nominal minimum.
+- File paths and attributes are stored in encrypted file metadata together with the ordered data-chunk references. Identical chunks may be reused across files and snapshots within the permitted key scope.
+- Objects from different source files may share a physical pack while remaining separate logical objects.
+
+Adopt initial data-chunk defaults of 512 KiB minimum, approximately 2 MiB target, and 8 MiB maximum, with the small-file and final-chunk exceptions above. In a later increment, these sizes are to become configurable on the server and communicated to the source client before chunking. Configuration scope, validation limits, and parameter exchange remain OPEN. Changes affect future chunking and may reduce deduplication across the transition; they do not rewrite earlier snapshots.
+
+Chunker-specific parameters, metadata chunk sizes, and container/pack layout remain OPEN. Delta chains between successive chunk versions are not required for version 1.0.
+
+Use established chunking implementations through Python modules. Chunker selection, parameters, and any optimizations must be evaluated rather than inferred from Borg compatibility. Performance targets require measurements.
+
+### 8.3 Physical packs and location indexes
+
+Packs of independently encrypted objects are the adopted physical-storage direction for version 1.0. Follow Borg 2's separation between file-content chunks and their physical grouping without assuming Borg format compatibility or importing its exact pack format.
+
+The intended separation is:
+
+- logical layer: independently identified, compressed, authenticated, encrypted objects;
+- physical layer: one or more such objects concatenated into a storage container;
+- location index: object ID to container, offset, and length.
+
+Packing MUST NOT merge unrelated files into one logical plaintext chunk or couple their encryption. It MUST NOT cross independent key scopes without an explicit later decision.
+
+For our architecture, server-side assembly of already encrypted objects is a candidate: the server can manage physical layout without receiving plaintext or decryption keys. Client-side packing is not required merely because Borg uses it.
+
+Pack requirements:
+
+- Prefer self-describing bounded object framing that allows location-index reconstruction from stored bytes.
+- Distinguish a reconstructed location index from cryptographically verified content and authoritative snapshot membership.
+- Consider a hash of stored container bytes for server-side corruption detection. Such a hash does not authenticate plaintext or protect against a hostile server rewriting both data and hash.
+- Allow individual object reads without downloading an entire large container where the storage supports it.
+- Compaction MUST preserve the encrypted bytes of live objects; the keyless server cannot decrypt or recompress their plaintext.
+- Persist replacement containers and crash-safe index changes before removing old containers.
+- Missing or corrupt indexes MUST NOT authorize speculative deletion.
+
+The first snapshot increment MUST use real chunks and physical packs. An individual-file-per-object placeholder is not the agreed starting point. OPEN: sizing, buffering, naming, index engine, recovery format, and concurrency.
+
+The agreed common header below identifies an object and declares its stored body length. Additional per-object boundary markers are excluded. Within a sequence of object records, the next record starts at the current record offset plus 44 bytes plus its declared body length. A marker byte sequence could also occur in a body and would not by itself prove a valid boundary. A sequential reader must validate the header and available body bytes; a detected invalid or truncated record stops that walk rather than triggering heuristic searches inside the body. A corrupted length that still appears plausible may require integrity verification to detect. Integrity checks, recovery using independently known locations, interrupted-write handling, and the complete pack layout remain OPEN. A structural index reconstruction does not authenticate plaintext, restore authoritative snapshot membership, or make incomplete records committed.
+
+#### Pack header (agreed development format)
+
+The approved header uses a 2-byte unsigned pack-format version, a 4-byte unsigned `object_count`, and an 8-byte unsigned `body_length`, totaling 14 bytes without padding, with little-endian integers (`<HIQ`). Version is initially `1`, independent of the object-format version. `object_count` counts complete records; `body_length` counts bytes in all records, including their 44-byte object headers. These fields use different units and need different capacities.
+
+The immutable `Pack` class in `src/p8472backup/storage/file/packs.py` implements `to_header()` and `from_header()`, returning bytes and a `Pack` instance respectively. The header describes a non-empty pack: the count is between 1 and 2^32 - 1, and body length must fit an unsigned 64-bit integer. Its body must be large enough for all object headers and no larger than the combined maximum possible record sizes. The complete file length would be 14 plus `body_length`. The class validates header state only; record I/O, pack size targets, naming, integrity checking, and finalization still require review and implementation approval. Four focused tests cover the wire format, header size, supported version, and inconsistent counts or lengths.
+
+#### Common object header (agreed development format)
+
+All integer fields are unsigned and little endian, with no alignment padding. The common object-format version is initially `1`, independent of the application release. Optional type-specific subheaders and payload schemas remain under discussion.
+
+| Offset | Field | Encoding | Meaning |
+| --- | --- | --- | --- |
+| 0 | `type` | 2-byte unsigned integer (`uint16`) | `1`: data object containing one file chunk; `2`: metadata object describing files, attributes, and chunk references; `3`: snapshot root. Other values are unsupported. |
+| 2 | `version` | 2-byte unsigned integer (`uint16`) | Common object-format version, currently `1`. Other versions are unsupported. |
+| 4 | `id` | 32 binary bytes | HMAC-SHA-256 plaintext identifier during development. The algorithm is not user-configurable; there is no ID-length field. |
+| 36 | `length` | 8-byte unsigned integer (`uint64`) | Number of stored body bytes following the header, including any subheader and the entire cryptographic envelope. Maximum: 16 GiB (17,179,869,184 bytes). |
+
+The common header is exactly 44 bytes (`<HH32sQ` in Python's `struct` notation). The header codec rejects unsupported types and versions, IDs of an incorrect length, negative body lengths, and lengths above 16 GiB. Decoding requires exactly 44 input bytes. At this layer, a declared body length of zero is representable; validity of the actual body and cryptographic envelope requires later validation. The codec does not read or allocate the body and does not authenticate it or recompute its ID. A future pack reader must also check that the declared bytes are available. This framing ceiling does not change the chunk-size defaults in chapter 8.2.
+
+The current proposal retains one stored-body length. A separate encrypted per-object metadata slot is not required by the agreed model and is not selected here. In the newer [Borg 2 pack format](https://borgbackup.readthedocs.io/en/master/internals/packs.html), the metadata slot contains object bookkeeping such as type, compression settings, and original size. Separately encrypting it permits metadata-only authenticated reads without reading/decrypting the data slot. This is distinct from file-metadata objects containing paths, attributes, and chunk references, which already have their own object identities in our model. Reconsider separate slots only for a concrete requirement. Borg's pair of 4-byte length fields cannot represent our permitted 16 GiB body sizes; a future split must preserve suitable widths and explicit bounds.
+
+Object IDs identify content across object roles within the applicable key domain; identical content of the same role intentionally reuses an ID. Preserve role separation and stable plaintext-based identity. Do not introduce a separate chunk identifier or a ciphertext-based replacement ID.
+
+Keep type-specific subheaders conditional on concrete requirements. Their visibility and encoding, corruption detection, and safe recovery remain open. Authenticate the cleartext header through the object's AEAD context as required by chapter 7; the plaintext-derived object ID is not itself authentication of that header. Approval of the common header does not select the object body, encryption envelope, or complete pack format.
