@@ -1,6 +1,6 @@
 # Configuration Roadmap
 
-Status: medium-term inventory, 2026-11-13. The [main specification](01-8472backup-Spec.md) remains authoritative. This document records settings to design incrementally; it does not define a configuration schema or request implementation.
+Status: medium-term inventory, 2026-11-13. The [main specification](10-8472backup-Spec.md) remains authoritative. This document records settings to design incrementally; it does not define a configuration schema or request implementation.
 
 **Planned** means configurability is already agreed. **Candidate** means a possible setting derived from an unresolved design or operations topic; it is not yet a requirement. Names below describe concepts, not final configuration keys. Configuration file locations and syntax remain open.
 

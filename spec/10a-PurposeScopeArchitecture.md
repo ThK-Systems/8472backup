@@ -1,12 +1,12 @@
 # 8472backup — Purpose, Scope, and Architecture
 
-Specification version: 0.42 — Include SQLite in location-index evaluation, 2026-11-19
+Specification version: 0.43 — Include SQLite in location-index evaluation, 2026-11-19
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 
 ## 1. Purpose, authority, and precedence
 
-The authoritative Codex specification for 8472backup consists of the versioned entry point `01-8472backup-Spec.md` and its companion parts `01a-PurposeScopeArchitecture.md` through `01f-FutureWorkAndReferences.md`. Together, these files consolidate and supersede the former project specification (`8472backup-SPEC.md`, also previously named `01-8472backup-Spec.md`) and `8472backup-SPEC-ADDENDUM-crypto-snapshots-storage.md`. The entry point defines the current version and links to every part.
+The authoritative Codex specification for 8472backup consists of the versioned entry point `10-8472backup-Spec.md` and its companion parts `10a-PurposeScopeArchitecture.md` through `10f-FutureWorkAndReferences.md`. Together, these files consolidate and supersede the former project specification (`8472backup-SPEC.md`, also previously named `10-8472backup-Spec.md`) and `8472backup-SPEC-ADDENDUM-crypto-snapshots-storage.md`. The entry point defines the current version and links to every part.
 
 The architectural directions adopted after reviewing Borg 2 take precedence over older, less specific ideas: AEAD, session-derived encryption keys, independent snapshot roots, late server-controlled publication, and a storage-backend boundary. This precedence does not import Borg's different trust model or silently approve unresolved algorithms, formats, pack layouts, or dependencies. The requirements below express the resolved consolidation; do not combine them with superseded drafts.
 

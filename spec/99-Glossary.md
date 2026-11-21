@@ -1,6 +1,6 @@
 # Glossary
 
-Status: project terminology, 2026-11-13. These definitions explain the model in the [main specification](01-8472backup-Spec.md). They do not select an on-disk format, algorithm, or serialization. Unresolved design choices remain unresolved.
+Status: project terminology, 2026-11-13. These definitions explain the model in the [main specification](10-8472backup-Spec.md). They do not select an on-disk format, algorithm, or serialization. Unresolved design choices remain unresolved.
 
 ## Chunks, objects, and packs
 

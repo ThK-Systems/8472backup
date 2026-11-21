@@ -1,6 +1,6 @@
 # 8472backup — Project Specification for Codex
 
-Version: 0.42 — Include SQLite in location-index evaluation, 2026-11-19
+Version: 0.43 — Include SQLite in location-index evaluation, 2026-11-19
 
 Status: requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 
@@ -10,11 +10,11 @@ The numbered chapters in the companion parts retain their original numbering. Th
 
 ## Specification parts
 
-- [Purpose, Scope, and Architecture](01a-PurposeScopeArchitecture.md): chapters 1–6
-- [Cryptography, Objects, and Packs](01b-CryptographyObjectsAndPacks.md): chapters 7–8
-- [Snapshots, Commit, and Retention](01c-SnapshotsCommitAndRetention.md): chapters 9–12
-- [Communication, Configuration, and Operations](01d-CommunicationConfigurationAndOperations.md): chapters 13–17
-- [Verification and Development](01e-VerificationAndDevelopment.md): chapters 18–20
-- [Future Work and References](01f-FutureWorkAndReferences.md): chapters 21–24
+- [Purpose, Scope, and Architecture](10a-PurposeScopeArchitecture.md): chapters 1–6
+- [Cryptography, Objects, and Packs](10b-CryptographyObjectsAndPacks.md): chapters 7–8
+- [Snapshots, Commit, and Retention](10c-SnapshotsCommitAndRetention.md): chapters 9–12
+- [Communication, Configuration, and Operations](10d-CommunicationConfigurationAndOperations.md): chapters 13–17
+- [Verification and Development](10e-VerificationAndDevelopment.md): chapters 18–20
+- [Future Work and References](10f-FutureWorkAndReferences.md): chapters 21–24
 
 All parts must carry the version declared here. Update this version and the version in every part together when the specification changes. The [English glossary](99-Glossary.md) defines terminology; the [configuration roadmap](70-ConfigurationRoadmap.md) records planned settings and unresolved candidates. Neither replaces or amends this specification set.

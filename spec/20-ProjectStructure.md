@@ -62,13 +62,13 @@ test/
   integration/
     test_snapshots.py
 spec/
-  01-8472backup-Spec.md
-  01a-PurposeScopeArchitecture.md
-  01b-CryptographyObjectsAndPacks.md
-  01c-SnapshotsCommitAndRetention.md
-  01d-CommunicationConfigurationAndOperations.md
-  01e-VerificationAndDevelopment.md
-  01f-FutureWorkAndReferences.md
+  10-8472backup-Spec.md
+  10a-PurposeScopeArchitecture.md
+  10b-CryptographyObjectsAndPacks.md
+  10c-SnapshotsCommitAndRetention.md
+  10d-CommunicationConfigurationAndOperations.md
+  10e-VerificationAndDevelopment.md
+  10f-FutureWorkAndReferences.md
   20-ProjectStructure.md
 ```
 
