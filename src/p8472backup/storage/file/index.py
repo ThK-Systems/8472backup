@@ -18,7 +18,7 @@ from p8472backup.storage.file.lock import RepositoryLock
 
 _LOCATION_FIELDS = struct.Struct("<QQQ")
 _RECORD_SIZE = OBJECT_ID_SIZE + _LOCATION_FIELDS.size
-_INITIAL_BUCKET_COUNT = 8
+_INITIAL_BUCKET_COUNT = 8_192
 _MAX_RECORD_COUNT = 2**32 - 1
 _CHECKPOINT_HEADER = struct.Struct("<8sHQ")
 _CHECKPOINT_MAGIC = b"8472IDX\x00"

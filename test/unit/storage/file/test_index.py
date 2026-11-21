@@ -10,16 +10,16 @@ from p8472backup.storage.file.lock import RepositoryLock
 class TestLocationIndex:
     def test_put_and_get_three_object_ids(self) -> None:
         index = LocationIndex()
-        first_id = b"A" * 32
+        first_id = (1).to_bytes(4, "big") + b"A" * 28
         first = ObjectLocation(pack_id=1, offset=14, length=100)
-        second_id = b"C" * 32
+        second_id = (3).to_bytes(4, "big") + b"C" * 28
         second = ObjectLocation(pack_id=1, offset=114, length=200)
-        third_id = b"I" * 32
+        third_id = (8_193).to_bytes(4, "big") + b"I" * 28
         third = ObjectLocation(pack_id=2, offset=14, length=300)
 
         index.put(first_id, first)
         index.put(second_id, second)
-        # A and I start in bucket 1. The third record takes the next free bucket.
+        # Both 1 % 8192 and 8193 % 8192 are 1. The third record goes in bucket 2.
         index.put(third_id, third)
 
         found_first = index.get(first_id)
@@ -50,10 +50,18 @@ class TestLocationIndex:
 
     def test_growth_preserves_existing_locations(self) -> None:
         index = LocationIndex()
-        locations = {(number * 7).to_bytes(4, "big") + bytes(28): ObjectLocation(1, 14 + number * 44, 44) for number in range(40)}
+        assert len(index._buckets) == 8_192
+        locations = {(number * 7).to_bytes(4, "big") + bytes(28): ObjectLocation(1, 14 + number * 44, 44) for number in range(4_096)}
         for object_id, location in locations.items():
             index.put(object_id, location)
+        assert len(index._buckets) == 8_192
 
+        next_id = (4_096 * 7).to_bytes(4, "big") + bytes(28)
+        next_location = ObjectLocation(1, 14 + 4_096 * 44, 44)
+        index.put(next_id, next_location)
+
+        assert len(index._buckets) == 16_384
+        assert index.get(next_id) == next_location
         assert all(index.get(object_id) == location for object_id, location in locations.items())
 
     def test_invalid_values_do_not_replace_a_location(self) -> None:
