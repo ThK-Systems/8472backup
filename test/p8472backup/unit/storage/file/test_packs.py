@@ -1,6 +1,10 @@
+from io import BytesIO
+from pathlib import Path
+
 import pytest
 
-from p8472backup.storage.file.packs import Pack
+from p8472backup.archive.objects import HEADER_SIZE as OBJECT_HEADER_SIZE, TYPE_DATA, TYPE_METADATA, TYPE_SNAPSHOT, Object
+from p8472backup.storage.file.packs import HEADER_SIZE, Pack
 
 
 _VALID_HEADER = bytes.fromhex("0100020000005800000008000000")
@@ -25,3 +29,44 @@ class TestPack:
         for object_count, body_length in ((0, 0), (2**32, 44), (1, -1), (1, 2**64), (2, 87), (1, 44 + 16 * 1024**3 + 1)):
             with pytest.raises(ValueError):
                 Pack(object_count=object_count, body_length=body_length)
+
+    def test_writes_and_reads_records_up_to_target(self, tmp_path: Path) -> None:
+        path = tmp_path / "pack"
+        first_body = b"a" * (128 * 1024)
+        second_body = b"opaque metadata"
+        first = Object(TYPE_DATA, b"a" * 32, len(first_body))
+        second = Object(TYPE_METADATA, b"b" * 32, len(second_body))
+        third = Object(TYPE_SNAPSHOT, b"c" * 32, 0)
+        records = iter(((first, BytesIO(first_body)), (second, BytesIO(second_body)), (third, BytesIO())))
+        first_length = OBJECT_HEADER_SIZE + first.length
+        second_length = OBJECT_HEADER_SIZE + second.length
+
+        pack = Pack.write_to(path, records, target_size=first_length + 1)
+
+        assert pack == Pack(2, first_length + second_length)
+        assert path.read_bytes() == pack.to_header() + first.to_header() + first_body + second.to_header() + second_body
+        output = BytesIO()
+        assert Pack.read_object(path, HEADER_SIZE + first_length, second_length, output) == second
+        assert output.getvalue() == second_body
+        with pytest.raises(ValueError, match="record length"):
+            Pack.read_object(path, HEADER_SIZE + first_length, second_length - 1, BytesIO())
+
+        next_path = tmp_path / "next-pack"
+        assert Pack.write_to(next_path, records, target_size=1) == Pack(1, OBJECT_HEADER_SIZE)
+        assert Pack.read_object(next_path, HEADER_SIZE, OBJECT_HEADER_SIZE, BytesIO()) == third
+
+    def test_truncated_body_never_publishes_pack(self, tmp_path: Path) -> None:
+        path = tmp_path / "pack"
+        obj = Object(TYPE_DATA, b"a" * 32, 2)
+        with pytest.raises(ValueError, match="Truncated object body"):
+            Pack.write_to(path, iter(((obj, BytesIO(b"a")),)))
+        assert list(tmp_path.iterdir()) == []
+
+    def test_existing_destination_is_preserved(self, tmp_path: Path) -> None:
+        path = tmp_path / "pack"
+        path.write_bytes(b"existing")
+        obj = Object(TYPE_DATA, b"a" * 32, 0)
+        with pytest.raises(FileExistsError):
+            Pack.write_to(path, iter(((obj, BytesIO()),)))
+        assert path.read_bytes() == b"existing"
+        assert list(tmp_path.iterdir()) == [path]
