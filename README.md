@@ -1,7 +1,5 @@
 # 8472backup
 
----
-
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue)](LICENSE)
 [![Language](https://img.shields.io/badge/language-python-green)](#)
 [![coverage](https://codecov.io/gh/ThK-Systems/8472backup/branch/master/graph/badge.svg)](https://codecov.io/gh/ThK-Systems/8472backup)
