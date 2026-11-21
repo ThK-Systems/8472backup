@@ -9,11 +9,10 @@ from typing import BinaryIO
 from uuid import UUID, uuid4
 
 from p8472backup.archive.objects import TYPE_SNAPSHOT, Object, ObjectId
-from p8472backup.server.snapshot import Snapshot
-from p8472backup.server.snapshots import store_snapshot_objects
-from p8472backup.storage.file.index import LocationIndex
+from p8472backup.server.snapshot import ObjectCatalogue, Snapshot
+from p8472backup.storage.file.index import LocationIndex, ObjectLocation
 from p8472backup.storage.file.lock import RepositoryLock
-from p8472backup.storage.file.packs import DEFAULT_TARGET_SIZE
+from p8472backup.storage.file.packs import DEFAULT_TARGET_SIZE, Pack
 
 
 class SnapshotService:
@@ -68,14 +67,7 @@ class SnapshotService:
             if first is None or first[0].object_type != TYPE_SNAPSHOT or first[0].object_id != root_id:
                 raise ValueError("The first record must be the declared type 3 snapshot root")
 
-            pack_directory = lock.require_held_for(self._pack_directory)
-            catalogue = store_snapshot_objects(
-                chain((first,), records),
-                index,
-                lock,
-                self._pack_destinations(pack_directory),
-                self._target_size,
-            )
+            catalogue = self._store_snapshot_objects(chain((first,), records), index, lock)
             index.save_to(self._index_path, lock)
 
             committed_at = datetime.now(UTC)
@@ -98,6 +90,42 @@ class SnapshotService:
             if (snapshot.snapshot_id, snapshot.client_id, snapshot.backup_set_id) != (snapshot_id, self._client_id, self._backup_set_id):
                 raise ValueError("Snapshot identity or scope does not match the requested record")
             return snapshot
+
+    def _store_snapshot_objects(
+        self,
+        records: Iterator[tuple[Object, BinaryIO]],
+        index: LocationIndex,
+        lock: RepositoryLock,
+    ) -> ObjectCatalogue:
+        """Collect the catalogue and write new objects to packs.
+
+        The input iterator must allow advancing past an unread body.
+        """
+        object_ids: set[ObjectId] = set()
+
+        def iter_missing_objects() -> Iterator[tuple[Object, BinaryIO]]:
+            for obj, body in records:
+                if obj.object_id in object_ids:
+                    continue
+                object_ids.add(obj.object_id)
+                if index.get(obj.object_id) is None:
+                    yield obj, body
+
+        missing = iter_missing_objects()
+        pack_directory = lock.require_held_for(self._pack_directory)
+        destinations = self._pack_destinations(pack_directory)
+        while (first := next(missing, None)) is not None:
+            pack_id, path = next(destinations)
+            if pack_id >= 2**64:
+                raise ValueError(f"Pack ID exceeds the supported range: {pack_id}")
+            path = lock.require_held_for(path)
+
+            def record_location(object_id: ObjectId, offset: int, length: int) -> None:
+                index.put(object_id, ObjectLocation(pack_id, offset, length))
+
+            Pack.write_to(path, chain((first,), missing), self._target_size, on_stored=record_location)
+
+        return ObjectCatalogue(frozenset(object_ids))
 
     @staticmethod
     def _pack_destinations(directory: Path) -> Iterator[tuple[int, Path]]:

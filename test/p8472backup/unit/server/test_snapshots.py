@@ -10,7 +10,6 @@ from p8472backup.archive.metaobject import MetaObject
 from p8472backup.archive.objects import HEADER_SIZE as OBJECT_HEADER_SIZE, TYPE_DATA, TYPE_METADATA, TYPE_SNAPSHOT, Object, ObjectId
 from p8472backup.archive.snapshotroot import SnapshotRoot
 from p8472backup.server.service import SnapshotService
-from p8472backup.server.snapshots import store_snapshot_objects
 from p8472backup.storage.file.index import LocationIndex, ObjectLocation
 from p8472backup.storage.file.lock import RepositoryLock
 from p8472backup.storage.file.packs import HEADER_SIZE as PACK_HEADER_SIZE, Pack
@@ -112,54 +111,60 @@ def test_failed_index_save_does_not_publish_snapshot(tmp_path: Path, snapshot_se
         assert LocationIndex.load_from(tmp_path / "index" / str(_KEY_DOMAIN_ID), lock).get(root.object_id) is None
 
 
+@pytest.mark.usefixtures("snapshot_service")
 @pytest.mark.parametrize("target_size", (1, 1_000))
 def test_snapshot_filter_stores_missing_objects_and_indexes_locations(tmp_path: Path, target_size: int) -> None:
     known = Object(TYPE_DATA, b"a" * 32, 1)
-    first = Object(TYPE_DATA, b"b" * 32, 1)
+    first = Object(TYPE_SNAPSHOT, b"b" * 32, 1)
     second = Object(TYPE_DATA, b"c" * 32, 1)
     known_body = BytesIO(b"a")
     duplicate_body = BytesIO(b"b")
-    index = LocationIndex()
+    index_path = tmp_path / "index" / str(_KEY_DOMAIN_ID)
+    pack_directory = tmp_path / "packs" / str(_KEY_DOMAIN_ID)
     known_location = ObjectLocation(1, PACK_HEADER_SIZE, OBJECT_HEADER_SIZE + known.length)
-    index.put(known.object_id, known_location)
-    records = iter(((known, known_body), (first, BytesIO(b"b")), (first, duplicate_body), (second, BytesIO(b"c"))))
-    first_path, second_path = tmp_path / "first", tmp_path / "second"
-    destinations = iter(((2, first_path), (3, second_path)))
     with RepositoryLock(tmp_path) as lock:
-        catalogue = store_snapshot_objects(records, index, lock, destinations, target_size=target_size)
+        Pack.write_to(pack_directory / "1.pack", iter(((known, BytesIO(b"a")),)))
+        index = LocationIndex.load_from(index_path, lock)
+        index.put(known.object_id, known_location)
+        index.save_to(index_path, lock)
+
+    service = SnapshotService(tmp_path, client_id=_CLIENT_ID, backup_set_id=_BACKUP_SET_ID, key_domain_id=_KEY_DOMAIN_ID, target_size=target_size)
+    records = iter(((first, BytesIO(b"b")), (known, known_body), (first, duplicate_body), (second, BytesIO(b"c"))))
+    snapshot = service.create_snapshot(records, first.object_id)
 
     length = OBJECT_HEADER_SIZE + first.length
     first_location = ObjectLocation(2, PACK_HEADER_SIZE, length)
     if target_size == 1:
         second_location = ObjectLocation(3, PACK_HEADER_SIZE, length)
     else:
-        second_path = first_path
         second_location = ObjectLocation(2, PACK_HEADER_SIZE + length, length)
-    assert index.get(known.object_id) == known_location
-    for path, location, obj, body in ((first_path, first_location, first, b"b"), (second_path, second_location, second, b"c")):
-        assert index.get(obj.object_id) == location
-        output = BytesIO()
-        assert Pack.read_object(path, location.offset, location.length, output) == obj
-        assert output.getvalue() == body
+    with RepositoryLock(tmp_path) as lock:
+        index = LocationIndex.load_from(index_path, lock)
+        assert index.get(known.object_id) == known_location
+        for location, obj, body in ((first_location, first, b"b"), (second_location, second, b"c")):
+            assert index.get(obj.object_id) == location
+            output = BytesIO()
+            path = pack_directory / f"{location.pack_id}.pack"
+            assert Pack.read_object(path, location.offset, location.length, output) == obj
+            assert output.getvalue() == body
 
-    assert catalogue.object_ids == {known.object_id, first.object_id, second.object_id}
+    assert snapshot.object_catalog.object_ids == {known.object_id, first.object_id, second.object_id}
     assert known_body.tell() == duplicate_body.tell() == 0
 
 
-def test_snapshot_filter_needs_no_pack_when_all_objects_are_known(tmp_path: Path) -> None:
-    index = LocationIndex()
-    obj = Object(TYPE_DATA, b"a" * 32, 1)
-    index.put(obj.object_id, ObjectLocation(1, PACK_HEADER_SIZE, OBJECT_HEADER_SIZE + obj.length))
+def test_snapshot_filter_needs_no_pack_when_all_objects_are_known(tmp_path: Path, snapshot_service: SnapshotService) -> None:
+    obj = Object(TYPE_SNAPSHOT, b"a" * 32, 1)
+    snapshot_service.create_snapshot(iter(((obj, BytesIO(b"a")),)), obj.object_id)
+    snapshot = snapshot_service.create_snapshot(iter(((obj, BytesIO(b"a")),)), obj.object_id)
+    assert snapshot.object_catalog.object_ids == {obj.object_id}
+    assert {path.name for path in (tmp_path / "packs" / str(_KEY_DOMAIN_ID)).iterdir()} == {"1.pack"}
+
+
+def test_incomplete_pack_adds_no_index_entries(tmp_path: Path, snapshot_service: SnapshotService) -> None:
+    obj = Object(TYPE_SNAPSHOT, b"a" * 32, 2)
+    with pytest.raises(ValueError, match="Truncated object body"):
+        snapshot_service.create_snapshot(iter(((obj, BytesIO(b"a")),)), obj.object_id)
     with RepositoryLock(tmp_path) as lock:
-        catalogue = store_snapshot_objects(iter(((obj, BytesIO(b"a")),)), index, lock, iter(()))
-    assert catalogue.object_ids == {obj.object_id}
-
-
-def test_incomplete_pack_adds_no_index_entries(tmp_path: Path) -> None:
-    index = LocationIndex()
-    obj = Object(TYPE_DATA, b"a" * 32, 2)
-    path = tmp_path / "pack"
-    with RepositoryLock(tmp_path) as lock, pytest.raises(ValueError, match="Truncated object body"):
-        store_snapshot_objects(iter(((obj, BytesIO(b"a")),)), index, lock, iter(((1, path),)))
-    assert index.get(obj.object_id) is None
-    assert not path.exists()
+        index = LocationIndex.load_from(tmp_path / "index" / str(_KEY_DOMAIN_ID), lock)
+        assert index.get(obj.object_id) is None
+    assert not list((tmp_path / "packs" / str(_KEY_DOMAIN_ID)).iterdir())
