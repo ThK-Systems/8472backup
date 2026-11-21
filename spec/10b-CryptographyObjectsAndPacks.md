@@ -98,7 +98,7 @@ source bytes -> content-defined chunks -> keyed plaintext identifiers
 
 The server can identify existing objects without knowing plaintext. Stable IDs do not require deterministic encryption.
 
-LZ4 and Zstandard are compression candidates with native Debian Trixie bindings. The default algorithm, selectable levels, and handling of incompressible chunks remain OPEN.
+Type 1 supports LZ4 and Zstandard via the native Debian Trixie packages `python3-lz4` and `python3-zstandard`. The default algorithm, selectable levels, and handling of incompressible chunks remain OPEN.
 
 ### 8.2 Small files and chunking
 
@@ -154,19 +154,25 @@ Pack requirements:
 - Persist replacement containers and crash-safe index changes before removing old containers.
 - Missing or corrupt indexes MUST NOT authorize speculative deletion.
 
-The first snapshot increment MUST use real chunks and physical packs. An individual-file-per-object placeholder is not the agreed starting point. OPEN: sizing, buffering, naming, index engine, recovery format, and concurrency.
+The first snapshot increment MUST use real chunks and physical packs. An individual-file-per-object placeholder is not the agreed starting point. OPEN: buffering, naming, index engine, recovery format, and concurrency.
 
 The agreed common header below identifies an object and declares its stored body length. Additional per-object boundary markers are excluded. Within a sequence of object records, the next record starts at the current record offset plus 44 bytes plus its declared body length. A marker byte sequence could also occur in a body and would not by itself prove a valid boundary. A sequential reader must validate the header and available body bytes; a detected invalid or truncated record stops that walk rather than triggering heuristic searches inside the body. A corrupted length that still appears plausible may require integrity verification to detect. Integrity checks, recovery using independently known locations, interrupted-write handling, and the complete pack layout remain OPEN. A structural index reconstruction does not authenticate plaintext, restore authoritative snapshot membership, or make incomplete records committed.
+
+The server-configurable pack target defaults to 50 MB (50,000,000 bytes). After appending each complete object record, close the pack if its body length has reached or exceeded the target. This includes the record that crosses the threshold, even when that record alone exceeds the target.
 
 #### Pack header (agreed development format)
 
 The approved header uses a 2-byte unsigned pack-format version, a 4-byte unsigned `object_count`, and an 8-byte unsigned `body_length`, totaling 14 bytes without padding, with little-endian integers (`<HIQ`). Version is initially `1`, independent of the object-format version. `object_count` counts complete records; `body_length` counts bytes in all records, including their 44-byte object headers. These fields use different units and need different capacities.
 
-The immutable `Pack` class in `src/p8472backup/storage/file/packs.py` implements `to_header()` and `from_header()`, returning bytes and a `Pack` instance respectively. The header describes a non-empty pack: the count is between 1 and 2^32 - 1, and body length must fit an unsigned 64-bit integer. Its body must be large enough for all object headers and no larger than the combined maximum possible record sizes. The complete file length would be 14 plus `body_length`. The class validates header state only; record I/O, pack size targets, naming, integrity checking, and finalization still require review and implementation approval. Four focused tests cover the wire format, header size, supported version, and inconsistent counts or lengths.
+The immutable `Pack` class in `src/p8472backup/storage/file/packs.py` implements `to_header()` and `from_header()`, returning bytes and a `Pack` instance respectively. The header describes a non-empty pack: the count is between 1 and 2^32 - 1, and body length must fit an unsigned 64-bit integer. Its body must be large enough for all object headers and no larger than the combined maximum possible record sizes. The complete file length is 14 plus `body_length`.
+
+`Pack.write_to()` writes one pack to a caller-supplied path. It copies each declared object body in bounded blocks and leaves later records in the caller's iterator once the pack reaches its target. The writer finalizes and syncs the header and records in a temporary file, then publishes the file without replacing an existing destination and syncs the directory. A truncated body fails before publication. If the caller supplies `on_stored`, the writer collects object IDs, offsets, and record lengths while writing. It buffers up to 256 KiB of these fixed-size entries in memory before spilling to a temporary file. The writer reports the locations through `on_stored` after the directory sync succeeds.
+
+`Pack.read_object()` validates the file size and the requested record range, then copies the body to the caller's output stream and returns the common object header. The reader and writer use the common framing for every object type. Pack naming and storage integrity checks remain open.
 
 #### Common object header (agreed development format)
 
-All integer fields are unsigned and little endian, with no alignment padding. The common object-format version is initially `1`, independent of the application release. Optional type-specific subheaders and payload schemas remain under discussion.
+All integer fields are unsigned and little endian, with no alignment padding. The common object-format version is initially `1`, independent of the application release. The plaintext layouts for types 1, 2, and 3 are specified below.
 
 | Offset | Field | Encoding | Meaning |
 | --- | --- | --- | --- |
@@ -181,4 +187,42 @@ The current proposal retains one stored-body length. A separate encrypted per-ob
 
 Object IDs identify content across object roles within the applicable key domain; identical content of the same role intentionally reuses an ID. Preserve role separation and stable plaintext-based identity. Do not introduce a separate chunk identifier or a ciphertext-based replacement ID.
 
-Keep type-specific subheaders conditional on concrete requirements. Their visibility and encoding, corruption detection, and safe recovery remain open. Authenticate the cleartext header through the object's AEAD context as required by chapter 7; the plaintext-derived object ID is not itself authentication of that header. Approval of the common header does not select the object body, encryption envelope, or complete pack format.
+Keep type-specific subheaders conditional on concrete requirements. Corruption detection and safe recovery remain open. Authenticate the cleartext header through the object's AEAD context as required by chapter 7; the plaintext-derived object ID is not itself authentication of that header. Approval of the common header does not select the object body, encryption envelope, or complete pack format.
+
+#### Type 1 data object
+
+The client encrypts and authenticates the 9-byte subheader and chunk data together. The server uses the common object header to locate and store the encrypted body.
+
+| Plaintext offset | Field | Encoding |
+| --- | --- | --- |
+| 0 | `compression` | Unsigned byte. 0: uncompressed, 1: LZ4 frame, 2: Zstandard frame. |
+| 1 | `chunk_size` | Little-endian unsigned 64-bit length of the original chunk. |
+| 9 | Chunk data | All remaining bytes. For uncompressed data the length must equal `chunk_size`. |
+
+The client rejects unknown compression identifiers and checks that decoding produces exactly `chunk_size` bytes. A compressed chunk contains one complete frame. A Zstandard frame includes its content size for a nonempty chunk and omits it for an empty chunk to work around a decoder limitation in Debian Trixie. The common header's size limit applies to the entire stored body, including cryptographic overhead.
+
+The provisional code constants for encryption are 1 (AES-256-GCM) and 2 (AES-256-OCB). The AEAD choice and envelope encoding remain open.
+
+#### Type 2 metadata object
+
+Each type 2 object describes one filesystem entry. The client encrypts and authenticates the 8-byte subheader, metadata block, and chunk references together.
+
+| Plaintext offset | Field | Encoding |
+| --- | --- | --- |
+| 0 | `metadata_length` | Little-endian unsigned 64-bit byte length of the metadata block. |
+| 8 | Metadata block | Exactly `metadata_length` bytes supplied by the client. The block carries the filesystem entry type, path, and attributes. Its internal encoding remains open. |
+| 8 + `metadata_length` | Chunk references | Ordered 32-byte type 1 object IDs through the end of the plaintext, including repeated IDs. |
+
+The client interprets the entry type and validates which types may carry chunk references. The reference region may be empty and must contain a whole number of IDs.
+
+#### Type 3 snapshot root
+
+The client encrypts and authenticates the 8-byte subheader, snapshot description, and metadata references together.
+
+| Plaintext offset | Field | Encoding |
+| --- | --- | --- |
+| 0 | `description_length` | Little-endian unsigned 64-bit byte length of the snapshot description. |
+| 8 | Snapshot description | Exactly `description_length` bytes supplied by the client, including the backup configuration used for the run. The internal encoding remains open. |
+| 8 + `description_length` | Metadata references | 32-byte type 2 object IDs through the end of the plaintext. |
+
+The reference region must contain a whole number of IDs and can be empty. The order of metadata references carries no restore semantics. Server commit time, protection deadline, and the authoritative object catalogue are stored in the server's snapshot record.

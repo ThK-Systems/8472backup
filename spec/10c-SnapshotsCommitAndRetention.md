@@ -52,6 +52,10 @@ The authoritative snapshot catalogue and its committed dependencies MUST NOT be 
 The snapshot header does not contain `object_count`. The count belongs to the per-snapshot object catalogue; its encoding remains OPEN. This does not change the separate pack header's object count.
 
 The per-snapshot object catalogue is logically a set of unique object IDs containing every dependency required for complete restoration, including the snapshot root, snapshot-description metadata, file metadata, and data objects. Reused objects are included even when first stored by an earlier snapshot. Once committed, this membership is immutable. It contains no physical pack locations. A separate repository location index, scoped to the applicable key domain, maps an object ID to a pack and byte range. Compaction changes that location index without rewriting snapshot membership. Catalogue serialization and the persistent index representation remain OPEN; this clarification does not authorize their implementation.
+
+During snapshot assembly, the server collects every required ID in a per-snapshot set. On the first occurrence of an ID, it consults the location index and forwards the object to the pack writer only if the ID has no recorded location. Successive packs consume the same filtered iterator, so an ID is forwarded at most once even when its pack location has yet to be recorded. Exhaust the iterator before freezing the membership for the catalogue. The input iterator must support skipping unread bodies.
+
+`store_snapshot_objects()` connects the filter and pack writer under the repository lock. The caller supplies unused pack IDs and paths. After each pack is durably published, the pack writer reports the locations it recorded while writing, and the server adds them to the in-memory index. If all required objects already exist, the server returns the catalogue without creating a pack. Saving the index and publishing the authoritative snapshot remain separate steps.
 ## 10. Storage backend in version 1.0
 
 ### 10.1 Server definitions, client choice, and defaults
