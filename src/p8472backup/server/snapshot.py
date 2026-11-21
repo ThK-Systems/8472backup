@@ -11,6 +11,7 @@ from tempfile import NamedTemporaryFile
 from uuid import UUID
 
 from p8472backup.archive.objects import OBJECT_ID_SIZE, Object, ObjectId
+from p8472backup.server.repository import Repository
 from p8472backup.storage.file.lock import RepositoryLock
 
 
@@ -32,16 +33,15 @@ class Snapshot:
     """Server-readable metadata and membership of a committed snapshot."""
 
     snapshot_id: UUID
-    client_id: UUID
-    backup_set_id: UUID
     root_id: ObjectId
     committed_at: datetime
     protected_until: datetime
     object_catalog: ObjectCatalogue
     version: int = _SNAPSHOT_VERSION
 
-    def save_to(self, path: Path, lock: RepositoryLock) -> None:
+    def save_to(self, repository: Repository, lock: RepositoryLock) -> None:
         """Durably publish the snapshot without replacing an existing record."""
+        path = repository.snapshot_path(self.snapshot_id)
         directory = lock.require_held_for(path.parent)
         path = directory / path.name
         if self.version != _SNAPSHOT_VERSION:
@@ -57,8 +57,8 @@ class Snapshot:
         header = _SNAPSHOT_HEADER.pack(
             self.version,
             self.snapshot_id.bytes,
-            self.client_id.bytes,
-            self.backup_set_id.bytes,
+            repository.client_id.bytes,
+            repository.backup_set_id.bytes,
             self.root_id,
             (self.committed_at - _EPOCH) // _MICROSECOND,
             (self.protected_until - _EPOCH) // _MICROSECOND,
@@ -84,16 +84,18 @@ class Snapshot:
             os.close(directory_fd)
 
     @classmethod
-    def load_from(cls, path: Path, lock: RepositoryLock) -> Snapshot:
+    def load_from(cls, repository: Repository, snapshot_id: UUID, lock: RepositoryLock) -> Snapshot:
         """Read a committed snapshot record under its repository lock."""
-        path = lock.require_held_for(path)
+        path = lock.require_held_for(repository.snapshot_path(snapshot_id))
         with path.open("rb") as source:
             header = source.read(_SNAPSHOT_HEADER.size)
             if len(header) != _SNAPSHOT_HEADER.size:
                 raise ValueError("Truncated snapshot header")
-            version, snapshot_id, client_id, backup_set_id, root_id, committed_at, protected_until, count = _SNAPSHOT_HEADER.unpack(header)
+            version, stored_snapshot_id, client_id, backup_set_id, root_id, committed_at, protected_until, count = _SNAPSHOT_HEADER.unpack(header)
             if version != _SNAPSHOT_VERSION:
                 raise ValueError("Unsupported snapshot format")
+            if (stored_snapshot_id, client_id, backup_set_id) != (snapshot_id.bytes, repository.client_id.bytes, repository.backup_set_id.bytes):
+                raise ValueError("Snapshot identity or scope does not match the requested record")
             if protected_until < committed_at:
                 raise ValueError("Snapshot protection deadline precedes commit time")
             if os.fstat(source.fileno()).st_size != len(header) + count * OBJECT_ID_SIZE:
@@ -104,9 +106,7 @@ class Snapshot:
                 raise ValueError("Invalid snapshot object catalogue")
 
         return cls(
-            snapshot_id=UUID(bytes=snapshot_id),
-            client_id=UUID(bytes=client_id),
-            backup_set_id=UUID(bytes=backup_set_id),
+            snapshot_id=snapshot_id,
             root_id=root_id,
             committed_at=_EPOCH + timedelta(microseconds=committed_at),
             protected_until=_EPOCH + timedelta(microseconds=protected_until),

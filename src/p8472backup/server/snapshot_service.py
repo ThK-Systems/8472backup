@@ -1,4 +1,4 @@
-"""Create and retrieve snapshots in an authorized repository scope."""
+"""Create and retrieve snapshots for an authorized backup set."""
 
 import os
 from collections.abc import Iterator
@@ -9,6 +9,7 @@ from typing import BinaryIO
 from uuid import UUID, uuid4
 
 from p8472backup.archive.objects import TYPE_SNAPSHOT, Object, ObjectId
+from p8472backup.server.repository import Repository
 from p8472backup.server.snapshot import ObjectCatalogue, Snapshot
 from p8472backup.storage.file.index import LocationIndex, ObjectLocation
 from p8472backup.storage.file.lock import RepositoryLock
@@ -20,11 +21,8 @@ class SnapshotService:
 
     def __init__(
         self,
-        repository: Path,
+        repository: Repository,
         *,
-        client_id: UUID,
-        backup_set_id: UUID,
-        key_domain_id: UUID,
         protection_duration: timedelta = timedelta(days=7),
         target_size: int = DEFAULT_TARGET_SIZE,
     ) -> None:
@@ -33,14 +31,10 @@ class SnapshotService:
         if target_size <= 0:
             raise ValueError("Pack target size must be positive")
 
-        self._repository = repository.resolve(strict=True)
-        self._client_id = client_id
-        self._backup_set_id = backup_set_id
+        repository.path.resolve(strict=True)
+        self._repository = repository
         self._protection_duration = protection_duration
         self._target_size = target_size
-        self._index_path = self._repository / "index" / str(key_domain_id)
-        self._pack_directory = self._repository / "packs" / str(key_domain_id)
-        self._snapshot_directory = self._repository / "snapshots" / str(backup_set_id)
 
     def create_snapshot(
         self,
@@ -54,42 +48,38 @@ class SnapshotService:
         if snapshot_id is None:
             snapshot_id = uuid4()
 
-        with RepositoryLock(self._repository) as lock:
-            directory = lock.require_held_for(self._snapshot_directory)
+        repository = self._repository
+        with RepositoryLock(repository.path) as lock:
+            directory = lock.require_held_for(repository.snapshot_directory)
             if not directory.is_dir():
                 raise NotADirectoryError(directory)
-            path = directory / f"{snapshot_id}.snapshot"
+            path = repository.snapshot_path(snapshot_id)
             if os.path.lexists(path):
                 raise FileExistsError(f"Snapshot already exists: {path}")
 
-            index = LocationIndex.load_from(self._index_path, lock)
+            index = LocationIndex.load_from(repository.index_path, lock)
             first = next(records, None)
             if first is None or first[0].object_type != TYPE_SNAPSHOT or first[0].object_id != root_id:
                 raise ValueError("The first record must be the declared type 3 snapshot root")
 
             catalogue = self._store_snapshot_objects(chain((first,), records), index, lock)
-            index.save_to(self._index_path, lock)
+            index.save_to(repository.index_path, lock)
 
             committed_at = datetime.now(UTC)
             snapshot = Snapshot(
                 snapshot_id=snapshot_id,
-                client_id=self._client_id,
-                backup_set_id=self._backup_set_id,
                 root_id=root_id,
                 committed_at=committed_at,
                 protected_until=committed_at + self._protection_duration,
                 object_catalog=catalogue,
             )
-            snapshot.save_to(path, lock)
+            snapshot.save_to(repository, lock)
             return snapshot
 
     def get_snapshot(self, snapshot_id: UUID) -> Snapshot:
         """Load a committed snapshot in this service's client and backup set."""
-        with RepositoryLock(self._repository) as lock:
-            snapshot = Snapshot.load_from(self._snapshot_directory / f"{snapshot_id}.snapshot", lock)
-            if (snapshot.snapshot_id, snapshot.client_id, snapshot.backup_set_id) != (snapshot_id, self._client_id, self._backup_set_id):
-                raise ValueError("Snapshot identity or scope does not match the requested record")
-            return snapshot
+        with RepositoryLock(self._repository.path) as lock:
+            return Snapshot.load_from(self._repository, snapshot_id, lock)
 
     def _store_snapshot_objects(
         self,
@@ -112,7 +102,7 @@ class SnapshotService:
                     yield obj, body
 
         missing = iter_missing_objects()
-        pack_directory = lock.require_held_for(self._pack_directory)
+        pack_directory = lock.require_held_for(self._repository.pack_directory)
         destinations = self._pack_destinations(pack_directory)
         while (first := next(missing, None)) is not None:
             pack_id, path = next(destinations)
