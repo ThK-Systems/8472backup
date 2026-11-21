@@ -1,12 +1,13 @@
 from io import BytesIO
 from pathlib import Path
+from typing import cast
 from uuid import UUID
 
 import pytest
 
 from p8472backup.archive.objects import TYPE_SNAPSHOT, Object
 from p8472backup.archive.snapshotroot import SnapshotRoot
-from p8472backup.server.repository import Repository
+from p8472backup.server.repository import BackupMode, Repository
 from p8472backup.server.repository_service import RepositoryService
 from p8472backup.server.snapshot_service import SnapshotService
 
@@ -19,6 +20,7 @@ _KEY_ID = UUID(int=3)
 def test_init_repository_rejects_second_init_and_preserves_backup(tmp_path: Path) -> None:
     path = tmp_path / "repo"
     repository = RepositoryService.init_repository(path, _CLIENT_ID, _BACKUP_SET_ID, _KEY_ID)
+    assert repository.mode == "pull"
 
     body = SnapshotRoot(b"backup set configuration").to_plaintext()
     root = Object(TYPE_SNAPSHOT, b"r" * 32, len(body))
@@ -63,3 +65,24 @@ def test_init_repository_requires_a_new_path(tmp_path: Path) -> None:
     with pytest.raises(FileExistsError):
         RepositoryService.init_repository(path, _CLIENT_ID, _BACKUP_SET_ID, _KEY_ID)
     assert not list(path.iterdir())
+
+
+def test_repository_can_change_mode(tmp_path: Path) -> None:
+    repository = RepositoryService.init_repository(tmp_path / "repo", _CLIENT_ID, _BACKUP_SET_ID, _KEY_ID, mode="push")
+    original_hash = hash(repository)
+    initial_mode = repository.mode
+    assert initial_mode == "push"
+
+    repository.set_mode("pull")
+    with pytest.raises(ValueError, match="Unsupported backup mode"):
+        repository.set_mode(cast(BackupMode, "invalid"))
+
+    assert repository.mode == "pull"
+    assert hash(repository) == original_hash
+
+
+def test_invalid_mode_does_not_create_repository(tmp_path: Path) -> None:
+    path = tmp_path / "repo"
+    with pytest.raises(ValueError, match="Unsupported backup mode"):
+        RepositoryService.init_repository(path, _CLIENT_ID, _BACKUP_SET_ID, _KEY_ID, mode=cast(BackupMode, "invalid"))
+    assert not path.exists()

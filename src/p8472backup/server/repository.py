@@ -1,8 +1,12 @@
 """Filesystem paths for one client repository."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 from uuid import UUID
+
+
+type BackupMode = Literal["pull", "push"]
 
 
 @dataclass(frozen=True)
@@ -13,9 +17,17 @@ class Repository:
     client_id: UUID
     backup_set_id: UUID
     key_id: UUID
+    mode: BackupMode = field(default="pull", compare=False)
 
     def __post_init__(self) -> None:
+        self.set_mode(self.mode)
         object.__setattr__(self, "path", self.path.resolve())
+
+    def set_mode(self, mode: BackupMode) -> None:
+        """Set the active backup mode for this repository."""
+        if mode not in ("pull", "push"):
+            raise ValueError(f"Unsupported backup mode: {mode!r}")
+        object.__setattr__(self, "mode", mode)
 
     @property
     def index_path(self) -> Path:
