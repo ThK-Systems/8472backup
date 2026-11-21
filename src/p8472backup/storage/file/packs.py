@@ -129,13 +129,24 @@ class Pack:
         return pack
 
     @classmethod
+    def load_from(cls, path: Path) -> Pack:
+        """Load the header of a stored pack and validate the file size."""
+        with path.open("rb") as source:
+            return cls._load_header(source)
+
+    @classmethod
+    def _load_header(cls, source: BinaryIO) -> Pack:
+        pack = cls.from_header(source.read(HEADER_SIZE))
+        if os.fstat(source.fileno()).st_size != HEADER_SIZE + pack.body_length:
+            raise ValueError("Pack file length does not match its header")
+        return pack
+
+    @classmethod
     def read_object(cls, path: Path, offset: int, length: int, output: BinaryIO) -> Object:
         """Read a record at a known location and copy its body to output."""
         with path.open("rb") as source:
-            pack = cls.from_header(source.read(HEADER_SIZE))
+            pack = cls._load_header(source)
             pack_end = HEADER_SIZE + pack.body_length
-            if os.fstat(source.fileno()).st_size != pack_end:
-                raise ValueError("Pack file length does not match its header")
             if offset < HEADER_SIZE or length < OBJECT_HEADER_SIZE or offset + length > pack_end:
                 raise ValueError("Object location lies outside the pack body")
 

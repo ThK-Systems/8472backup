@@ -9,14 +9,30 @@ from p8472backup.archive.dataobject import COMPRESSION_NONE, DataObject
 from p8472backup.archive.metaobject import MetaObject
 from p8472backup.archive.objects import HEADER_SIZE as OBJECT_HEADER_SIZE, TYPE_DATA, TYPE_METADATA, TYPE_SNAPSHOT, Object, ObjectId
 from p8472backup.archive.snapshotroot import SnapshotRoot
-from p8472backup.server.service import _load_snapshot, _prepare_snapshot, run_snapshot
+from p8472backup.server.service import SnapshotService
 from p8472backup.server.snapshots import store_snapshot_objects
 from p8472backup.storage.file.index import LocationIndex, ObjectLocation
 from p8472backup.storage.file.lock import RepositoryLock
 from p8472backup.storage.file.packs import HEADER_SIZE as PACK_HEADER_SIZE, Pack
 
 
-def test_snapshot_catalogue_resolves_objects_through_saved_index(tmp_path: Path) -> None:
+_CLIENT_ID = UUID(int=2)
+_BACKUP_SET_ID = UUID(int=3)
+_KEY_DOMAIN_ID = UUID(int=4)
+
+
+@pytest.fixture
+def snapshot_service(tmp_path: Path) -> SnapshotService:
+    index_path = tmp_path / "index" / str(_KEY_DOMAIN_ID)
+    index_path.parent.mkdir()
+    (tmp_path / "snapshots" / str(_BACKUP_SET_ID)).mkdir(parents=True)
+    (tmp_path / "packs" / str(_KEY_DOMAIN_ID)).mkdir(parents=True)
+    with RepositoryLock(tmp_path) as lock:
+        assert LocationIndex().save_to(index_path, lock)
+    return SnapshotService(tmp_path, client_id=_CLIENT_ID, backup_set_id=_BACKUP_SET_ID, key_domain_id=_KEY_DOMAIN_ID)
+
+
+def test_snapshot_catalogue_resolves_objects_through_saved_index(tmp_path: Path, snapshot_service: SnapshotService) -> None:
     source = tmp_path / "report.txt"
     source.write_bytes(b"Backup report\n")
     chunk = source.read_bytes()
@@ -29,35 +45,19 @@ def test_snapshot_catalogue_resolves_objects_through_saved_index(tmp_path: Path)
         (TYPE_METADATA, metadata_id, MetaObject(source.name.encode("utf-8"), (data_id,)).to_plaintext()),
     )
     records = ((Object(object_type, object_id, len(body)), BytesIO(body)) for object_type, object_id, body in bodies)
-    pack_path = tmp_path / "pack"
-    index_path = tmp_path / "index"
-    snapshot_directory = tmp_path / "snapshots"
-    snapshot_directory.mkdir()
-    snapshot_id, client_id, backup_set_id = UUID(int=1), UUID(int=2), UUID(int=3)
-    with RepositoryLock(tmp_path) as lock:
-        assert LocationIndex().save_to(index_path, lock)
-
-    committed = run_snapshot(
-        tmp_path,
-        records,
-        snapshot_id=snapshot_id,
-        client_id=client_id,
-        backup_set_id=backup_set_id,
-        root_id=root_id,
-        index_path=index_path,
-        snapshot_directory=snapshot_directory,
-        pack_destinations=iter(((1, pack_path),)),
-    )
+    index_path = tmp_path / "index" / str(_KEY_DOMAIN_ID)
+    pack_path = tmp_path / "packs" / str(_KEY_DOMAIN_ID) / "1.pack"
+    committed = snapshot_service.create_snapshot(records, root_id)
+    snapshot = snapshot_service.get_snapshot(committed.snapshot_id)
+    assert snapshot == committed
+    assert (snapshot.client_id, snapshot.backup_set_id) == (_CLIENT_ID, _BACKUP_SET_ID)
+    assert snapshot.root_id == root_id
+    assert snapshot.committed_at.tzinfo is UTC
+    assert snapshot.protected_until - snapshot.committed_at == timedelta(days=7)
+    assert snapshot.object_catalog.object_ids == {root_id, metadata_id, data_id}
 
     restored: dict[ObjectId, bytes] = {}
     with RepositoryLock(tmp_path) as lock:
-        snapshot = _load_snapshot(snapshot_directory / f"{snapshot_id}.snapshot", lock)
-        assert snapshot == committed
-        assert (snapshot.snapshot_id, snapshot.client_id, snapshot.backup_set_id) == (snapshot_id, client_id, backup_set_id)
-        assert snapshot.root_id == root_id
-        assert snapshot.committed_at.tzinfo is UTC
-        assert snapshot.protected_until - snapshot.committed_at == timedelta(days=7)
-        assert snapshot.object_catalog.object_ids == {root_id, metadata_id, data_id}
         saved_index = LocationIndex.load_from(index_path, lock)
         for object_id in snapshot.object_catalog.object_ids:
             location = saved_index.get(object_id)
@@ -77,25 +77,28 @@ def test_snapshot_catalogue_resolves_objects_through_saved_index(tmp_path: Path)
     assert restored_file == chunk
 
 
+def test_create_snapshot_allocates_past_an_unindexed_pack(tmp_path: Path, snapshot_service: SnapshotService) -> None:
+    directory = tmp_path / "packs" / str(_KEY_DOMAIN_ID)
+    previous = Object(TYPE_DATA, b"d" * 32, 1)
+    Pack.write_to(directory / "1.pack", iter(((previous, BytesIO(b"d")),)))
+    root = Object(TYPE_SNAPSHOT, b"r" * 32, 1)
+    snapshot = snapshot_service.create_snapshot(iter(((root, BytesIO(b"r")),)), root.object_id)
+    assert snapshot.object_catalog.object_ids == {root.object_id}
+    with RepositoryLock(tmp_path) as lock:
+        index = LocationIndex.load_from(tmp_path / "index" / str(_KEY_DOMAIN_ID), lock)
+        assert index.get(root.object_id) == ObjectLocation(2, PACK_HEADER_SIZE, OBJECT_HEADER_SIZE + 1)
+    assert Pack.load_from(directory / "2.pack").object_count == 1
+
+
 @pytest.mark.parametrize("first", (None, Object(TYPE_DATA, b"r" * 32, 1), Object(TYPE_SNAPSHOT, b"a" * 32, 1)))
-def test_preparing_snapshot_requires_declared_root_first(tmp_path: Path, first: Object | None) -> None:
-    index_path = tmp_path / "index"
-    pack_path = tmp_path / "pack"
+def test_creating_snapshot_requires_declared_root_first(tmp_path: Path, snapshot_service: SnapshotService, first: Object | None) -> None:
     records = iter(()) if first is None else iter(((first, BytesIO(b"a")),))
-    with RepositoryLock(tmp_path) as lock:
-        assert LocationIndex().save_to(index_path, lock)
-        with pytest.raises(ValueError, match="first record must be"):
-            _prepare_snapshot(records, b"r" * 32, index_path, lock, iter(((1, pack_path),)))
-    assert not pack_path.exists()
+    with pytest.raises(ValueError, match="first record must be"):
+        snapshot_service.create_snapshot(records, b"r" * 32)
+    assert not list((tmp_path / "packs" / str(_KEY_DOMAIN_ID)).iterdir())
 
 
-def test_failed_index_save_does_not_publish_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    index_path = tmp_path / "index"
-    snapshot_directory = tmp_path / "snapshots"
-    snapshot_directory.mkdir()
-    with RepositoryLock(tmp_path) as lock:
-        assert LocationIndex().save_to(index_path, lock)
-
+def test_failed_index_save_does_not_publish_snapshot(tmp_path: Path, snapshot_service: SnapshotService, monkeypatch: pytest.MonkeyPatch) -> None:
     def fail_save(index: LocationIndex, path: Path, lock: RepositoryLock) -> bool:
         lock.require_held_for(path)
         raise OSError("index sync failed")
@@ -103,20 +106,10 @@ def test_failed_index_save_does_not_publish_snapshot(tmp_path: Path, monkeypatch
     monkeypatch.setattr(LocationIndex, "save_to", fail_save)
     root = Object(TYPE_SNAPSHOT, b"r" * 32, 1)
     with pytest.raises(OSError, match="index sync failed"):
-        run_snapshot(
-            tmp_path,
-            iter(((root, BytesIO(b"r")),)),
-            snapshot_id=UUID(int=1),
-            client_id=UUID(int=2),
-            backup_set_id=UUID(int=3),
-            root_id=root.object_id,
-            index_path=index_path,
-            snapshot_directory=snapshot_directory,
-            pack_destinations=iter(((1, tmp_path / "pack"),)),
-        )
-    assert not list(snapshot_directory.iterdir())
+        snapshot_service.create_snapshot(iter(((root, BytesIO(b"r")),)), root.object_id)
+    assert not list((tmp_path / "snapshots" / str(_BACKUP_SET_ID)).iterdir())
     with RepositoryLock(tmp_path) as lock:
-        assert LocationIndex.load_from(index_path, lock).get(root.object_id) is None
+        assert LocationIndex.load_from(tmp_path / "index" / str(_KEY_DOMAIN_ID), lock).get(root.object_id) is None
 
 
 @pytest.mark.parametrize("target_size", (1, 1_000))

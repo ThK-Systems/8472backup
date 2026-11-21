@@ -47,6 +47,7 @@ class TestPack:
         pack = Pack.write_to(path, records, target_size=first_length + 1, on_stored=on_stored)
 
         assert pack == Pack(2, first_length + second_length)
+        assert Pack.load_from(path) == pack
         assert on_stored.call_args_list == [
             call(first.object_id, HEADER_SIZE, first_length),
             call(second.object_id, HEADER_SIZE + first_length, second_length),

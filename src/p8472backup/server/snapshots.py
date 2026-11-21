@@ -1,38 +1,15 @@
-"""Snapshot metadata, object membership, and deduplication."""
+"""Assemble the object catalogue and store missing objects."""
 
 from collections.abc import Iterator
-from dataclasses import dataclass
-from datetime import datetime
 from itertools import chain
 from pathlib import Path
 from typing import BinaryIO
-from uuid import UUID
 
 from p8472backup.archive.objects import Object, ObjectId
+from p8472backup.server.snapshot import ObjectCatalogue
 from p8472backup.storage.file.index import LocationIndex, ObjectLocation
 from p8472backup.storage.file.lock import RepositoryLock
 from p8472backup.storage.file.packs import DEFAULT_TARGET_SIZE, Pack
-
-
-@dataclass(frozen=True)
-class ObjectCatalogue:
-    """The immutable set of object IDs required by a snapshot."""
-
-    object_ids: frozenset[ObjectId]
-
-
-@dataclass(frozen=True)
-class Snapshot:
-    """Server-readable metadata and membership of a committed snapshot."""
-
-    snapshot_id: UUID
-    client_id: UUID
-    backup_set_id: UUID
-    root_id: ObjectId
-    committed_at: datetime
-    protected_until: datetime
-    object_catalog: ObjectCatalogue
-    version: int = 1
 
 
 def iter_missing_objects(
