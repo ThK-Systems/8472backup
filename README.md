@@ -1,7 +1,13 @@
 # 8472backup
 
+---
+
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue)](LICENSE)
 [![coverage](https://codecov.io/gh/ThK-Systems/8472backup/branch/master/graph/badge.svg)](https://codecov.io/gh/ThK-Systems/8472backup)
+
+<p align="left">
+  <img src="resources/8472backup-logo-1024x273.webp" alt="8472backup" height=100>
+</p>
 
 A planned client/server backup system with client-side encryption, deduplication, and server-enforced retention. It is inspired by Borg and borgmatic.
 
