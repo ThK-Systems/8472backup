@@ -1,0 +1,26 @@
+import pytest
+
+from p8472backup.archive.snapshotroot import SnapshotRoot
+
+
+class TestSnapshotRoot:
+    def test_plaintext_round_trip_matches_wire_format(self) -> None:
+        description = b"config"
+        first, second = b"a" * 32, b"b" * 32
+        root = SnapshotRoot(description, (first, second))
+        plaintext = b"\x06" + bytes(7) + description + first + second
+        assert root.to_plaintext() == plaintext
+        assert SnapshotRoot.from_plaintext(plaintext) == root
+
+    def test_accepts_empty_metadata_list(self) -> None:
+        root = SnapshotRoot(b"config")
+        assert SnapshotRoot.from_plaintext(root.to_plaintext()) == root
+
+    @pytest.mark.parametrize("plaintext", (bytes(7), b"\x01" + bytes(7), bytes(8) + b"x"))
+    def test_rejects_invalid_plaintext(self, plaintext: bytes) -> None:
+        with pytest.raises(ValueError):
+            SnapshotRoot.from_plaintext(plaintext)
+
+    def test_rejects_wrong_metadata_id_length(self) -> None:
+        with pytest.raises(ValueError, match="exactly 32 bytes"):
+            SnapshotRoot(b"config", (bytes(31),))
