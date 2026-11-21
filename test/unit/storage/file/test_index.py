@@ -116,6 +116,40 @@ class TestLocationIndex:
             index.save_to(path, reacquired)
             assert LocationIndex.load_from(path, reacquired).get(bytes(32)) is None
 
+    def test_save_skips_unchanged_indexes_and_duplicate_ids(self, tmp_path: Path) -> None:
+        path = tmp_path / "locations"
+        index = LocationIndex()
+        object_id = b"A" * 32
+        location = ObjectLocation(1, 14, 44)
+
+        with RepositoryLock(tmp_path) as lock:
+            assert index.save_to(path, lock) is True
+            loaded = LocationIndex.load_from(path, lock)
+            with patch("p8472backup.storage.file.index.NamedTemporaryFile") as create_file:
+                assert index.save_to(path, lock) is False
+                assert loaded.save_to(path, lock) is False
+                create_file.assert_not_called()
+
+            loaded.put(object_id, location)
+            assert loaded.save_to(path, lock) is True
+            loaded.put(object_id, ObjectLocation(2, 58, 100))
+            with patch("p8472backup.storage.file.index.NamedTemporaryFile") as create_file:
+                assert loaded.save_to(path, lock) is False
+                create_file.assert_not_called()
+            assert LocationIndex.load_from(path, lock).get(object_id) == location
+
+        with pytest.raises(RuntimeError, match="lock is not held"):
+            loaded.save_to(path, lock)
+
+    def test_failed_directory_sync_keeps_pending_changes(self, tmp_path: Path) -> None:
+        path = tmp_path / "locations"
+        index = LocationIndex()
+        with RepositoryLock(tmp_path) as lock:
+            with patch("p8472backup.storage.file.index.os.fsync", side_effect=[None, OSError("sync failed")]), pytest.raises(OSError, match="sync failed"):
+                index.save_to(path, lock)
+            assert index.save_to(path, lock) is True
+            assert index.save_to(path, lock) is False
+
     def test_failed_replace_keeps_previous_checkpoint(self, tmp_path: Path) -> None:
         path = tmp_path / "locations"
         index = LocationIndex()
@@ -135,3 +169,6 @@ class TestLocationIndex:
             assert restored.get(original_id) == original
             assert restored.get(additional_id) is None
             assert not list(tmp_path.glob(".location-index-*"))
+            assert index.save_to(path, lock) is True
+            assert LocationIndex.load_from(path, lock).get(additional_id) == additional
+            assert index.save_to(path, lock) is False

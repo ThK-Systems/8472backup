@@ -47,6 +47,7 @@ class LocationIndex:
             raise RuntimeError("Location index requires 32-bit unsigned array elements")
         self._records = bytearray()
         self._count = 0
+        self._dirty = True
 
     def _find_bucket(self, object_id: ObjectId, buckets: array[int]) -> int:
         """Find the matching bucket or the first free bucket in its probe sequence."""
@@ -138,13 +139,20 @@ class LocationIndex:
         self._buckets[bucket] = position
         # Record that the index contains one more entry.
         self._count = position
+        # Mark the inserted entry as requiring persistence.
+        self._dirty = True
 
-    def save_to(self, path: Path, lock: RepositoryLock) -> None:
-        """Durably replace the checkpoint while the caller holds the repository lock.
+    def save_to(self, path: Path, lock: RepositoryLock) -> bool:
+        """Save pending changes and return True, or return False if unchanged and unsaved.
+
+        A new index requires an initial save, including when it is empty.
+        Failed saves retain pending changes for a retry.
 
         This method is part of the public location index API.
         """
         path = lock.require_held_for(path)
+        if not self._dirty:
+            return False
         header = _CHECKPOINT_HEADER.pack(_CHECKPOINT_MAGIC, _CHECKPOINT_VERSION, self._count)
         checksum = sha256(header)
         checksum.update(self._records)
@@ -167,6 +175,8 @@ class LocationIndex:
             os.fsync(directory_fd)
         finally:
             os.close(directory_fd)
+        self._dirty = False
+        return True
 
     @classmethod
     def load_from(cls, path: Path, lock: RepositoryLock) -> Self:
@@ -201,6 +211,7 @@ class LocationIndex:
         required_buckets = max(_INITIAL_BUCKET_COUNT, 2 * count)
         capacity = 1 << (required_buckets - 1).bit_length()
         index._rebuild_buckets(capacity)
+        index._dirty = False
         return index
 
     @classmethod

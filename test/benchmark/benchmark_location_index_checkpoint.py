@@ -14,10 +14,6 @@ from p8472backup.storage.file.lock import RepositoryLock
 
 
 def measure(directory: Path, entries: int, repeats: int) -> dict[str, object]:
-    index = LocationIndex()
-    for number in range(entries):
-        object_id, location = entry_for(number)
-        index.put(object_id, location)
     expected = [entry_for(number) for number in (0, entries // 2, entries - 1)]
     missing, _ = entry_for(entries)
     save_seconds = []
@@ -28,11 +24,16 @@ def measure(directory: Path, entries: int, repeats: int) -> dict[str, object]:
         checkpoint = repository / "locations"
         with RepositoryLock(repository) as lock:
             for _ in range(repeats):
+                index = LocationIndex()
+                for number in range(entries):
+                    object_id, location = entry_for(number)
+                    index.put(object_id, location)
                 started = perf_counter()
-                index.save_to(checkpoint, lock)
+                if not index.save_to(checkpoint, lock):
+                    raise RuntimeError("Expected a durable save of a new index")
                 save_seconds.append(perf_counter() - started)
+                del index
             checkpoint_bytes = checkpoint.stat().st_size
-            del index
 
             for _ in range(repeats):
                 started = perf_counter()
