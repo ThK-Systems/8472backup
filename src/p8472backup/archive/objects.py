@@ -20,6 +20,10 @@ TYPE_DATA = 1
 TYPE_METADATA = 2
 TYPE_SNAPSHOT = 3
 
+# Provisional IDs for the encryption envelope.
+ENCRYPTION_AES256_GCM = 1
+ENCRYPTION_AES256_OCB = 2
+
 
 @dataclass(frozen=True)
 class Object:
