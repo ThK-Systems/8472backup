@@ -41,10 +41,14 @@ class RepositoryLock:
             fd, self._fd = self._fd, None
             os.close(fd)
 
-    def require_held_for(self, path: Path) -> Path:
-        """Return the resolved repository file path if this lock is held for it."""
+    def require_held(self) -> None:
+        """Raise if this lock instance is not held."""
         if self._fd is None:
             raise RuntimeError("Repository lock is not held")
+
+    def require_held_for(self, path: Path) -> Path:
+        """Return the resolved repository file path if this lock is held for it."""
+        self.require_held()
         path = path.resolve()
         if self._repository not in path.parents or path == self._path:
             raise ValueError("Path must name a repository file other than the lock file")

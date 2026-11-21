@@ -1,5 +1,6 @@
 from io import BytesIO
 from pathlib import Path
+from unittest.mock import Mock, call, patch
 
 import pytest
 
@@ -30,7 +31,7 @@ class TestPack:
             with pytest.raises(ValueError):
                 Pack(object_count=object_count, body_length=body_length)
 
-    def test_writes_and_reads_records_up_to_target(self, tmp_path: Path) -> None:
+    def test_writes_and_reads_records_up_to_target(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         path = tmp_path / "pack"
         first_body = b"a" * (128 * 1024)
         second_body = b"opaque metadata"
@@ -41,9 +42,15 @@ class TestPack:
         first_length = OBJECT_HEADER_SIZE + first.length
         second_length = OBJECT_HEADER_SIZE + second.length
 
-        pack = Pack.write_to(path, records, target_size=first_length + 1)
+        monkeypatch.setattr("p8472backup.storage.file.packs._LOCATION_BUFFER_SIZE", 48)
+        on_stored = Mock()
+        pack = Pack.write_to(path, records, target_size=first_length + 1, on_stored=on_stored)
 
         assert pack == Pack(2, first_length + second_length)
+        assert on_stored.call_args_list == [
+            call(first.object_id, HEADER_SIZE, first_length),
+            call(second.object_id, HEADER_SIZE + first_length, second_length),
+        ]
         assert path.read_bytes() == pack.to_header() + first.to_header() + first_body + second.to_header() + second_body
         output = BytesIO()
         assert Pack.read_object(path, HEADER_SIZE + first_length, second_length, output) == second
@@ -61,6 +68,13 @@ class TestPack:
         with pytest.raises(ValueError, match="Truncated object body"):
             Pack.write_to(path, iter(((obj, BytesIO(b"a")),)))
         assert list(tmp_path.iterdir()) == []
+
+    def test_directory_sync_failure_does_not_report_locations(self, tmp_path: Path) -> None:
+        obj = Object(TYPE_DATA, b"a" * 32, 0)
+        on_stored = Mock()
+        with patch("p8472backup.storage.file.packs.os.fsync", side_effect=[None, OSError("sync failed")]), pytest.raises(OSError, match="sync failed"):
+            Pack.write_to(tmp_path / "pack", iter(((obj, BytesIO()),)), on_stored=on_stored)
+        on_stored.assert_not_called()
 
     def test_existing_destination_is_preserved(self, tmp_path: Path) -> None:
         path = tmp_path / "pack"

@@ -3,22 +3,24 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from struct import Struct
-from tempfile import NamedTemporaryFile
+from tempfile import NamedTemporaryFile, SpooledTemporaryFile
 from typing import BinaryIO
 
-from p8472backup.archive.objects import HEADER_SIZE as OBJECT_HEADER_SIZE, MAX_OBJECT_BODY_SIZE, Object
+from p8472backup.archive.objects import HEADER_SIZE as OBJECT_HEADER_SIZE, MAX_OBJECT_BODY_SIZE, OBJECT_ID_SIZE, Object, ObjectId
 
 
 _HEADER = Struct("<HIQ")
+_LOCATION_RECORD = Struct(f"<{OBJECT_ID_SIZE}sQQ")
 
 HEADER_SIZE = _HEADER.size
 FORMAT_VERSION = 1
 DEFAULT_TARGET_SIZE = 50_000_000
 _COPY_BUFFER_SIZE = 64 * 1024
+_LOCATION_BUFFER_SIZE = 256 * 1024
 
 
 @dataclass(frozen=True)
@@ -64,50 +66,66 @@ class Pack:
         path: Path,
         records: Iterator[tuple[Object, BinaryIO]],
         target_size: int = DEFAULT_TARGET_SIZE,
+        *,
+        on_stored: Callable[[ObjectId, int, int], None] | None = None,
     ) -> Pack:
         """Publish one pack, leaving later records in the iterator for the next pack.
 
         Each stream supplies exactly the declared body bytes from its current
         position. The caller owns the streams and uses an unused destination path.
+        After the pack and directory are synced, on_stored receives each object
+        ID, header offset, and total record length in pack order.
         """
         if target_size <= 0:
             raise ValueError("Pack target size must be positive")
 
-        directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            output = NamedTemporaryFile(dir=path.parent, prefix=".pack-", delete=False)
-            temporary_path = Path(output.name)
+        with SpooledTemporaryFile(max_size=_LOCATION_BUFFER_SIZE, dir=str(path.parent)) as locations:
+            directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
             try:
-                with output:
-                    output.write(bytes(HEADER_SIZE))
-                    object_count = 0
-                    body_length = 0
-                    for obj, body in records:
-                        output.write(obj.to_header())
-                        remaining = obj.length
-                        while remaining:
-                            block = body.read(min(remaining, _COPY_BUFFER_SIZE))
-                            if not block:
-                                raise ValueError("Truncated object body")
-                            output.write(block)
-                            remaining -= len(block)
+                output = NamedTemporaryFile(dir=path.parent, prefix=".pack-", delete=False)
+                temporary_path = Path(output.name)
+                try:
+                    with output:
+                        output.write(bytes(HEADER_SIZE))
+                        object_count = 0
+                        body_length = 0
+                        for obj, body in records:
+                            output.write(obj.to_header())
+                            remaining = obj.length
+                            while remaining:
+                                block = body.read(min(remaining, _COPY_BUFFER_SIZE))
+                                if not block:
+                                    raise ValueError("Truncated object body")
+                                output.write(block)
+                                remaining -= len(block)
 
-                        object_count += 1
-                        body_length += OBJECT_HEADER_SIZE + obj.length
-                        if body_length >= target_size or object_count == 2**32 - 1:
-                            break
+                            length = OBJECT_HEADER_SIZE + obj.length
+                            if on_stored is not None:
+                                locations.write(_LOCATION_RECORD.pack(obj.object_id, HEADER_SIZE + body_length, length))
+                            object_count += 1
+                            body_length += length
+                            if body_length >= target_size or object_count == 2**32 - 1:
+                                break
 
-                    pack = cls(object_count=object_count, body_length=body_length)
-                    output.seek(0)
-                    output.write(pack.to_header())
-                    output.flush()
-                    os.fsync(output.fileno())
-                os.link(temporary_path, path)
+                        pack = cls(object_count=object_count, body_length=body_length)
+                        output.seek(0)
+                        output.write(pack.to_header())
+                        output.flush()
+                        os.fsync(output.fileno())
+                    os.link(temporary_path, path)
+                finally:
+                    temporary_path.unlink()
+                os.fsync(directory_fd)
             finally:
-                temporary_path.unlink()
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+                os.close(directory_fd)
+
+            if on_stored is not None:
+                locations.seek(0)
+                while entry := locations.read(_LOCATION_RECORD.size):
+                    object_id: ObjectId
+                    offset: int
+                    object_id, offset, length = _LOCATION_RECORD.unpack(entry)
+                    on_stored(object_id, offset, length)
         return pack
 
     @classmethod
