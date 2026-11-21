@@ -110,7 +110,7 @@ Required logical sequence:
 
 1. Admit a run in the authenticated host/set scope and atomically acquire its exclusive backup-run lock.
 2. Process the membership stream and persist missing encrypted objects while preserving previously stored objects.
-3. Receive the type 3 snapshot root as the final object declaration and take the root ID from that declaration. Require explicit protocol completion before committing the snapshot. A connection closure before completion interrupts the run. The final root declaration can carry the completion signal; the exact framing remains open.
+3. Receive the type 3 snapshot root as the final record and take the root ID from its header. The complete header and all declared body bytes signal the end of the backup input, including when the root ID is already indexed. A connection closure before the complete record interrupts the run.
 4. Verify required object existence and scope, including objects reused from earlier runs.
 5. Durably record membership and authoritative snapshot metadata.
 6. Publish the completed snapshot together with the server-assigned commit time and applicable protection state through a crash-safe commit mechanism.
