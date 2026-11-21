@@ -1,6 +1,6 @@
 # 8472backup — Verification and Development
 
-Specification version: 0.41 — Include SQLite in location-index evaluation, 2026-11-19
+Specification version: 0.42 — Include SQLite in location-index evaluation, 2026-11-19
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 
@@ -56,9 +56,9 @@ Use integration tests and targeted fault injection for durability claims. Compar
 
 Benchmark representative unchanged backups, local edits in large files, many small files, restore, mount, and cleanup. Record environment, storage, cache state, CPU, memory, throughput, and repository growth. Do not claim Borg-equivalent performance without comparable measurements.
 
-Plyvel/LevelDB is an additional evaluation candidate, not an adopted runtime dependency or repository format. SQLite has also been approved for evaluation; see the [SQLite assessment](06-SQLITE-EVALUATION.md). The manual comparison defaults to LMDB, Plyvel, and SQLite; rejected borghash remains available only as an explicit historical reference. See the [Plyvel assessment](05-PLYVEL-EVALUATION.md) for API, concurrency, memory accounting, and measured limitations.
+Plyvel/LevelDB is an additional evaluation candidate, not an adopted runtime dependency or repository format. SQLite has also been approved for evaluation. The manual comparison defaults to LMDB, Plyvel, and SQLite; rejected borghash remains available only as an explicit historical reference.
 
-The opt-in `test/benchmark/compare_location_indexes.py` compares the current Borg 2 hash-table library with LMDB using synthetic 32-byte keys and 24-byte location values. Measure serial pull clients and concurrent push clients, both with up to two additional mount readers. Apply the 64–128 MiB target to the combined operation process, including its interpreter, native allocations, and resident mapped pages. Report budget violations; this benchmark does not enforce an operating-system memory limit. Dataset preparation is isolated from operation measurements. Keep it outside normal pytest collection. The [benchmark notes](04-LOCATION-INDEX-BENCHMARK.md) describe setup, measured results, and limitations; neither candidate is selected for production.
+The opt-in `test/benchmark/compare_location_indexes.py` compares the current Borg 2 hash-table library with LMDB using synthetic 32-byte keys and 24-byte location values. Measure serial pull clients and concurrent push clients, both with up to two additional mount readers. Apply the 64–128 MiB target to the combined operation process, including its interpreter, native allocations, and resident mapped pages. Report budget violations; this benchmark does not enforce an operating-system memory limit. Dataset preparation is isolated from operation measurements. Keep it outside normal pytest collection.
 
 Use purpose-written Python tests, temporary directories, representative data, and fault injection alongside each increment. Add actual process interruption and restart tests when persistent commit/recovery exists: simulated failures alone do not establish crash durability.
 
@@ -94,7 +94,7 @@ The immediate focus is the server-side snapshot core with real chunks, packs, an
 
 Explicitly approved on 2026-11-19: implement the common header codec as the immutable concrete class `Object` in `src/p8472backup/archive/objects.py`, with focused tests in `test/unit/archive/test_objects.py`. `to_header()` returns the serialized header; the class method `from_header()` returns an `Object`, not a tuple of fields. Construction validates the header state. Configure mypy's source search path relative to `pyproject.toml` so individual-file checking finds the package. Payload handling is discussion-only and is not authorized for implementation by this increment. The remaining pack and snapshot implementation still requires explicit approval.
 
-The non-normative [project structure proposal](02-PROJECT-STRUCTURE.md) describes the proposed package hierarchy and first test-driven snapshot increment. Package naming, file-based catalogue details, and the exact module breakdown require review; this specification remains the requirements authority.
+The non-normative [project structure proposal](20-ProjectStructure.md) describes the proposed package hierarchy and first test-driven snapshot increment. Package naming, file-based catalogue details, and the exact module breakdown require review; this specification remains the requirements authority.
 
 ### 20.1 Initial focus: archive design and dedicated tests
 

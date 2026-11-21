@@ -8,7 +8,7 @@ Also explicitly approved: the immutable `Pack` header class in `src/p8472backup/
 
 Also explicitly approved: data-only immutable `Snapshot` and `ObjectCatalogue` classes in `src/p8472backup/server/snapshots.py`. Custom methods, validation, and serialization are deferred; this increment adds no new tests for generated dataclass behavior.
 
-Also explicitly approved: the data-only immutable `ObjectLocation` class in `src/p8472backup/storage/file/index.py` and an opt-in native-hash/LMDB comparison in `test/benchmark/compare_location_indexes.py`. The comparison libraries are optional benchmark tools, not selected runtime dependencies. Production index methods and persistence remain unimplemented. See [benchmark notes](04-LOCATION-INDEX-BENCHMARK.md).
+Also explicitly approved: the data-only immutable `ObjectLocation` class in `src/p8472backup/storage/file/index.py` and an opt-in native-hash/LMDB comparison in `test/benchmark/compare_location_indexes.py`. The comparison libraries are optional benchmark tools, not selected runtime dependencies. Production index methods and persistence remain unimplemented.
 
 ## 1. Agreed starting point
 
@@ -62,14 +62,14 @@ test/
   integration/
     test_snapshots.py
 spec/
-  01-8472backup-SPEC.md
-  01a-PURPOSE-SCOPE-ARCHITECTURE.md
-  01b-CRYPTOGRAPHY-OBJECTS-AND-PACKS.md
-  01c-SNAPSHOTS-COMMIT-AND-RETENTION.md
-  01d-COMMUNICATION-CONFIGURATION-AND-OPERATIONS.md
-  01e-VERIFICATION-AND-DEVELOPMENT.md
-  01f-FUTURE-WORK-AND-REFERENCES.md
-  02-PROJECT-STRUCTURE.md
+  01-8472backup-Spec.md
+  01a-PurposeScopeArchitecture.md
+  01b-CryptographyObjectsAndPacks.md
+  01c-SnapshotsCommitAndRetention.md
+  01d-CommunicationConfigurationAndOperations.md
+  01e-VerificationAndDevelopment.md
+  01f-FutureWorkAndReferences.md
+  20-ProjectStructure.md
 ```
 
 This is an intended organization as functionality grows. Create modules with their implementation increment; the tree is not a request for empty scaffolding. Regular packages will have the required `__init__.py` files, omitted from the diagram.

@@ -1,6 +1,6 @@
 # 8472backup — Communication, Configuration, and Operations
 
-Specification version: 0.41 — Include SQLite in location-index evaluation, 2026-11-19
+Specification version: 0.42 — Include SQLite in location-index evaluation, 2026-11-19
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 
@@ -129,7 +129,7 @@ OPEN: syntax, file locations, schema, supported rule vocabulary, and scheduling 
 
 The server does not need a separate readable copy of the complete backup description. The pre-run exchange exposes only required operational fields; source paths and exclusions are evaluated locally and retained in the client-encrypted snapshot description. The exact operational field schema remains OPEN.
 
-See the [configuration roadmap](03-CONFIGURATION-ROADMAP.md) for planned settings, their authority and scope, and candidates that still need a decision.
+See the [configuration roadmap](70-ConfigurationRoadmap.md) for planned settings, their authority and scope, and candidates that still need a decision.
 ## 16. Restore and read-only mounting
 
 - Restore is initiated on a client with the required recovery keys.

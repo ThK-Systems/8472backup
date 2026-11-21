@@ -1,6 +1,6 @@
 # 8472backup — Snapshots, Commit, and Retention
 
-Specification version: 0.41 — Include SQLite in location-index evaluation, 2026-11-19
+Specification version: 0.42 — Include SQLite in location-index evaluation, 2026-11-19
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 
