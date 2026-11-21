@@ -1,6 +1,6 @@
 # 8472backup — Verification and Development
 
-Specification version: 0.45 — Lock-protected location index checkpoints, 2026-11-21
+Specification version: 0.47 — Threshold-triggered combined maintenance, 2026-11-21
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 

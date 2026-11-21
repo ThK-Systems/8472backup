@@ -1,6 +1,6 @@
 # 8472backup — Snapshots, Commit, and Retention
 
-Specification version: 0.45 — Lock-protected location index checkpoints, 2026-11-21
+Specification version: 0.47 — Threshold-triggered combined maintenance, 2026-11-21
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 
@@ -183,6 +183,8 @@ Logical snapshot removal and physical object reclamation may be separate operati
 The server MUST derive liveness from its authoritative records for retained snapshots and active operations. It MUST NOT rely solely on traversing client-encrypted file metadata or on a client-replaceable reference cache.
 
 Tracing and reference counting remain alternatives to evaluate. Borg 2's choice of garbage collection does not automatically settle our implementation.
+
+DEFERRED implementation: combine authorized snapshot deletion/pruning and conditional pack compaction in one automatic maintenance workflow. After deletion/pruning, run compaction only when a percentage threshold is reached; otherwise continue normal operation. The threshold value, default, measurement basis, and denominator remain OPEN. Proposed basis for review: currently reclaimable pack bytes, including space left by earlier maintenance runs, relative to total pack bytes. Snapshot counts alone do not measure reclaimable space because snapshots share objects. Protection and active-operation liveness remain mandatory inputs to the reclaimability decision.
 
 Pack compaction reclaims space occupied by objects that are no longer required by retained snapshots or active operations. Copy the still-live object records unchanged into replacement packs; do not decrypt, recompress, or change their object IDs. Persist the replacements and switch their location-index entries durably before removing old packs, accounting for active readers. A wholly unused pack can be removed without copying; a wholly live pack needs no reclamation. Snapshot roots, metadata, and data have the same liveness protection. Exact selection thresholds, concurrency, crash recovery, and publication mechanics remain OPEN; compaction is not implemented by the header increment.
 

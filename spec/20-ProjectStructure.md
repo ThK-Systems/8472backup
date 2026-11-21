@@ -10,7 +10,7 @@ Also explicitly approved: data-only immutable `Snapshot` and `ObjectCatalogue` c
 
 Also explicitly approved: the data-only immutable `ObjectLocation` class in `src/p8472backup/storage/file/index.py`. Benchmark libraries are optional development tools.
 
-The same module implements an in-memory `LocationIndex`. Its 32-bit buckets reference packed 56-byte records. Lookups probe linearly and compare the full object ID. `put(object_id, location)` inserts a location only if the supplied ID is absent. `get(object_id)` returns the location or `None`. The bucket array grows above 50 percent occupancy. The `get` and `put` signatures support duck typing. `save_to` and `load_from` use a versioned checkpoint and require the exclusive `RepositoryLock` from `storage/file/lock.py`.
+The same module implements an in-memory `LocationIndex`. Its 32-bit buckets reference packed 56-byte records. Lookups probe linearly and compare the full object ID. `put(object_id, location)` inserts a location only if the supplied ID is absent. `get(object_id)` returns the location or `None`. The bucket array starts at 8,192 buckets and doubles before an insertion would exceed 50 percent occupancy. The `get` and `put` signatures support duck typing. `save_to` and `load_from` use a versioned checkpoint and require the exclusive `RepositoryLock` from `storage/file/lock.py`. `save_to` returns `True` after saving pending changes and `False` when unchanged. New indexes require an initial save; loaded indexes start unchanged. Failed saves preserve pending changes for retry.
 
 ## 1. Agreed starting point
 

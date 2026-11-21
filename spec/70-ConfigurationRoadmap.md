@@ -30,7 +30,7 @@ Status: medium-term inventory, 2026-11-13. The [main specification](10-8472backu
 | Concurrent repository operations | Planned | Server-wide maximum number of operations holding repository locks at the same time. Default: 10. The exclusive lock still allows only one operation per client repository. The shared memory budget applies across all active operations. Queueing, rejection, and validation rules remain open. |
 | Shared memory budget | Planned | Target 64–128 MiB across all active server operations combined, including concurrent push clients and one or two mount readers. Serial pull work may reuse the budget. Exact configuration, accounting, enforcement, and admission rules remain open; no per-client multiplication of the budget. |
 | Timeouts and retries | Candidate | Pull connection attempts and operation failure handling. Define bounded retries and commit acknowledgement semantics before choosing options. |
-| Maintenance timing | Candidate | Scheduling or thresholds for eligible garbage collection and pack compaction. Maintenance stays automatic and cannot bypass retention, protection, or active-operation liveness. |
+| Compaction threshold | Planned; implementation deferred | Combine deletion/pruning with conditional compaction. Compact when a percentage threshold is reached; otherwise continue normal operation. Value, default, metric, and denominator remain open. Proposed metric: accumulated reclaimable pack bytes relative to total pack bytes. Maintenance cannot bypass retention, protection, or active-operation liveness. |
 | Logging verbosity | Candidate | Service diagnostics suitable for systemd/journald. Report completion, failure, and maintenance outcomes accurately. |
 
 ## Settings requiring a shared client/server decision

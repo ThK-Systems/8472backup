@@ -1,6 +1,6 @@
 # 8472backup — Cryptography, Objects, and Packs
 
-Specification version: 0.45 — Lock-protected location index checkpoints, 2026-11-21
+Specification version: 0.47 — Threshold-triggered combined maintenance, 2026-11-21
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 
@@ -138,7 +138,7 @@ These fields total 56 raw bytes, with a 24-byte location value after the 32-byte
 
 The development location index checkpoint contains an 18-byte header, the packed 56-byte records, and a 32-byte SHA-256 digest over the header and records. The header layout is `<8sHQ`: the eight-byte marker `8472IDX\x00`, version 1 as an unsigned 16-bit integer, and the record count as an unsigned 64-bit integer. Header integers and the three unsigned 64-bit location fields are little endian. The loader checks the header, count, exact file size, checksum, and uniqueness of the IDs. It rebuilds the in-memory bucket array from the records. The digest detects accidental corruption.
 
-`LocationIndex.save_to(path, lock)` writes a temporary file in the destination directory, syncs it, atomically replaces the checkpoint, and syncs the directory. `LocationIndex.load_from(path, lock)` reports a missing checkpoint as an error. Both require a held repository lock covering the path. Callers choose a separate checkpoint path for each key domain and decide whether changes require a save. Repository orchestration and index reconstruction remain separate work.
+`LocationIndex.save_to(path, lock)` writes a temporary file in the destination directory, syncs it, atomically replaces the checkpoint, and syncs the directory. `LocationIndex.load_from(path, lock)` reports a missing checkpoint as an error. Both require a held repository lock covering the path. Callers choose a separate checkpoint path for each key domain. The index tracks pending changes internally. A new index requires an initial save, including when empty. Inserting a new ID marks it as changed; duplicate IDs keep the first location. After validating the held lock and path, `save_to` returns `False` without writing when there are no pending changes. It returns `True` after a successful durable save and then clears the pending-change flag. A failed save raises an exception and preserves pending changes for retry. A loaded index starts with no pending changes. Repository orchestration and index reconstruction remain separate work.
 
 Packing MUST NOT merge unrelated files into one logical plaintext chunk or couple their encryption. It MUST NOT cross independent key scopes without an explicit later decision.
 
