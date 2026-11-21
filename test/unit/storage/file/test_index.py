@@ -1,6 +1,10 @@
+from pathlib import Path
+from unittest.mock import patch
+
 import pytest
 
 from p8472backup.storage.file.index import LocationIndex, ObjectLocation
+from p8472backup.storage.file.lock import RepositoryLock
 
 
 class TestLocationIndex:
@@ -40,3 +44,57 @@ class TestLocationIndex:
             index.put(ObjectLocation(original.object_id, 1, -1, 44))
 
         assert index.get(original.object_id) == original
+
+    def test_checkpoint_round_trip_and_corruption_detection(self, tmp_path: Path) -> None:
+        path = tmp_path / "locations"
+        index = LocationIndex()
+        locations = [ObjectLocation(bytes(31) + bytes([number]), 2**64 - 1, 2**40 + number, 2**34 + 44) for number in range(10)]
+        for location in locations:
+            index.put(location)
+
+        with RepositoryLock(tmp_path) as lock:
+            index.save_to(path, lock)
+            restored = LocationIndex.load_from(path, lock)
+            assert [restored.get(location.object_id) for location in locations] == locations
+
+            damaged = bytearray(path.read_bytes())
+            damaged[-33] ^= 1
+            path.write_bytes(damaged)
+            with pytest.raises(ValueError, match="checksum mismatch"):
+                LocationIndex.load_from(path, lock)
+
+    def test_checkpoint_requires_exclusive_lock_for_its_repository(self, tmp_path: Path) -> None:
+        lock = RepositoryLock(tmp_path)
+        index = LocationIndex()
+        path = tmp_path / "locations"
+        with pytest.raises(RuntimeError, match="lock is not held"):
+            index.save_to(path, lock)
+        with pytest.raises(RuntimeError, match="lock is not held"):
+            LocationIndex.load_from(path, lock)
+
+        with lock:
+            with pytest.raises(BlockingIOError), RepositoryLock(tmp_path):
+                pytest.fail("Acquired a second exclusive lock")
+            with pytest.raises(ValueError, match="must name a repository file"):
+                index.save_to(tmp_path.parent / "locations", lock)
+            with pytest.raises(FileNotFoundError):
+                LocationIndex.load_from(path, lock)
+
+        with RepositoryLock(tmp_path) as reacquired:
+            index.save_to(path, reacquired)
+            assert LocationIndex.load_from(path, reacquired).get(bytes(32)) is None
+
+    def test_failed_replace_keeps_previous_checkpoint(self, tmp_path: Path) -> None:
+        path = tmp_path / "locations"
+        index = LocationIndex()
+        original = ObjectLocation(bytes(32), 1, 14, 44)
+        index.put(original)
+
+        with RepositoryLock(tmp_path) as lock:
+            index.save_to(path, lock)
+            index.put(ObjectLocation(original.object_id, 2, 14, 44))
+            with patch("p8472backup.storage.file.index.os.replace", side_effect=OSError("replace failed")), pytest.raises(OSError, match="replace failed"):
+                index.save_to(path, lock)
+
+            assert LocationIndex.load_from(path, lock).get(original.object_id) == original
+            assert not list(tmp_path.glob(".location-index-*"))

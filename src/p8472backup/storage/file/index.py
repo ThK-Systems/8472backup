@@ -2,16 +2,28 @@
 
 from __future__ import annotations
 
+import os
 import struct
 from array import array
+from collections.abc import Mapping
 from dataclasses import dataclass
+from hashlib import sha256
+from pathlib import Path
+from tempfile import NamedTemporaryFile
+from typing import Self
 
 from p8472backup.archive.objects import OBJECT_ID_SIZE, Object, ObjectId
+from p8472backup.storage.file.lock import RepositoryLock
 
 
 _LOCATION_FIELDS = struct.Struct("<QQQ")
 _RECORD_SIZE = OBJECT_ID_SIZE + _LOCATION_FIELDS.size
 _INITIAL_BUCKET_COUNT = 8
+_MAX_RECORD_COUNT = 2**32 - 1
+_CHECKPOINT_HEADER = struct.Struct("<8sHQ")
+_CHECKPOINT_MAGIC = b"8472IDX\x00"
+_CHECKPOINT_VERSION = 1
+_CHECKSUM_SIZE = sha256().digest_size
 
 
 @dataclass(frozen=True)
@@ -51,13 +63,16 @@ class LocationIndex:
             bucket = (bucket + 1) % capacity
         return bucket
 
-    def _grow_buckets(self) -> None:
+    def _rebuild_buckets(self, capacity: int) -> None:
         """Rebuild the bucket table without moving the packed records."""
-        buckets: array[int] = array("I", [0]) * (2 * len(self._buckets))
+        buckets: array[int] = array("I", [0]) * capacity
         for record_index in range(self._count):
             offset = record_index * _RECORD_SIZE
             object_id = bytes(self._records[offset : offset + OBJECT_ID_SIZE])
-            buckets[self._find_bucket(object_id, buckets)] = record_index + 1
+            bucket = self._find_bucket(object_id, buckets)
+            if buckets[bucket]:
+                raise ValueError("Duplicate object ID in location index")
+            buckets[bucket] = record_index + 1
         self._buckets = buckets
 
     def get(self, object_id: ObjectId) -> ObjectLocation | None:
@@ -93,11 +108,83 @@ class LocationIndex:
 
         # Zero is reserved for empty buckets. Record positions start at one.
         position = self._count + 1
-        if position >= 2**32:
+        if position > _MAX_RECORD_COUNT:
             raise OverflowError("Location index has exhausted its 32-bit record positions")
         if position * 2 > len(self._buckets):
-            self._grow_buckets()
+            self._rebuild_buckets(2 * len(self._buckets))
             bucket = self._find_bucket(location.object_id, self._buckets)
         self._records.extend(location.object_id + fields)
         self._buckets[bucket] = position
         self._count = position
+
+    def save_to(self, path: Path, lock: RepositoryLock) -> None:
+        """Durably replace the checkpoint while the caller holds the repository lock.
+
+        This method is part of the public location index API.
+        """
+        path = lock.require_held_for(path)
+        header = _CHECKPOINT_HEADER.pack(_CHECKPOINT_MAGIC, _CHECKPOINT_VERSION, self._count)
+        checksum = sha256(header)
+        checksum.update(self._records)
+
+        directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            output = NamedTemporaryFile(dir=path.parent, prefix=".location-index-", delete=False)
+            temporary_path = Path(output.name)
+            try:
+                with output:
+                    output.write(header)
+                    output.write(self._records)
+                    output.write(checksum.digest())
+                    output.flush()
+                    os.fsync(output.fileno())
+                os.replace(temporary_path, path)
+            except BaseException:
+                temporary_path.unlink(missing_ok=True)
+                raise
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+
+    @classmethod
+    def load_from(cls, path: Path, lock: RepositoryLock) -> Self:
+        """Read and validate a checkpoint while the caller holds the repository lock.
+
+        This method is part of the public location index API.
+        """
+        path = lock.require_held_for(path)
+        with path.open("rb") as source:
+            header = source.read(_CHECKPOINT_HEADER.size)
+            if len(header) != _CHECKPOINT_HEADER.size:
+                raise ValueError("Truncated location index header")
+            magic, version, count = _CHECKPOINT_HEADER.unpack(header)
+            if magic != _CHECKPOINT_MAGIC or version != _CHECKPOINT_VERSION:
+                raise ValueError("Unsupported location index format")
+            if count > _MAX_RECORD_COUNT:
+                raise ValueError("Location index entry count exceeds the bucket range")
+            record_bytes = count * _RECORD_SIZE
+            if os.fstat(source.fileno()).st_size != len(header) + record_bytes + _CHECKSUM_SIZE:
+                raise ValueError("Location index size does not match its entry count")
+            records = bytearray(record_bytes)
+            if source.readinto(records) != record_bytes:
+                raise ValueError("Truncated location index records")
+            checksum = sha256(header)
+            checksum.update(records)
+            if source.read(_CHECKSUM_SIZE) != checksum.digest():
+                raise ValueError("Location index checksum mismatch")
+
+        index = cls()
+        index._records = records
+        index._count = count
+        required_buckets = max(_INITIAL_BUCKET_COUNT, 2 * count)
+        capacity = 1 << (required_buckets - 1).bit_length()
+        index._rebuild_buckets(capacity)
+        return index
+
+    @classmethod
+    def rebuild_from_packs(cls, packs: Mapping[int, Path], lock: RepositoryLock) -> Self:
+        """Rebuild the location index from finalized packs in one key domain.
+
+        This method is part of the public location index API.
+        """
+        raise NotImplementedError("Not implemented")
