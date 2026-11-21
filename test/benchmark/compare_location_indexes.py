@@ -28,7 +28,7 @@ from threading import Event
 from time import perf_counter
 from typing import Any, NamedTuple
 
-from p8472backup.archive.objects import HEADER_SIZE as OBJECT_HEADER_SIZE, OBJECT_ID_SIZE
+from p8472backup.archive.objects import HEADER_SIZE as OBJECT_HEADER_SIZE, OBJECT_ID_SIZE, ObjectId
 from p8472backup.storage.file.index import ObjectLocation
 from p8472backup.storage.file.packs import HEADER_SIZE as PACK_HEADER_SIZE
 
@@ -73,10 +73,10 @@ class LocationIndexComparison:
         self.batch_size = batch_size
 
     @staticmethod
-    def location(client: int, number: int) -> ObjectLocation:
+    def entry_for(client: int, number: int) -> tuple[ObjectId, ObjectLocation]:
         """Generate reproducible synthetic IDs and values, including >4 GiB fields."""
-        return ObjectLocation(
-            object_id=sha256(f"{client}:{number}".encode("ascii")).digest(),
+        object_id = sha256(f"{client}:{number}".encode("ascii")).digest()
+        return object_id, ObjectLocation(
             pack_id=2**32 + client,
             offset=PACK_HEADER_SIZE + number * (2**34 + OBJECT_HEADER_SIZE),
             length=2**34 + OBJECT_HEADER_SIZE,
@@ -112,8 +112,8 @@ class LocationIndexComparison:
             if backend == "borghash":
                 table = module.HashTableNT(key_size=OBJECT_ID_SIZE, value_type=LocationValue, value_format=LocationFormat())
                 for number in range(self.entries):
-                    location = self.location(client, number)
-                    table[location.object_id] = LocationValue(location.pack_id, location.offset, location.length)
+                    object_id, location = self.entry_for(client, number)
+                    table[object_id] = LocationValue(location.pack_id, location.offset, location.length)
                 with self.path(backend, client).open("wb") as output:
                     table.write(output)
                     output.flush()
@@ -124,16 +124,16 @@ class LocationIndexComparison:
                     for first in range(0, self.entries, 8192):
                         with database.write_batch(transaction=True, sync=True) as batch:
                             for number in range(first, min(first + 8192, self.entries)):
-                                location = self.location(client, number)
-                                batch.put(location.object_id, self.encoded(location))
+                                object_id, location = self.entry_for(client, number)
+                                batch.put(object_id, self.encoded(location))
             elif backend == "sqlite3":
                 with closing(self.open_sqlite(client)) as connection:
                     connection.execute("CREATE TABLE locations (object_id BLOB PRIMARY KEY CHECK(length(object_id)=32), location BLOB NOT NULL CHECK(length(location)=24)) WITHOUT ROWID")
                     for first in range(0, self.entries, 8192):
                         with connection:
                             for number in range(first, min(first + 8192, self.entries)):
-                                location = self.location(client, number)
-                                connection.execute("INSERT INTO locations VALUES (?, ?)", (location.object_id, self.encoded(location)))
+                                object_id, location = self.entry_for(client, number)
+                                connection.execute("INSERT INTO locations VALUES (?, ?)", (object_id, self.encoded(location)))
             else:
                 # Virtual address space/file capacity, never a claimed RAM limit.
                 with module.open(str(self.path(backend, client)), map_size=max(64 * _MIB, self.entries * 512)) as environment:
@@ -141,8 +141,8 @@ class LocationIndexComparison:
                     for first in range(0, self.entries, preparation_batch):
                         with environment.begin(write=True) as transaction:
                             for number in range(first, min(first + preparation_batch, self.entries)):
-                                location = self.location(client, number)
-                                if not transaction.put(location.object_id, self.encoded(location), overwrite=False):
+                                object_id, location = self.entry_for(client, number)
+                                if not transaction.put(object_id, self.encoded(location), overwrite=False):
                                     raise RuntimeError("Duplicate generated object ID")
         return {"prepare_s": perf_counter() - started}
 
@@ -152,8 +152,8 @@ class LocationIndexComparison:
         for number in range(count):
             missing = number % 10 == 0
             index = generator.randrange(self.entries) + (self.entries if missing else 0)
-            location = self.location(client, index)
-            requests.append((location.object_id, None if missing else self.encoded(location)))
+            object_id, location = self.entry_for(client, index)
+            requests.append((object_id, None if missing else self.encoded(location)))
         requests.sort(key=lambda request: request[0])
         return requests
 
@@ -192,11 +192,11 @@ class LocationIndexComparison:
             completed += len(requests)
         write_s = 0.0
         if not mount:
-            updates = [self.location(client, 2 * self.entries + number) for number in range(self.batch_size)]
+            updates = [self.entry_for(client, 2 * self.entries + number) for number in range(self.batch_size)]
             started = perf_counter()
             if backend == "borghash":
-                for location in updates:
-                    index[location.object_id] = LocationValue(location.pack_id, location.offset, location.length)
+                for object_id, location in updates:
+                    index[object_id] = LocationValue(location.pack_id, location.offset, location.length)
                 # Full-table checkpoint, not Borg's index-fragment protocol.
                 with self.path(backend, client).open("wb") as output:
                     index.write(output)
@@ -204,18 +204,18 @@ class LocationIndexComparison:
                     os.fsync(output.fileno())
             elif backend == "plyvel":
                 with index.write_batch(transaction=True, sync=True) as batch:
-                    for location in updates:
-                        batch.put(location.object_id, self.encoded(location))
+                    for object_id, location in updates:
+                        batch.put(object_id, self.encoded(location))
             elif backend == "sqlite3":
                 with index:
                     index.executemany(
                         "INSERT INTO locations VALUES (?, ?) ON CONFLICT(object_id) DO UPDATE SET location=excluded.location",
-                        ((location.object_id, self.encoded(location)) for location in updates),
+                        ((object_id, self.encoded(location)) for object_id, location in updates),
                     )
             else:
                 with index.begin(write=True) as transaction:
-                    for location in updates:
-                        transaction.put(location.object_id, self.encoded(location))
+                    for object_id, location in updates:
+                        transaction.put(object_id, self.encoded(location))
             write_s = perf_counter() - started
         return completed, lookup_s, write_s
 

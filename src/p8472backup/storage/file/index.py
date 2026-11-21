@@ -28,13 +28,8 @@ _CHECKSUM_SIZE = sha256().digest_size
 
 @dataclass(frozen=True)
 class ObjectLocation:
-    """An object ID and its pack number, header offset, and total record length.
+    """Pack number, header offset, and total record length of an object."""
 
-    The ID occupies 32 bytes; each integer requires an unsigned 64-bit field.
-    This is an in-memory record, not a selected persistent index format.
-    """
-
-    object_id: ObjectId
     pack_id: int
     offset: int
     length: int
@@ -55,12 +50,19 @@ class LocationIndex:
 
     def _find_bucket(self, object_id: ObjectId, buckets: array[int]) -> int:
         """Find the matching bucket or the first free bucket in its probe sequence."""
+        # Count the available buckets.
         capacity = len(buckets)
+        # Map the first four hash bytes to an existing bucket.
         bucket = int.from_bytes(object_id[:4], "big") % capacity
+        # Read one-based record positions until a free bucket (zero) is found.
         while position := buckets[bucket]:
+            # Compare the entire ID in the referenced zero-based record.
             if self._records.startswith(object_id, (position - 1) * _RECORD_SIZE):
+                # Stop when the bucket points to the requested ID.
                 break
+            # Probe the next bucket, wrapping around at the end.
             bucket = (bucket + 1) % capacity
+        # Return the matching bucket or the first free bucket.
         return bucket
 
     def _rebuild_buckets(self, capacity: int) -> None:
@@ -80,41 +82,61 @@ class LocationIndex:
 
         This method is part of the public location index API.
         """
+        # Reject IDs that are not exactly 32 bytes.
         Object.validate_object_id(object_id)
+        # Find either the bucket for this ID or the first free bucket.
         position = self._buckets[self._find_bucket(object_id, self._buckets)]
+        # A free bucket means the ID was not found.
         if position == 0:
+            # Signal that no location exists for the ID.
             return None
+        # Convert the one-based position to an offset after the record's ID.
         offset = (position - 1) * _RECORD_SIZE + OBJECT_ID_SIZE
+        # Decode the three stored 64-bit location fields.
         pack_id, pack_offset, length = _LOCATION_FIELDS.unpack_from(self._records, offset)
-        return ObjectLocation(object_id, pack_id, pack_offset, length)
+        # Return the decoded location.
+        return ObjectLocation(pack_id, pack_offset, length)
 
-    def put(self, location: ObjectLocation) -> None:
-        """Insert or replace a location using its object ID as the key.
+    def put(self, object_id: ObjectId, location: ObjectLocation) -> None:
+        """Insert a location only if the supplied object ID is absent.
 
         This method is part of the public location index API.
         """
-        Object.validate_object_id(location.object_id)
+        # Reject IDs that are not exactly 32 bytes.
+        Object.validate_object_id(object_id)
+        # Pack and validate the location before changing the index.
         try:
+            # Encode the pack ID, offset, and length as unsigned 64-bit values.
             fields = _LOCATION_FIELDS.pack(location.pack_id, location.offset, location.length)
+        # Report values that cannot be represented in the packed record.
         except struct.error as error:
+            # Keep the original packing error as the cause.
             raise ValueError("Pack ID, offset, and length must fit unsigned 64-bit integers") from error
 
-        bucket = self._find_bucket(location.object_id, self._buckets)
-        position = self._buckets[bucket]
-        if position:
-            offset = (position - 1) * _RECORD_SIZE + OBJECT_ID_SIZE
-            self._records[offset : offset + _LOCATION_FIELDS.size] = fields
+        # The probe finds either this ID's bucket or a free bucket for a new ID.
+        bucket = self._find_bucket(object_id, self._buckets)
+        # A nonzero bucket points to the existing record for this object ID.
+        if self._buckets[bucket]:
+            # Keep the first location registered for this ID.
             return
 
         # Zero is reserved for empty buckets. Record positions start at one.
         position = self._count + 1
+        # Bucket positions must fit in an unsigned 32-bit integer.
         if position > _MAX_RECORD_COUNT:
+            # Refuse insertion before changing the index.
             raise OverflowError("Location index has exhausted its 32-bit record positions")
+        # Grow the table before insertion would exceed 50% occupancy.
         if position * 2 > len(self._buckets):
+            # Double the bucket count and redistribute existing references.
             self._rebuild_buckets(2 * len(self._buckets))
-            bucket = self._find_bucket(location.object_id, self._buckets)
-        self._records.extend(location.object_id + fields)
+            # Recalculate the new ID's bucket using the new capacity.
+            bucket = self._find_bucket(object_id, self._buckets)
+        # Append the ID and location as a 56-byte record.
+        self._records.extend(object_id + fields)
+        # Publish the new record's one-based position in its bucket.
         self._buckets[bucket] = position
+        # Record that the index contains one more entry.
         self._count = position
 
     def save_to(self, path: Path, lock: RepositoryLock) -> None:

@@ -26,19 +26,19 @@ _BATCH = 512
 _QUERY_COUNT = 20_000
 
 
-def location_for(number: int) -> ObjectLocation:
+def entry_for(number: int) -> tuple[ObjectId, ObjectLocation]:
     object_id = sha256(number.to_bytes(8, "big")).digest()
-    return ObjectLocation(object_id, number // 128, 14 + (number % 128) * 8192, 8192)
+    return object_id, ObjectLocation(number // 128, 14 + (number % 128) * 8192, 8192)
 
 
 def generate_dataset(path: Path, entries: int) -> None:
     with path.open("xb") as output:
         for number in range(entries):
-            location = location_for(number)
-            output.write(_RECORD.pack(location.object_id, location.pack_id, location.offset, location.length))
+            object_id, location = entry_for(number)
+            output.write(_RECORD.pack(object_id, location.pack_id, location.offset, location.length))
 
 
-def build_index(backend: str, path: Path, entries: int) -> tuple[Callable[[ObjectId], ObjectLocation | None], Callable[[ObjectLocation], None], float]:
+def build_index(backend: str, path: Path, entries: int) -> tuple[Callable[[ObjectId], ObjectLocation | None], Callable[[ObjectId, ObjectLocation], None], float]:
     started = perf_counter()
     if backend == "python":
         index = LocationIndex()
@@ -49,8 +49,8 @@ def build_index(backend: str, path: Path, entries: int) -> tuple[Callable[[Objec
         def get(object_id: ObjectId) -> ObjectLocation | None:
             return dictionary.get(object_id)
 
-        def put(location: ObjectLocation) -> None:
-            dictionary[location.object_id] = location
+        def put(object_id: ObjectId, location: ObjectLocation) -> None:
+            dictionary[object_id] = location
     else:
         table = importlib.import_module("borghash").HashTable(key_size=32, value_size=_FIELDS.size)
 
@@ -58,10 +58,10 @@ def build_index(backend: str, path: Path, entries: int) -> tuple[Callable[[Objec
             fields = table.get(object_id)
             if fields is None:
                 return None
-            return ObjectLocation(object_id, *_FIELDS.unpack(fields))
+            return ObjectLocation(*_FIELDS.unpack(fields))
 
-        def put(location: ObjectLocation) -> None:
-            table[location.object_id] = _FIELDS.pack(location.pack_id, location.offset, location.length)
+        def put(object_id: ObjectId, location: ObjectLocation) -> None:
+            table[object_id] = _FIELDS.pack(location.pack_id, location.offset, location.length)
 
     with path.open("rb") as source:
         for first in range(0, entries, 4096):
@@ -69,14 +69,14 @@ def build_index(backend: str, path: Path, entries: int) -> tuple[Callable[[Objec
             data = source.read(size)
             if len(data) != size:
                 raise ValueError("Dataset is shorter than the requested index")
-            for fields in _RECORD.iter_unpack(data):
-                put(ObjectLocation(*fields))
+            for object_id, pack_id, offset, length in _RECORD.iter_unpack(data):
+                put(object_id, ObjectLocation(pack_id, offset, length))
     return get, put, perf_counter() - started
 
 
 def exercise(
     get: Callable[[ObjectId], ObjectLocation | None],
-    put: Callable[[ObjectLocation], None] | None,
+    put: Callable[[ObjectId, ObjectLocation], None] | None,
     entries: int,
     worker: int,
     start: Event,
@@ -88,8 +88,8 @@ def exercise(
         queries = []
         for number in range(first, min(first + _BATCH, _QUERY_COUNT)):
             hit = number % 10 != 0
-            location = location_for(rng.randrange(entries) if hit else entries + number)
-            queries.append((location.object_id, location if hit else None))
+            object_id, location = entry_for(rng.randrange(entries) if hit else entries + number)
+            queries.append((object_id, location if hit else None))
         started = perf_counter()
         results = [get(key) for key, _ in queries]
         lookup_seconds += perf_counter() - started
@@ -97,12 +97,12 @@ def exercise(
             raise RuntimeError("Incorrect lookup result")
     update_seconds = 0.0
     if put is not None:
-        updates = [location_for(entries + _QUERY_COUNT + number) for number in range(256)]
+        updates = [entry_for(entries + _QUERY_COUNT + number) for number in range(256)]
         started = perf_counter()
-        for location in updates:
-            put(location)
+        for object_id, location in updates:
+            put(object_id, location)
         update_seconds = perf_counter() - started
-        if any(get(location.object_id) != location for location in updates):
+        if any(get(object_id) != location for object_id, location in updates):
             raise RuntimeError("Incorrect update result")
     return lookup_seconds, update_seconds
 

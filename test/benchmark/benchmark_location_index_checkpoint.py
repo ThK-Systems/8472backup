@@ -7,7 +7,7 @@ from statistics import median
 from tempfile import TemporaryDirectory
 from time import perf_counter
 
-from benchmark_in_memory_location_index import location_for
+from benchmark_in_memory_location_index import entry_for
 
 from p8472backup.storage.file.index import LocationIndex
 from p8472backup.storage.file.lock import RepositoryLock
@@ -16,9 +16,10 @@ from p8472backup.storage.file.lock import RepositoryLock
 def measure(directory: Path, entries: int, repeats: int) -> dict[str, object]:
     index = LocationIndex()
     for number in range(entries):
-        index.put(location_for(number))
-    expected = [location_for(number) for number in (0, entries // 2, entries - 1)]
-    missing = location_for(entries).object_id
+        object_id, location = entry_for(number)
+        index.put(object_id, location)
+    expected = [entry_for(number) for number in (0, entries // 2, entries - 1)]
+    missing, _ = entry_for(entries)
     save_seconds = []
     load_seconds = []
 
@@ -37,7 +38,7 @@ def measure(directory: Path, entries: int, repeats: int) -> dict[str, object]:
                 started = perf_counter()
                 loaded = LocationIndex.load_from(checkpoint, lock)
                 load_seconds.append(perf_counter() - started)
-                if any(loaded.get(location.object_id) != location for location in expected) or loaded.get(missing) is not None:
+                if any(loaded.get(object_id) != location for object_id, location in expected) or loaded.get(missing) is not None:
                     raise RuntimeError("Loaded index returned unexpected locations")
                 del loaded
 

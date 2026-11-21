@@ -8,54 +8,78 @@ from p8472backup.storage.file.lock import RepositoryLock
 
 
 class TestLocationIndex:
-    def test_resolves_collisions_and_replaces_by_full_object_id(self) -> None:
+    def test_put_and_get_three_object_ids(self) -> None:
+        index = LocationIndex()
+        first_id = b"A" * 32
+        first = ObjectLocation(pack_id=1, offset=14, length=100)
+        second_id = b"C" * 32
+        second = ObjectLocation(pack_id=1, offset=114, length=200)
+        third_id = b"I" * 32
+        third = ObjectLocation(pack_id=2, offset=14, length=300)
+
+        index.put(first_id, first)
+        index.put(second_id, second)
+        # A and I start in bucket 1. The third record takes the next free bucket.
+        index.put(third_id, third)
+
+        found_first = index.get(first_id)
+        found_second = index.get(second_id)
+        found_third = index.get(third_id)
+
+        assert found_first == first
+        assert found_second == second
+        assert found_third == third
+
+    def test_resolves_collisions_and_keeps_first_location_per_object_id(self) -> None:
         index = LocationIndex()
         prefix = (7).to_bytes(4, "big")
-        first = ObjectLocation(prefix + b"a" * 28, 1, 14, 44)
-        second = ObjectLocation(prefix + b"b" * 28, 2, 2**40, 2**34 + 44)
+        first_id = prefix + b"a" * 28
+        first = ObjectLocation(1, 14, 44)
+        second_id = prefix + b"b" * 28
+        second = ObjectLocation(2, 2**40, 2**34 + 44)
         missing = prefix + b"c" * 28
-        assert index.get(first.object_id) is None
+        assert index.get(first_id) is None
 
-        index.put(first)
-        index.put(second)
-        replacement = ObjectLocation(first.object_id, 2**64 - 1, 50, first.length)
-        index.put(replacement)
+        index.put(first_id, first)
+        index.put(second_id, second)
+        index.put(second_id, ObjectLocation(2**64 - 1, 50, second.length))
 
-        assert index.get(first.object_id) == replacement
-        assert index.get(second.object_id) == second
+        assert index.get(first_id) == first
+        assert index.get(second_id) == second
         assert index.get(missing) is None
 
     def test_growth_preserves_existing_locations(self) -> None:
         index = LocationIndex()
-        locations = [ObjectLocation((number * 7).to_bytes(4, "big") + bytes(28), 1, 14 + number * 44, 44) for number in range(40)]
-        for location in locations:
-            index.put(location)
+        locations = {(number * 7).to_bytes(4, "big") + bytes(28): ObjectLocation(1, 14 + number * 44, 44) for number in range(40)}
+        for object_id, location in locations.items():
+            index.put(object_id, location)
 
-        assert [index.get(location.object_id) for location in locations] == locations
+        assert all(index.get(object_id) == location for object_id, location in locations.items())
 
     def test_invalid_values_do_not_replace_a_location(self) -> None:
         index = LocationIndex()
-        original = ObjectLocation(bytes(32), 1, 14, 44)
-        index.put(original)
+        original_id = bytes(32)
+        original = ObjectLocation(1, 14, 44)
+        index.put(original_id, original)
 
         with pytest.raises(ValueError, match="exactly 32 bytes"):
-            index.put(ObjectLocation(bytes(33), 1, 14, 44))
+            index.put(bytes(33), original)
         with pytest.raises(ValueError, match="unsigned 64-bit"):
-            index.put(ObjectLocation(original.object_id, 1, -1, 44))
+            index.put(original_id, ObjectLocation(1, -1, 44))
 
-        assert index.get(original.object_id) == original
+        assert index.get(original_id) == original
 
     def test_checkpoint_round_trip_and_corruption_detection(self, tmp_path: Path) -> None:
         path = tmp_path / "locations"
         index = LocationIndex()
-        locations = [ObjectLocation(bytes(31) + bytes([number]), 2**64 - 1, 2**40 + number, 2**34 + 44) for number in range(10)]
-        for location in locations:
-            index.put(location)
+        locations = {bytes(31) + bytes([number]): ObjectLocation(2**64 - 1, 2**40 + number, 2**34 + 44) for number in range(10)}
+        for object_id, location in locations.items():
+            index.put(object_id, location)
 
         with RepositoryLock(tmp_path) as lock:
             index.save_to(path, lock)
             restored = LocationIndex.load_from(path, lock)
-            assert [restored.get(location.object_id) for location in locations] == locations
+            assert all(restored.get(object_id) == location for object_id, location in locations.items())
 
             damaged = bytearray(path.read_bytes())
             damaged[-33] ^= 1
@@ -87,14 +111,19 @@ class TestLocationIndex:
     def test_failed_replace_keeps_previous_checkpoint(self, tmp_path: Path) -> None:
         path = tmp_path / "locations"
         index = LocationIndex()
-        original = ObjectLocation(bytes(32), 1, 14, 44)
-        index.put(original)
+        original_id = bytes(32)
+        original = ObjectLocation(1, 14, 44)
+        index.put(original_id, original)
 
         with RepositoryLock(tmp_path) as lock:
             index.save_to(path, lock)
-            index.put(ObjectLocation(original.object_id, 2, 14, 44))
+            additional_id = b"a" * 32
+            additional = ObjectLocation(2, 14, 44)
+            index.put(additional_id, additional)
             with patch("p8472backup.storage.file.index.os.replace", side_effect=OSError("replace failed")), pytest.raises(OSError, match="replace failed"):
                 index.save_to(path, lock)
 
-            assert LocationIndex.load_from(path, lock).get(original.object_id) == original
+            restored = LocationIndex.load_from(path, lock)
+            assert restored.get(original_id) == original
+            assert restored.get(additional_id) is None
             assert not list(tmp_path.glob(".location-index-*"))
