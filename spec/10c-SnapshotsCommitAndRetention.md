@@ -109,8 +109,8 @@ Use a final server-controlled snapshot publication step after all dependencies a
 Required logical sequence:
 
 1. Admit a run in the authenticated host/set scope and atomically acquire its exclusive backup-run lock.
-2. Require the first submitted object header to have type 3 and the declared snapshot root ID.
-3. Process the complete membership stream and persist missing encrypted objects while preserving previously stored objects.
+2. Process the membership stream and persist missing encrypted objects while preserving previously stored objects.
+3. Receive the type 3 snapshot root as the final object declaration and take the root ID from that declaration. Require explicit protocol completion before committing the snapshot. A connection closure before completion interrupts the run. The final root declaration can carry the completion signal; the exact framing remains open.
 4. Verify required object existence and scope, including objects reused from earlier runs.
 5. Durably record membership and authoritative snapshot metadata.
 6. Publish the completed snapshot together with the server-assigned commit time and applicable protection state through a crash-safe commit mechanism.
@@ -138,7 +138,7 @@ The client initiates repository setup in push mode. The server initiates it in p
 
 `server.snapshot_service.SnapshotService` accepts an initialized `Repository` for the authorized scope. It uses the repository's paths for the index, packs, and snapshot records.
 
-`create_snapshot(records, root_id)` acquires the exclusive repository lock before reading the input. It checks the first record's type and root ID before writing any pack, stores missing objects, and saves the index. The service generates a snapshot UUID unless its server-side caller supplies one. It assigns the UTC commit time and calculates the protection deadline using the configured minimum duration, which defaults to seven days. `get_snapshot(snapshot_id)` loads the committed record under the repository lock and verifies its identity and scope.
+The current development implementation of `create_snapshot(records, root_id)` acquires the exclusive repository lock before reading the input and validates the first record as the root. Implementing the final-root ordering defined above is pending. The service stores missing objects and saves the index. It generates a snapshot UUID unless its server-side caller supplies one, assigns the UTC commit time, and calculates the protection deadline using the configured minimum duration, which defaults to seven days. `get_snapshot(snapshot_id)` loads the committed record under the repository lock and verifies its identity and scope.
 
 The server writes one file named `<snapshot-id>.snapshot` in the snapshot directory. Version 1 uses a 106-byte header without padding. Integers are little endian.
 

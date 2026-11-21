@@ -26,7 +26,7 @@ def test_init_repository_rejects_second_init_and_preserves_backup(tmp_path: Path
     root = Object(TYPE_SNAPSHOT, b"r" * 32, len(body))
     snapshots = SnapshotService(repository)
     snapshot = snapshots.create_snapshot(iter(((root, BytesIO(body)),)), root.object_id)
-    files = (repository.index_path, repository.pack_directory / "1.pack", repository.snapshot_path(snapshot.snapshot_id))
+    files = (path / "repository.json", repository.index_path, repository.pack_directory / "1.pack", repository.snapshot_path(snapshot.snapshot_id))
     contents = tuple(file.read_bytes() for file in files)
 
     with pytest.raises(FileExistsError):
@@ -35,7 +35,8 @@ def test_init_repository_rejects_second_init_and_preserves_backup(tmp_path: Path
         RepositoryService.init_repository(path, _CLIENT_ID, UUID(int=4), UUID(int=5))
 
     assert tuple(file.read_bytes() for file in files) == contents
-    assert snapshots.get_snapshot(snapshot.snapshot_id) == snapshot
+    reopened = RepositoryService.open_repository(path, _BACKUP_SET_ID)
+    assert SnapshotService(reopened).get_snapshot(snapshot.snapshot_id) == snapshot
 
     wrong_client = Repository(repository.path, UUID(int=5), repository.backup_set_id, repository.key_id)
     with pytest.raises(ValueError, match="Snapshot identity or scope"):
@@ -86,3 +87,26 @@ def test_invalid_mode_does_not_create_repository(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="Unsupported backup mode"):
         RepositoryService.init_repository(path, _CLIENT_ID, _BACKUP_SET_ID, _KEY_ID, mode=cast(BackupMode, "invalid"))
     assert not path.exists()
+
+
+def test_open_repository_loads_scope_and_persisted_mode(tmp_path: Path) -> None:
+    path = tmp_path / "repo"
+    repository = RepositoryService.init_repository(path, _CLIENT_ID, _BACKUP_SET_ID, _KEY_ID)
+    RepositoryService.set_mode(path, "push")
+
+    reopened = RepositoryService.open_repository(path, _BACKUP_SET_ID)
+    assert reopened == repository
+    assert reopened.mode == "push"
+    with pytest.raises(ValueError, match="Backup set is not registered"):
+        RepositoryService.open_repository(path, UUID(int=4))
+
+
+@pytest.mark.parametrize(("contents", "error"), ((None, FileNotFoundError), (b"{}", ValueError)))
+def test_open_repository_rejects_missing_or_invalid_metadata(tmp_path: Path, contents: bytes | None, error: type[Exception]) -> None:
+    path = tmp_path / "repo"
+    path.mkdir()
+    if contents is not None:
+        (path / "repository.json").write_bytes(contents)
+
+    with pytest.raises(error):
+        RepositoryService.open_repository(path, _BACKUP_SET_ID)
