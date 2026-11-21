@@ -2,9 +2,9 @@
 
 Status: proposal for Thomas's review, 2026-11-13. This document does not authorize implementation or establish an on-disk format. The main specification remains authoritative.
 
-Explicitly approved increment, 2026-11-19: the immutable `Object` class and its focused tests occupy `src/p8472backup/archive/objects.py` and `test/unit/archive/test_objects.py`. Its `to_header()` and `from_header()` methods implement the common header codec; payload handling remains unimplemented. The remaining hierarchy is still a proposal.
+Explicitly approved increment, 2026-11-19: the immutable `Object` class and its focused tests occupy `src/p8472backup/archive/objects.py` and `test/p8472backup/unit/archive/test_objects.py`. Its `to_header()` and `from_header()` methods implement the common header codec; payload handling remains unimplemented. The remaining hierarchy is still a proposal.
 
-Also explicitly approved: the immutable `Pack` header class in `src/p8472backup/storage/file/packs.py`, with four focused tests in `test/unit/storage/file/test_packs.py`. It implements the 14-byte header; record I/O and compaction remain unimplemented.
+Also explicitly approved: the immutable `Pack` header class in `src/p8472backup/storage/file/packs.py`, with four focused tests in `test/p8472backup/unit/storage/file/test_packs.py`. It implements the 14-byte header; record I/O and compaction remain unimplemented.
 
 Also explicitly approved: data-only immutable `Snapshot` and `ObjectCatalogue` classes in `src/p8472backup/server/snapshots.py`. Custom methods, validation, and serialization are deferred; this increment adds no new tests for generated dataclass behavior.
 
@@ -57,12 +57,14 @@ src/
       restore.py
       mount.py
 test/
-  unit/
-    archive/
-    server/
-    storage/
-  integration/
-    test_snapshots.py
+  p8472backup/
+    unit/
+      archive/
+      server/
+      storage/
+    integration/
+      test_snapshots.py
+    benchmark/
 spec/
   10-8472backup-Spec.md
   10a-PurposeScopeArchitecture.md
