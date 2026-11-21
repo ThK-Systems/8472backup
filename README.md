@@ -9,7 +9,7 @@
   <img src="resources/8472backup-logo-1024x273.webp" alt="8472backup" height=100>
 </p>
 
-A planned client/server backup system with client-side encryption, deduplication, and server-enforced retention. It is inspired by Borg and borgmatic.
+A planned client/server backup system with client-side encryption, deduplication, and server-enforced retention. It is inspired by BorgBackup with borgmatic.
 
 ## 🚧 Project status
 
