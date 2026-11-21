@@ -10,9 +10,9 @@ requirements and agreed architectural direction; early design phase. No producti
 
 Each completed snapshot MUST have its own stable identity and an encrypted root object describing how to reach its complete recoverable file selection.
 
-Approved data-only implementation, 2026-11-19: `server/snapshots.py` defines immutable dataclasses `Snapshot` and `ObjectCatalogue`. `Snapshot` contains `snapshot_id`, `client_id`, and `backup_set_id` as `UUID` values; `root_id` as `bytes`; `committed_at` and `protected_until` as `datetime` values; an `object_catalog` reference; and `version`, initially 1. `ObjectCatalogue` contains `object_ids` as a `frozenset[bytes]`. These are in-memory data types, not a selected binary representation. Custom methods, runtime validation, protection calculations, and serialization are deferred. The intended root-ID length, UTC timestamps, and membership invariants remain design requirements for later validation.
+The immutable `Snapshot` dataclass in `server/snapshot.py` contains `snapshot_id` as a `UUID`, `root_id` as `ObjectId`, `committed_at` and `protected_until` as UTC `datetime` values, an `object_catalog` reference, and `version`, initially 1. `ObjectCatalogue` contains a `frozenset` of object IDs. The `Repository` supplies the client and backup-set IDs when the snapshot record is saved or loaded. Section 11 defines the persistent representation.
 
-Snapshot annotations use the shared `ObjectId` alias from `archive/objects.py`: `root_id: ObjectId` and `ObjectCatalogue.object_ids: frozenset[ObjectId]`. The underlying values remain bytes; snapshot validation is still deferred.
+Snapshot annotations use the shared `ObjectId` alias from `archive/objects.py` for the root ID and catalogue members.
 
 The encrypted snapshot root references file-metadata objects, which in turn reference data objects. The authoritative server record separately captures the complete required object membership. This describes logical relationships, not a prescribed serialization or tree shape.
 
@@ -51,11 +51,11 @@ The authoritative snapshot catalogue and its committed dependencies MUST NOT be 
 
 The snapshot header does not contain `object_count`. The count belongs to the per-snapshot object catalogue; its encoding remains OPEN. This does not change the separate pack header's object count.
 
-The per-snapshot object catalogue is logically a set of unique object IDs containing every dependency required for complete restoration, including the snapshot root, snapshot-description metadata, file metadata, and data objects. Reused objects are included even when first stored by an earlier snapshot. Once committed, this membership is immutable. It contains no physical pack locations. A separate repository location index, scoped to the applicable key domain, maps an object ID to a pack and byte range. Compaction changes that location index without rewriting snapshot membership. Catalogue serialization and the persistent index representation remain OPEN; this clarification does not authorize their implementation.
+The per-snapshot object catalogue is logically a set of unique object IDs containing every dependency required for complete restoration, including the snapshot root, snapshot-description metadata, file metadata, and data objects. Reused objects are included even when first stored by an earlier snapshot. Once committed, this membership is immutable. It contains no physical pack locations. A separate repository location index, scoped to the applicable key domain, maps an object ID to a pack and byte range. Compaction changes that location index without rewriting snapshot membership.
 
 During snapshot assembly, the server collects every required ID in a per-snapshot set. On the first occurrence of an ID, it consults the location index and forwards the object to the pack writer only if the ID has no recorded location. Successive packs consume the same filtered iterator, so an ID is forwarded at most once even when its pack location has yet to be recorded. Exhaust the iterator before freezing the membership for the catalogue. The input iterator must support skipping unread bodies.
 
-`store_snapshot_objects()` connects the filter and pack writer under the repository lock. The caller supplies unused pack IDs and paths. After each pack is durably published, the pack writer reports the locations it recorded while writing, and the server adds them to the in-memory index. If all required objects already exist, the server returns the catalogue without creating a pack. Saving the index and publishing the authoritative snapshot remain separate steps.
+The snapshot service connects the filter and pack writer under the repository lock. It assigns pack IDs and paths within the key domain. After each pack is durably published, the writer reports the locations it recorded while writing, and the service adds them to the in-memory index. If all required objects already exist, the service assembles the catalogue without creating a pack. It saves the index before publishing the authoritative snapshot.
 ## 10. Storage backend in version 1.0
 
 ### 10.1 Server definitions, client choice, and defaults
@@ -109,14 +109,14 @@ Use a final server-controlled snapshot publication step after all dependencies a
 Required logical sequence:
 
 1. Admit a run in the authenticated host/set scope and atomically acquire its exclusive backup-run lock.
-2. Receive and persist missing encrypted objects, without replacing committed objects.
-3. Receive the encrypted snapshot root and complete membership declaration.
+2. Require the first submitted object header to have type 3 and the declared snapshot root ID.
+3. Process the complete membership stream and persist missing encrypted objects while preserving previously stored objects.
 4. Verify required object existence and scope, including objects reused from earlier runs.
 5. Durably record membership and authoritative snapshot metadata.
 6. Publish the completed snapshot together with the server-assigned commit time and applicable protection state through a crash-safe commit mechanism.
 7. Acknowledge completion only after that commit is durable.
 
-Steps describe required ordering and visibility, not a fixed number of filesystem writes. Define transaction boundaries, fsync ordering, index updates, and recovery before implementation.
+Steps describe required ordering and visibility. On the local filesystem, sync the packs and location index before publishing the snapshot record.
 
 A crash before commit may leave staging or unreferenced objects, but MUST NOT publish an incomplete snapshot. A crash after commit or a lost acknowledgement MUST have a defined recovery and retry outcome. Cleanup MUST protect active operations as well as committed snapshots.
 
@@ -124,7 +124,35 @@ The server commit time, never a client-supplied date, starts minimum protection.
 
 Define persistent states for staging, data and index persistence, accepted membership, commit publication, logical pruning, garbage collection, and pack compaction. A cache or location-index rebuild does not reconstruct authoritative historical protection state.
 
-OPEN: snapshot identifiers and catalogue encoding, the repository-wide transaction and sync boundaries, data integrity checks for opaque ciphertext, and corruption recovery. The development location index checkpoint is defined in §8.3. The repository caller must arrange durable pack and index writes before publishing the snapshot. SQLite remains available for location-index benchmarking.
+### Local repository initialization
+
+`server.repository.Repository` binds a filesystem path to `client_id`, `backup_set_id`, and `key_id`. Here `key_id` identifies the key domain. It determines the checkpoint at `index/<key-id>`, the pack directory at `packs/<key-id>/`, and the snapshot directory at `snapshots/<backup-set-id>/`.
+
+The repository object carries the host's backup `mode`, which defaults to `pull`. `Repository.set_mode()` changes it in memory. `RepositoryService.set_mode(path, mode)` persists the selected mode for the entire repository under its lock. It writes and syncs a temporary file, atomically replaces the metadata file, and syncs the repository directory. Section 13.1 defines how host mode changes are communicated for scheduling.
+
+The client initiates repository setup in push mode. The server initiates it in pull mode. Both use `RepositoryService.init_repository(path, client_id, backup_set_id, key_id, mode=...)` on the repository's server-side storage with the approved path and IDs. The class method validates the mode and reserves the new root with an atomic directory creation. It raises `FileExistsError` for an existing path before touching the repository contents. Under the repository lock, it creates and syncs the required directories, saves an empty index checkpoint, publishes `repository.json`, and returns the initialized `Repository`. An interrupted setup leaves the created path reserved for recovery.
+
+`repository.json` in the repository root is UTF-8 JSON. Version 1 contains the integer `version`, the UUID string `client_id`, the host `mode`, and a `backup_sets` object that maps backup-set UUID strings to key-domain UUID strings. The server service façade selects the client by UUID and resolves the authorized repository path for storage operations. `RepositoryService.open_repository(path, backup_set_id)` reads the metadata under the repository lock and returns the recorded client ID, key ID, and mode for that set as a `Repository`. Missing metadata, invalid values, and unknown backup sets cause an error.
+
+### Local snapshot record and commit
+
+`server.snapshot_service.SnapshotService` accepts an initialized `Repository` for the authorized scope. It uses the repository's paths for the index, packs, and snapshot records.
+
+`create_snapshot(records, root_id)` acquires the exclusive repository lock before reading the input. It checks the first record's type and root ID before writing any pack, stores missing objects, and saves the index. The service generates a snapshot UUID unless its server-side caller supplies one. It assigns the UTC commit time and calculates the protection deadline using the configured minimum duration, which defaults to seven days. `get_snapshot(snapshot_id)` loads the committed record under the repository lock and verifies its identity and scope.
+
+The server writes one file named `<snapshot-id>.snapshot` in the snapshot directory. Version 1 uses a 106-byte header without padding. Integers are little endian.
+
+| Field | Encoding |
+| --- | --- |
+| Version | Unsigned 16-bit integer, initially 1 |
+| Snapshot ID, client ID, backup-set ID | Three consecutive UUIDs in standard 16-byte representation |
+| Root ID | 32 binary bytes |
+| Commit time, protection deadline | Two signed 64-bit counts of microseconds since the Unix epoch in UTC |
+| Catalogue count | Unsigned 64-bit count of subsequent object IDs |
+
+The header is followed by exactly that many distinct 32-byte object IDs in unspecified order. The catalogue includes the root ID. `Snapshot.save_to()` syncs a complete temporary record, publishes it with a hard link at the final path, and syncs the directory before returning success. A duplicate snapshot ID fails without replacing the existing file. A failure before publication can leave unreferenced packs or index entries. A directory sync failure after linking leaves durability unresolved and raises an error. `Snapshot.load_from()` reads the record under the repository lock.
+
+OPEN: transport and authenticated admission, retry acknowledgement, data integrity checks for opaque ciphertext, and corruption recovery.
 
 ### 11.1 Backup-run locking
 

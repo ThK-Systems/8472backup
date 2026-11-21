@@ -134,7 +134,7 @@ The intended separation is:
 | `offset` | `int` | 8 bytes, unsigned | Absolute byte offset of the object's common header within the pack file |
 | `length` | `int` | 8 bytes, unsigned | Complete stored record length, including the 44-byte object header |
 
-These fields total 56 raw bytes, with a 24-byte location value after the 32-byte key. This is not the memory footprint of a Python instance. A maximum-sized object needs a record length of 16 GiB plus 44 bytes; 32-bit offsets or lengths are insufficient. Numeric pack-ID allocation, filename derivation, and pack integrity checks still require review.
+These fields total 56 raw bytes, with a 24-byte location value after the 32-byte key. This is not the memory footprint of a Python instance. A maximum-sized object needs a record length of 16 GiB plus 44 bytes; 32-bit offsets or lengths are insufficient. The snapshot service writes packs as `packs/<key-domain-id>/<pack-id>.pack`, with decimal pack IDs. Under the repository lock, it assigns new IDs starting one above the highest existing pack filename in that key domain, or at 1 for an empty directory. Pack integrity checks still require review.
 
 The development location index checkpoint contains an 18-byte header, the packed 56-byte records, and a 32-byte SHA-256 digest over the header and records. The header layout is `<8sHQ`: the eight-byte marker `8472IDX\x00`, version 1 as an unsigned 16-bit integer, and the record count as an unsigned 64-bit integer. Header integers and the three unsigned 64-bit location fields are little endian. The loader checks the header, count, exact file size, checksum, and uniqueness of the IDs. It rebuilds the in-memory bucket array from the records. The digest detects accidental corruption.
 
@@ -168,7 +168,7 @@ The immutable `Pack` class in `src/p8472backup/storage/file/packs.py` implements
 
 `Pack.write_to()` writes one pack to a caller-supplied path. It copies each declared object body in bounded blocks and leaves later records in the caller's iterator once the pack reaches its target. The writer finalizes and syncs the header and records in a temporary file, then publishes the file without replacing an existing destination and syncs the directory. A truncated body fails before publication. If the caller supplies `on_stored`, the writer collects object IDs, offsets, and record lengths while writing. It buffers up to 256 KiB of these fixed-size entries in memory before spilling to a temporary file. The writer reports the locations through `on_stored` after the directory sync succeeds.
 
-`Pack.read_object()` validates the file size and the requested record range, then copies the body to the caller's output stream and returns the common object header. The reader and writer use the common framing for every object type. Pack naming and storage integrity checks remain open.
+`Pack.load_from()` reads the pack header and validates the file size. `Pack.read_object()` also validates the requested record range, then copies the body to the caller's output stream and returns the common object header. The reader and writer use the common framing for every object type. Storage integrity checks remain open.
 
 #### Common object header (agreed development format)
 

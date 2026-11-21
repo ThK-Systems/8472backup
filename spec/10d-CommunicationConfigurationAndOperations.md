@@ -16,7 +16,9 @@ In pull mode the server schedules the host's backup sets. When a scheduled pull 
 
 The server does not periodically pull or probe that host merely to discover a switch back. To return to pull, the operator changes the client configuration to `mode = "pull"` and proactively invokes a dedicated client command that informs the server over an authenticated connection. The server then adds the host back to its pull scheduling list. The exact command name and protocol are OPEN. Repeated requests should be safe, and failed requests must be reported so the operator can retry. Missing, invalid, or unreadable configuration must not silently be interpreted as a request to change mode. Mode is scheduling configuration, not an authorization boundary.
 
-OPEN: exact persisted representation, mode acknowledgement, retry and reconciliation behaviour, and handling of already-running or overlapping operations. Detailed mode-switching workflows and commands will be designed later; switching always applies to the whole client.
+The server service façade handles mode changes for a client. After persisting the new mode, it triggers reevaluation of that client's pull jobs. Admission checks the current mode before starting a new pull job.
+
+Section 11 defines the local server record for the backup mode. OPEN: mode acknowledgement, retry and reconciliation behaviour, and handling of already-running or overlapping operations. Detailed mode-switching workflows and commands will be designed later; switching always applies to the whole client.
 
 The server schedules hosts and sets, connects to a client through SSH, and invokes a restricted client operation. The client reads local configuration, processes source data, and returns encrypted objects and protocol metadata.
 
@@ -69,6 +71,10 @@ OPEN: exact framing, serialization, operation sequencing, session admission, aut
 
 ### 13.5 Push/pull boundary and common backup sessions
 
+The server service façade is the common entry point for operations between the server and its clients. It addresses each client by its stable `client_id` UUID and resolves repository paths from the authorized server context. The scheduler submits due pull runs through this façade, and inbound push runs enter through the same façade. Both use the common backup session and snapshot commit path.
+
+The façade's `list()` operation lists committed snapshots across the client's authorized backup sets. An optional backup-set filter narrows the result. The server reads the snapshot record headers for this listing.
+
 Push/pull MUST have its own small, explicit boundary for mode-specific scheduling and invocation, connection establishment, and handoff to the common backup session:
 
 - Push: the source CLI starts SSH to the server. The restricted server-side helper relays the common protocol over the local Unix-domain socket to the running server service.
@@ -96,7 +102,7 @@ These requirements define the concurrency architecture. Implementation details r
 The intended user workflow is:
 
 1. Install the Linux server, with minimal standard-case setup.
-2. Install the client and invoke init with the server address and optional set name and encryption-passphrase input.
+2. Install the client and run client setup with the server address and optional set name and encryption-passphrase input.
 3. Generate a client authentication key without a passphrase for unattended operations where needed.
 4. Display instructions for installing that public key on the server with the restricted command.
 5. For server-initiated pull, install the server's public SSH key on the client with the corresponding restricted command. Push-only operation does not itself require a server-to-client SSH connection; bootstrap details remain OPEN.
@@ -107,9 +113,11 @@ The intended user workflow is:
 
 Registration must be bound to approved authentication credentials, not self-asserted UUID/hostname/IP values. The bootstrap trust exchange must be documented; do not silently auto-enrol arbitrary clients.
 
+In push mode, the client requests creation of the remote repository. In pull mode, the server initiates repository creation. Both use the same create-once operation on server storage. An init request for an existing repository path fails. Section 11 defines local initialization.
+
 The user may supply a passphrase through the CLI. Exact secure input mechanisms remain OPEN; prevent accidental secret exposure in logs and avoid argv exposure as the only input mechanism.
 
-The passphrase-protection and key-separation direction is defined in chapter 7. OPEN: exact key generation/wrapping and unattended unlocking, initial server key provisioning, address updates, idempotent init, host reinstallation, recovery/re-enrolment, and authentication-key rotation.
+The passphrase-protection and key-separation direction is defined in chapter 7. OPEN: exact key generation/wrapping and unattended unlocking, initial server key provisioning, address updates, host reinstallation, recovery/re-enrolment, and authentication-key rotation.
 ## 15. Backup descriptions and configuration
 
 Each set has a local backup-description file, conceptually similar to a borgmatic configuration but with a smaller configuration vocabulary and less verbosity. It defines source selections, exclusions, and requested retention. The exact syntax and schema remain OPEN.
@@ -133,6 +141,7 @@ See the [configuration roadmap](70-ConfigurationRoadmap.md) for planned settings
 ## 16. Restore and read-only mounting
 
 - Restore is initiated on a client with the required recovery keys.
+- Direct restore to a client-side destination supports both a complete snapshot and individual files. The client resolves selected paths using decrypted metadata and requests the data objects for the selected files.
 - The server returns encrypted metadata and objects; the client decrypts and verifies them locally.
 - Read-only FUSE mounting is a planned Linux 1.0 feature and runs on the client.
 - Mount support is optional to the core backup/restore installation and not a universal future-platform requirement.
