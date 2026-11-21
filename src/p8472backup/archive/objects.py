@@ -36,12 +36,17 @@ class Object:
             raise ValueError(f"Unsupported object format version: {self.version}")
         if self.object_type not in (TYPE_DATA, TYPE_METADATA, TYPE_SNAPSHOT):
             raise ValueError(f"Unsupported object type: {self.object_type}")
-        if type(self.object_id) is not bytes:
-            raise TypeError("Object ID must be bytes")
-        if len(self.object_id) != OBJECT_ID_SIZE:
-            raise ValueError(f"Object ID must contain exactly {OBJECT_ID_SIZE} bytes")
+        self.validate_object_id(self.object_id)
         if not 0 <= self.length <= MAX_OBJECT_BODY_SIZE:
             raise ValueError("Object body length must be between 0 and 16 GiB")
+
+    @staticmethod
+    def validate_object_id(object_id: ObjectId) -> None:
+        """Require a bytes object of exactly the object ID size."""
+        if type(object_id) is not bytes:
+            raise TypeError("Object ID must be bytes")
+        if len(object_id) != OBJECT_ID_SIZE:
+            raise ValueError(f"Object ID must contain exactly {OBJECT_ID_SIZE} bytes")
 
     def to_header(self) -> bytes:
         """Serialize the object's validated state as a 44-byte header."""
