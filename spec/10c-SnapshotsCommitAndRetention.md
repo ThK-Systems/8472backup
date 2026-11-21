@@ -1,6 +1,6 @@
 # 8472backup — Snapshots, Commit, and Retention
 
-Specification version: 0.43 — Include SQLite in location-index evaluation, 2026-11-19
+Specification version: 0.45 — Lock-protected location index checkpoints, 2026-11-21
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 
@@ -120,7 +120,7 @@ The server commit time, never a client-supplied date, starts minimum protection.
 
 Define persistent states for staging, data and index persistence, accepted membership, commit publication, logical pruning, garbage collection, and pack compaction. A cache or location-index rebuild does not reconstruct authoritative historical protection state.
 
-OPEN: serialization, snapshot/root identifiers, catalogue and index persistence, transaction mechanism, fsync and atomicity boundaries, data integrity checks for opaque ciphertext, and corruption recovery. SQLite may be benchmarked as a location-index candidate. This does not select a production engine or authorize catalogue persistence. Review the concrete persistence and pack formats before implementation.
+OPEN: snapshot identifiers and catalogue encoding, the repository-wide transaction and sync boundaries, data integrity checks for opaque ciphertext, and corruption recovery. The development location index checkpoint is defined in §8.3. The repository caller must arrange durable pack and index writes before publishing the snapshot. SQLite remains available for location-index benchmarking.
 
 ### 11.1 Backup-run locking
 
@@ -128,15 +128,17 @@ The server MUST enforce an exclusive backup-run lock keyed by the stable `(clien
 
 Acquire the lock during admission, before object queries or transfers. Hold it through durable snapshot publication or until an aborted run has stopped writing. Bind ownership to the individual admitted run; a delayed disconnect or retry must not release a newer run's lock. A conflicting request must not start a second run. Whether to reject, skip, or queue it, and the precise disconnect, timeout, and restart recovery rules remain OPEN. Expiry alone must not permit a replacement writer while the previous owner can still write.
 
-The backup-run lock does not replace tracking of active operations and their object dependencies. Keep those dependencies live until commit or safe abort. Different sets may share a key domain, packs, and the repository location index, so shared storage/index changes also require coordinated atomic updates. The concrete synchronization and persistence mechanisms remain OPEN. This is a design requirement, not authorization to implement locking or session management.
+The backup-run lock identifies the admitted run for one set. The exclusive repository lock described below governs access to the packs and location index shared by all sets in that repository. The concrete locking and persistence mechanisms remain OPEN.
 
 ### 11.2 Client repository locking and maintenance
 
-Each backup client has its own repository and repository-level location index. Independent key domains retain separate identifier namespaces within it. Serialize mutations of shared pack state and the location index under an exclusive server-owned lock scoped to that client repository. All of the client's sets use this same mutation lock. Contention between concurrent sets of one client is an accepted trade-off; optimizing that usage is not a current goal. Separate client repositories do not share this lock. Readers must observe consistent index state.
+Each backup client has its own repository and repository-level location index. Independent key domains retain separate identifier namespaces within it. The server MUST grant exclusive access to one operation at a time per client repository. This applies to push, pull, mounts, restores, and maintenance that accesses the repository. All sets and key domains of the client share this lock.
 
-The set-level lock covers one backup run; the client-wide lock protects shared repository mutations. Concrete critical-section boundaries and persistence mechanisms remain OPEN.
+Acquire the repository lock before opening the index or accessing packs. Hold it through durable snapshot publication or safe abort for a backup, through unmount or session cleanup for a mount, and through completion or safe abort for restore and maintenance. An active mount can delay a scheduled backup. The server must report the lock conflict and its cause. Queueing, timeouts, lock ownership, and restart recovery remain OPEN.
 
-For the initial design, pruning, garbage collection, and compaction must not overlap active backup or restore runs in the same repository. Register a run before its first object lookup. Maintenance admission must atomically prevent new runs and wait for the registered runs to finish before reclaiming or relocating objects. Complete a successful backup's durable snapshot publication before ending its active registration; on abort, ensure it can no longer write before releasing the registration. Maintenance then uses the authoritative retained-snapshot catalogues and effective protection rules to determine liveness. This protects in-flight objects without requiring a first implementation of per-object reservations. Lock ownership and restart recovery details remain OPEN; no implementation is authorized by these decisions.
+Different client repositories may run independently within the shared server memory budget. Once maintenance owns a repository's lock, it uses the authoritative retained-snapshot catalogues and effective protection rules to determine liveness.
+
+The file backend provides a `RepositoryLock` context manager for local filesystems. It requests an exclusive, nonblocking `flock` on the repository's `.repository.lock` file. Acquisition reports contention immediately. The lock file stays in place so callers lock the same file. Repository operations will hold the context for their full lifetime.
 
 ### 11.3 Backup-run states and provisional data
 

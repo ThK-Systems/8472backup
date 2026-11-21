@@ -1,6 +1,6 @@
 # 8472backup — Project Specification for Codex
 
-Version: 0.43 — Include SQLite in location-index evaluation, 2026-11-19
+Version: 0.45 — Lock-protected location index checkpoints, 2026-11-21
 
 Status: requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 

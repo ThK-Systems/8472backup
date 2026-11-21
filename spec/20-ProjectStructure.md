@@ -8,7 +8,9 @@ Also explicitly approved: the immutable `Pack` header class in `src/p8472backup/
 
 Also explicitly approved: data-only immutable `Snapshot` and `ObjectCatalogue` classes in `src/p8472backup/server/snapshots.py`. Custom methods, validation, and serialization are deferred; this increment adds no new tests for generated dataclass behavior.
 
-Also explicitly approved: the data-only immutable `ObjectLocation` class in `src/p8472backup/storage/file/index.py` and an opt-in native-hash/LMDB comparison in `test/benchmark/compare_location_indexes.py`. The comparison libraries are optional benchmark tools, not selected runtime dependencies. Production index methods and persistence remain unimplemented.
+Also explicitly approved: the data-only immutable `ObjectLocation` class in `src/p8472backup/storage/file/index.py`. Benchmark libraries are optional development tools.
+
+The same module implements an in-memory `LocationIndex`. Its 32-bit buckets reference packed 56-byte records. Lookups probe linearly and compare the full object ID. `put(object_id, location)` inserts a location only if the supplied ID is absent. `get(object_id)` returns the location or `None`. The bucket array grows above 50 percent occupancy. The `get` and `put` signatures support duck typing. `save_to` and `load_from` use a versioned checkpoint and require the exclusive `RepositoryLock` from `storage/file/lock.py`.
 
 ## 1. Agreed starting point
 

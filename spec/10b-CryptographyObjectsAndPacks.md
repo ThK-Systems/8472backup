@@ -1,6 +1,6 @@
 # 8472backup — Cryptography, Objects, and Packs
 
-Specification version: 0.43 — Include SQLite in location-index evaluation, 2026-11-19
+Specification version: 0.45 — Lock-protected location index checkpoints, 2026-11-21
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 
@@ -125,7 +125,7 @@ The intended separation is:
 - physical layer: one or more such objects concatenated into a storage container;
 - location index: object ID to container, offset, and length.
 
-Approved data-only implementation, 2026-11-19: `storage/file/index.py` defines the immutable `ObjectLocation` class. Its repository and key-domain context is supplied externally; it is not a cross-client lookup key.
+`LocationIndex.put(object_id, location)` takes a 32-byte key and an immutable `ObjectLocation` value. The value contains the three pack location fields below. The repository and key domain determine the scope of the index.
 
 | Field | Python type | Intended encoded width | Meaning |
 | --- | --- | --- | --- |
@@ -134,7 +134,11 @@ Approved data-only implementation, 2026-11-19: `storage/file/index.py` defines t
 | `offset` | `int` | 8 bytes, unsigned | Absolute byte offset of the object's common header within the pack file |
 | `length` | `int` | 8 bytes, unsigned | Complete stored record length, including the 44-byte object header |
 
-These fields total 56 raw bytes, with a 24-byte location value after the 32-byte key. This is not the memory footprint of a Python instance. A maximum-sized object needs a record length of 16 GiB plus 44 bytes; 32-bit offsets or lengths are insufficient. Custom validation, methods, index-engine selection, and persistent index encoding are deferred. Numeric pack-ID allocation, filename derivation, and pack integrity checks still require review. The benchmark's temporary encodings do not establish a repository format or add runtime dependencies.
+These fields total 56 raw bytes, with a 24-byte location value after the 32-byte key. This is not the memory footprint of a Python instance. A maximum-sized object needs a record length of 16 GiB plus 44 bytes; 32-bit offsets or lengths are insufficient. Numeric pack-ID allocation, filename derivation, and pack integrity checks still require review.
+
+The development location index checkpoint contains an 18-byte header, the packed 56-byte records, and a 32-byte SHA-256 digest over the header and records. The header layout is `<8sHQ`: the eight-byte marker `8472IDX\x00`, version 1 as an unsigned 16-bit integer, and the record count as an unsigned 64-bit integer. Header integers and the three unsigned 64-bit location fields are little endian. The loader checks the header, count, exact file size, checksum, and uniqueness of the IDs. It rebuilds the in-memory bucket array from the records. The digest detects accidental corruption.
+
+`LocationIndex.save_to(path, lock)` writes a temporary file in the destination directory, syncs it, atomically replaces the checkpoint, and syncs the directory. `LocationIndex.load_from(path, lock)` reports a missing checkpoint as an error. Both require a held repository lock covering the path. Callers choose a separate checkpoint path for each key domain and decide whether changes require a save. Repository orchestration and index reconstruction remain separate work.
 
 Packing MUST NOT merge unrelated files into one logical plaintext chunk or couple their encryption. It MUST NOT cross independent key scopes without an explicit later decision.
 

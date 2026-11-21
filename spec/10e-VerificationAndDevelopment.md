@@ -1,6 +1,6 @@
 # 8472backup — Verification and Development
 
-Specification version: 0.43 — Include SQLite in location-index evaluation, 2026-11-19
+Specification version: 0.45 — Lock-protected location index checkpoints, 2026-11-21
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 
