@@ -5,10 +5,10 @@ from uuid import UUID
 
 import pytest
 
-from p8472backup.archive.dataobject import COMPRESSION_NONE, DataObject
-from p8472backup.archive.metaobject import MetaObject
+from p8472backup.archive.datacontent import COMPRESSION_NONE, DataContent
+from p8472backup.archive.metacontent import MetaContent
 from p8472backup.archive.objects import HEADER_SIZE as OBJECT_HEADER_SIZE, TYPE_DATA, TYPE_METADATA, TYPE_SNAPSHOT, Object, ObjectId
-from p8472backup.archive.snapshotroot import SnapshotRoot
+from p8472backup.archive.snapshotrootcontent import SnapshotRootContent
 from p8472backup.server.repository import Repository
 from p8472backup.server.repository_service import RepositoryService
 from p8472backup.server.snapshot_service import SnapshotService
@@ -40,9 +40,9 @@ def test_snapshot_catalogue_resolves_objects_through_saved_index(tmp_path: Path,
     data_id, metadata_id, root_id = b"d" * 32, b"m" * 32, b"r" * 32
     # Use the serialized payloads as opaque bodies for this server-side test.
     bodies = (
-        (TYPE_SNAPSHOT, root_id, SnapshotRoot(b"backup set configuration", (metadata_id,)).to_plaintext()),
-        (TYPE_DATA, data_id, DataObject(COMPRESSION_NONE, len(chunk), chunk).to_plaintext()),
-        (TYPE_METADATA, metadata_id, MetaObject(source.name.encode("utf-8"), (data_id,)).to_plaintext()),
+        (TYPE_SNAPSHOT, root_id, SnapshotRootContent(b"backup set configuration", (metadata_id,)).to_plaintext()),
+        (TYPE_DATA, data_id, DataContent(COMPRESSION_NONE, len(chunk), chunk).to_plaintext()),
+        (TYPE_METADATA, metadata_id, MetaContent(source.name.encode("utf-8"), (data_id,)).to_plaintext()),
     )
     records = ((Object(object_type, object_id, len(body)), BytesIO(body)) for object_type, object_id, body in bodies)
     pack_path = repository.pack_directory / "1.pack"
@@ -66,12 +66,12 @@ def test_snapshot_catalogue_resolves_objects_through_saved_index(tmp_path: Path,
             assert obj.object_id == object_id
             restored[object_id] = output.getvalue()
 
-    root = SnapshotRoot.from_plaintext(restored[snapshot.root_id])
+    root = SnapshotRootContent.from_plaintext(restored[snapshot.root_id])
     assert root.description == b"backup set configuration"
     (entry_id,) = root.metadata_ids
-    metadata = MetaObject.from_plaintext(restored[entry_id])
+    metadata = MetaContent.from_plaintext(restored[entry_id])
     assert metadata.metadata.decode("utf-8") == source.name
-    restored_file = b"".join(DataObject.from_plaintext(restored[chunk_id]).data for chunk_id in metadata.chunk_ids)
+    restored_file = b"".join(DataContent.from_plaintext(restored[chunk_id]).data for chunk_id in metadata.chunk_ids)
     assert restored_file == chunk
 
 

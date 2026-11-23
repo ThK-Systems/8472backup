@@ -6,7 +6,7 @@ from uuid import UUID
 import pytest
 
 from p8472backup.archive.objects import TYPE_SNAPSHOT, Object
-from p8472backup.archive.snapshotroot import SnapshotRoot
+from p8472backup.archive.snapshotrootcontent import SnapshotRootContent
 from p8472backup.server.repository import BackupMode, Repository
 from p8472backup.server.repository_service import RepositoryService
 from p8472backup.server.snapshot_service import SnapshotService
@@ -22,7 +22,7 @@ def test_init_repository_rejects_second_init_and_preserves_backup(tmp_path: Path
     repository = RepositoryService.init_repository(path, _CLIENT_ID, _BACKUP_SET_ID, _KEY_ID)
     assert repository.mode == "pull"
 
-    body = SnapshotRoot(b"backup set configuration").to_plaintext()
+    body = SnapshotRootContent(b"backup set configuration").to_plaintext()
     root = Object(TYPE_SNAPSHOT, b"r" * 32, len(body))
     snapshots = SnapshotService(repository)
     snapshot = snapshots.create_snapshot(iter(((root, BytesIO(body)),)), root.object_id)

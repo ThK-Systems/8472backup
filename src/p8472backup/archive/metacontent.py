@@ -12,7 +12,7 @@ _META_SUBHEADER = Struct("<Q")
 
 
 @dataclass(frozen=True)
-class MetaObject:
+class MetaContent:
     """Client-side plaintext for one filesystem entry."""
 
     metadata: bytes
@@ -29,7 +29,7 @@ class MetaObject:
         return b"".join((_META_SUBHEADER.pack(len(self.metadata)), self.metadata, *self.chunk_ids))
 
     @classmethod
-    def from_plaintext(cls, plaintext: bytes) -> MetaObject:
+    def from_plaintext(cls, plaintext: bytes) -> MetaContent:
         """Decode authenticated metadata plaintext supplied by the client."""
         if not _META_SUBHEADER.size <= len(plaintext) <= MAX_OBJECT_BODY_SIZE:
             raise ValueError(f"Invalid metadata object plaintext length: {len(plaintext)}")

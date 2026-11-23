@@ -17,7 +17,7 @@ COMPRESSION_ZSTD = 2
 
 
 @dataclass(frozen=True)
-class DataObject:
+class DataContent:
     """Client-side plaintext content of a type 1 archive object."""
 
     compression: int
@@ -46,7 +46,7 @@ class DataObject:
         return _DATA_SUBHEADER.pack(self.compression, self.chunk_size) + data
 
     @classmethod
-    def from_plaintext(cls, plaintext: bytes, compression: int | None = None) -> DataObject:
+    def from_plaintext(cls, plaintext: bytes, compression: int | None = None) -> DataContent:
         """Decode authenticated plaintext and optionally verify its compression ID."""
         if not _DATA_SUBHEADER.size <= len(plaintext) <= MAX_OBJECT_BODY_SIZE:
             raise ValueError(f"Invalid data object plaintext length: {len(plaintext)}")

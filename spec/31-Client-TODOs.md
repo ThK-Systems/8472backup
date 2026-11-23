@@ -36,11 +36,11 @@ Use Argon2id to derive a protection key from the client's master passphrase for 
 
 ## 9. Directory tree and metadata format
 
-File entries reference chunks in order. Directory objects map child names to their object IDs. Change `SnapshotRoot` from a flat list of metadata IDs to a reference to the root directory. Define the metadata schema, how to represent Linux filenames, and which attributes can be restored.
+File entries reference chunks in order. Directory objects map child names to their object IDs. Change `SnapshotRootContent` from a flat list of metadata IDs to a reference to the root directory. Define the metadata schema, how to represent Linux filenames, and which attributes can be restored.
 
 ## 10. Backup completion
 
-Transfer objects with bounded buffers and send the complete `SnapshotRoot` as the final object. Report success once the server acknowledges the durable commit. Define how the client can query the run's outcome if it loses the acknowledgement.
+Transfer objects with bounded buffers and send the complete snapshot root as the final object. Report success once the server acknowledges the durable commit. Define how the client can query the run's outcome if it loses the acknowledgement.
 
 ## 11. Snapshot selection and direct restore
 

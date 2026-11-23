@@ -16,7 +16,7 @@ Implement the systemd service and the restricted SSH entry points. Push goes thr
 
 ## 4. Backup completion and snapshot commit
 
-Use the complete final `SnapshotRoot` object as the upload completion signal. `SnapshotService.create_snapshot()` currently expects the root first and requires its ID up front. Include both new and reused object IDs in the snapshot catalogue. Acknowledge the backup after the packs and index are durable and the snapshot record has been durably published.
+Use the complete final snapshot root object as the upload completion signal. `SnapshotService.create_snapshot()` currently expects the root first and requires its ID up front. Include both new and reused object IDs in the snapshot catalogue. Acknowledge the backup after the packs and index are durable and the snapshot record has been durably published.
 
 ## 5. Snapshot listing
 
@@ -28,7 +28,7 @@ Serve objects for restore and mount. Check requested IDs against the selected sn
 
 ## 7. Directory tree and snapshot description
 
-Replace the current flat metadata-ID list in the client-encrypted `SnapshotRoot` with a reference to the root directory. Directory metadata links direct child names to their object IDs. Capture the backup configuration used for the run in the encrypted snapshot description. Define the directory encoding, filename representation, and which filesystem metadata a restore preserves.
+Replace the current flat metadata-ID list in the client-encrypted snapshot root content with a reference to the root directory. Directory metadata links direct child names to their object IDs. Capture the backup configuration used for the run in the encrypted snapshot description. Define the directory encoding, filename representation, and which filesystem metadata a restore preserves.
 
 ## 8. Restore
 

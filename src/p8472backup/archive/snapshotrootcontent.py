@@ -12,7 +12,7 @@ _ROOT_SUBHEADER = Struct("<Q")
 
 
 @dataclass(frozen=True)
-class SnapshotRoot:
+class SnapshotRootContent:
     """Client-side plaintext for a type 3 archive object."""
 
     description: bytes
@@ -29,7 +29,7 @@ class SnapshotRoot:
         return b"".join((_ROOT_SUBHEADER.pack(len(self.description)), self.description, *self.metadata_ids))
 
     @classmethod
-    def from_plaintext(cls, plaintext: bytes) -> SnapshotRoot:
+    def from_plaintext(cls, plaintext: bytes) -> SnapshotRootContent:
         """Decode authenticated snapshot root plaintext supplied by the client."""
         if not _ROOT_SUBHEADER.size <= len(plaintext) <= MAX_OBJECT_BODY_SIZE:
             raise ValueError(f"Invalid snapshot root plaintext length: {len(plaintext)}")
