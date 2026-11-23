@@ -34,6 +34,8 @@ src/
       metadata.py
       compression.py
       crypto.py
+    common/
+      error.py
     server/
       snapshot.py
       repository.py
@@ -82,6 +84,7 @@ This is an intended organization as functionality grows. Create modules with the
 | Package | Responsibility |
 | --- | --- |
 | `archive` | Source-side chunking, identifiers and encrypted object envelopes, file metadata, compression, encryption, and restoration. These operations do not require a client CLI. |
+| `common` | Shared exceptions. |
 | `server` | Authenticated host/set scope, repository operations, authoritative snapshot membership, commit publication, protection, and retention decisions. |
 | `storage.file` | Physical packs, object locations, bounded reads, durable writes, and recovery of storage indexes. Cleanup follows server policy. |
 | `transport` | Shared protocol and the separate push/pull connection setup. |

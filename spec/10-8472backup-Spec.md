@@ -1,6 +1,6 @@
 # 8472backup — Project Specification for Codex
 
-Version: 0.57 — Manual recovery after interrupted repository initialization, 2026-11-23
+Version: 0.58 — Report missing metadata on repository initialization retry, 2026-11-23
 
 Status: requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 
