@@ -1,6 +1,6 @@
 # 8472backup — Communication, Configuration, and Operations
 
-Specification version: 0.49 — Concurrent backup-set limit, 2026-11-23
+Specification version: 0.50 — Server SSH key at installation, 2026-11-23
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 
@@ -105,7 +105,7 @@ These requirements define the concurrency architecture. Implementation details r
 
 The intended user workflow is:
 
-1. Install the Linux server, with minimal standard-case setup.
+1. Install the Linux server. During installation, generate an Ed25519 SSH key pair for the user running the installation. Set the SSH key comment to `8472backup-<user>@<fqdn>`, using that account's username and the server's fully qualified domain name.
 2. Install the client and run client setup with the server address and optional set name and encryption-passphrase input.
 3. Generate a client authentication key without a passphrase for unattended operations where needed.
 4. Display instructions for installing that public key on the server with the restricted command.
@@ -121,7 +121,9 @@ In push mode, the client requests creation of the remote repository. In pull mod
 
 The user may supply a passphrase through the CLI. Exact secure input mechanisms remain OPEN; prevent accidental secret exposure in logs and avoid argv exposure as the only input mechanism.
 
-The passphrase-protection and key-separation direction is defined in chapter 7. OPEN: exact key generation/wrapping and unattended unlocking, initial server key provisioning, address updates, host reinstallation, recovery/re-enrolment, and authentication-key rotation.
+The passphrase-protection and key-separation direction is defined in chapter 7. OPEN: exact backup key generation/wrapping and unattended unlocking, server SSH key storage, address updates, host reinstallation, recovery/re-enrolment, and authentication-key rotation.
+
+Switch the server's SSH authentication key to a post-quantum signature key once a suitable algorithm is supported by the OpenSSH versions on both peers. An ML-DSA-based key is a candidate. Hybrid SSH key exchange with ML-KEM, the standard derived from Kyber, is evaluated separately under [the quantum security review](10b-CryptographyObjectsAndPacks.md#76-quantum-security-review).
 ## 15. Backup descriptions and configuration
 
 Each set has a local backup-description file, conceptually similar to a borgmatic configuration but with a smaller configuration vocabulary and less verbosity. It defines source selections, exclusions, and requested retention. The exact syntax and schema remain OPEN.

@@ -67,3 +67,7 @@ For each writing session, derive an AES key on the client from its durable backu
 ## 16. Initial server and client setup
 
 Keep the standard setup short. On the server, configure the storage path and start the systemd service. At client setup, supply the server address and first backup set. The client generates its UUID, SSH key, and backup secrets and offers a recovery export. The administrator approves the client's SSH public key once. For pull, the client also authorizes the server's public SSH key with a restricted command. After authenticated registration, use the same create-once repository operation in both modes. Backup secrets stay with the client. Define how the first SSH contact establishes trust and how scheduled backups unlock client key material. See [initialization and registration](10d-CommunicationConfigurationAndOperations.md#14-initialization-registration-and-identity-recovery).
+
+During server installation, generate an Ed25519 SSH key pair for the user running the installation. Use the account name and the server's fully qualified domain name in the key comment `8472backup-<user>@<fqdn>`.
+
+Plan the switch to a post-quantum SSH authentication key once the supported OpenSSH versions can use it on both peers. Track Kyber-based ML-KEM separately for the SSH key exchange.

@@ -1,6 +1,6 @@
 # 8472backup — Purpose, Scope, and Architecture
 
-Specification version: 0.49 — Concurrent backup-set limit, 2026-11-23
+Specification version: 0.50 — Server SSH key at installation, 2026-11-23
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 
