@@ -1,6 +1,6 @@
 # 8472backup — Verification and Development
 
-Specification version: 0.58 — Report missing metadata on repository initialization retry, 2026-11-23
+Specification version: 0.59 — Calendar retention and server check and version commands, 2026-11-23
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 
@@ -30,6 +30,10 @@ Tests must exercise behaviour and invariants, not merely mirror implementation. 
 | Push backup fails or disconnects | No incomplete snapshot is published and existing protected history remains intact |
 | Push backup uses reused old objects | A protected new snapshot keeps all required objects, regardless of object age |
 | Incremental backup after source edits | Changed content restored correctly; unchanged objects reused |
+| Local initial backup followed by an incremental backup and prune | The incremental run requests only missing object bodies. Prune removes eligible snapshot records and leaves packs and the location index untouched. The retained snapshot opens with its complete catalogue. |
+| Calendar rules span empty periods and week, month, quarter, or year boundaries | Each occupied period contributes its newest snapshot. Coarser rules skip periods covered by finer selections. Empty periods do not count. |
+| A prune candidate reaches its effective protection deadline | The snapshot is preserved at the deadline and may be pruned strictly after it. |
+| The repository lock is held when a second operation starts | The second operation reports contention immediately. A later operation can acquire the lock once the holder releases it. |
 | Earlier snapshot removed | Every retained snapshot still restores independently |
 | Old chunk referenced by new protected snapshot | Old chunk remains available |
 | Client requests shorter retention | Unexpired server protection wins |

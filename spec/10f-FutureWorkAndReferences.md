@@ -1,6 +1,6 @@
 # 8472backup — Future Work and References
 
-Specification version: 0.58 — Report missing metadata on repository initialization retry, 2026-11-23
+Specification version: 0.59 — Calendar retention and server check and version commands, 2026-11-23
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 

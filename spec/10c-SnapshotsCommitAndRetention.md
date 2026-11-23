@@ -1,6 +1,6 @@
 # 8472backup — Snapshots, Commit, and Retention
 
-Specification version: 0.58 — Report missing metadata on repository initialization retry, 2026-11-23
+Specification version: 0.59 — Calendar retention and server check and version commands, 2026-11-23
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 
@@ -201,7 +201,7 @@ For a completed snapshot:
 ```text
 effective_protected_until = max(snapshot.protected_until,
                                 snapshot.committed_at + current_server_protection_interval)
-protected_by_server = server_now < effective_protected_until
+protected_by_server = server_now <= effective_protected_until
 keep_snapshot = retention_selects_snapshot OR protected_by_server
 ```
 
@@ -215,7 +215,11 @@ Example: a three-month-old snapshot A and yesterday's protected snapshot B refer
 
 Once a snapshot's protection period expires, client-specified retention may remove it. An older snapshot is not granted a fresh seven-day delay when a retention policy changes. No additional deletion-grace requirement has been agreed.
 
-After a completed backup, the server automatically evaluates the set's retention rules and applies the protection override. The background maintenance jobs handle physical space reclamation during idle periods.
+After a successful backup commit, the server runs prune for that backup set. It selects from published snapshots using the server-assigned `committed_at` and then applies the server protection override. A snapshot is eligible for removal only when server time is strictly after its effective protection deadline and the retention policy does not select it.
+
+Use the hierarchical calendar selection from [retentions](https://github.com/tkn777/retentions/blob/master/retentions.py#L795-L919). Evaluate enabled rules in this order: hours, days, ISO weeks, months, calendar quarters, 13-ISO-week blocks, and years. Use UTC calendar boundaries. For each rule, keep the newest snapshot in each of the requested number of occupied periods, starting with the most recent eligible period. A coarser rule considers only periods strictly before the period containing the oldest snapshot selected so far. Empty periods consume no slots. With no enabled rules, keep every snapshot. The `minutes` and `last` rules are excluded.
+
+Prune removes only the eligible snapshot's register entry, JSON, and catalogue in the order defined in chapter 11. Physical object reclamation remains the responsibility of asynchronous compaction.
 
 The server MUST enforce protection at every application-level deletion path, not merely during a scheduled prune job. No ordinary client or maintenance API may bypass it. A host administrator with direct filesystem control remains outside this guarantee.
 
@@ -223,7 +227,7 @@ The server MUST enforce protection at every application-level deletion path, not
 
 The asynchronous cleanup job checks retired scopes during idle periods. It calls the internal `RepositoryService.delete_backup_set()` or `RepositoryService.delete()` for final deletion. Under the affected repository's lock, verify the `removed` state, snapshot retention and effective protection, and that active operations no longer require the scope. Delete a set's records and files once all of its snapshots are eligible. The repository's compaction rules govern reclamation of its objects in packs, including objects shared with retained snapshots. Delete the entire repository once all its snapshots are eligible and its data is no longer in use.
 
-OPEN: exact calendar/count retention semantics, timezone handling, the expiry rule for count-based retention after retirement, handling active jobs during retirement, removal permissions, recovery after an interrupted deletion, and any explicit administrator override. Preserve the last completed snapshot automatically only if Thomas adopts that additional policy.
+OPEN: resolve how calendar retention expires after retirement, when no new snapshots can fill newer periods. Handling active jobs during retirement, removal permissions, recovery after an interrupted deletion, and any explicit administrator override remain open.
 
 ### 12.1 Liveness and garbage collection
 
