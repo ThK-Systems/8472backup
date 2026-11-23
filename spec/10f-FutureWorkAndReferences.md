@@ -1,6 +1,6 @@
 # 8472backup — Future Work and References
 
-Specification version: 0.56 — Final deletion of retired backup scopes, 2026-11-23
+Specification version: 0.57 — Manual recovery after interrupted repository initialization, 2026-11-23
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 

@@ -1,6 +1,6 @@
 # 8472backup — Snapshots, Commit, and Retention
 
-Specification version: 0.56 — Final deletion of retired backup scopes, 2026-11-23
+Specification version: 0.57 — Manual recovery after interrupted repository initialization, 2026-11-23
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 
@@ -140,7 +140,7 @@ The façade derives the repository path as `<storage_root>/<client_id>` from the
 
 The repository object carries the host's backup `mode`, which defaults to `pull`. `Repository.set_mode()` changes it in memory. `RepositoryService.set_mode(path, mode)` persists the selected mode for the entire repository under its lock. It writes and syncs a temporary file, atomically replaces the metadata file, and syncs the repository directory. Section 13.1 defines how host mode changes are communicated for scheduling.
 
-The client initiates repository setup in both modes. The server requires at least one valid backup set and registers all accepted sets as one initialization. Reserve the new path exclusively, prepare storage for the accepted sets and their key domains, and initialize an empty snapshot register. Publish `repository.json` after these dependencies are durable. An existing initialized repository must be preserved. How to distinguish and recover an interrupted initialization remains OPEN.
+The client initiates repository setup in both modes. The server requires at least one valid backup set and registers all accepted sets as one initialization. Reserve the new path exclusively, prepare storage for the accepted sets and their key domains, and initialize an empty snapshot register. Publish `repository.json` after these dependencies are durable. Propagate initialization errors to the caller and preserve any existing or partially created repository files. The backup administrator handles inspection and cleanup before retrying.
 
 `repository.json` in the repository root is UTF-8 JSON and contains both repository and backup-set metadata. Repository metadata includes the client UUID and mode. Set metadata is keyed by set UUID and includes its registered key-domain ID and the operational fields needed by the server. The façade must check the stored client UUID against the verified identity and resolve the key domain from the registered set. The exact schema for the pull SSH target, set names, scheduling, and retention remains OPEN.
 
