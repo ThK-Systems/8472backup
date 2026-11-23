@@ -9,6 +9,7 @@ Status: medium-term inventory, 2026-11-13. The [main specification](10-8472backu
 | Setting | Status | Scope and current direction |
 | --- | --- | --- |
 | Backup mode | Planned | Per host/client, uniformly for every set: `pull` by default or `push`. No per-set override. Detailed switching commands and acknowledgement remain open. |
+| Push retry interval | Planned | Client waits before retrying a push request when the server's concurrent backup-set limit is reached. Default: 60 seconds. Retry limits and cancellation remain open. |
 | Backup sets and source selection | Planned | Per set: selected paths and exclusions. Capture and validate one description per run; later edits affect subsequent runs. |
 | Requested retention | Planned | Per set: client requests a retention policy; server minimum protection always applies. Calendar/count rules and timezone semantics remain open. |
 | Server connection | Candidate | Client connection settings for the server address, SSH identity, and host-key verification. Exact options and their interaction with system SSH configuration remain open. Host-key verification stays mandatory. |
@@ -24,6 +25,7 @@ Status: medium-term inventory, 2026-11-13. The [main specification](10-8472backu
 | Minimum protection duration | Planned | Per host repository, server-controlled; default seven days from server commit. Effective expiry is the maximum of the stored snapshot protection deadline and the snapshot commit time plus the currently configured interval. Retention cannot delete a snapshot before this effective deadline. |
 | Chunk sizes | Planned | Server-defined minimum, target, and maximum, communicated to the source before chunking. Initial defaults: 512 KiB, approximately 2 MiB, and 8 MiB. Larger configurations are possible within supported implementation and stored-object limits. Host/set configuration scope and validation remain open. |
 | Pull schedule | Planned | Server schedules pull backups for hosts/sets. Push hosts use an external client-side scheduler and are not scheduled for pull. Scheduling syntax, configuration ownership, and overlap handling remain open. |
+| Concurrent backup-set operations | Planned | Server-wide limit shared by push and pull. Default: 3. Queue scheduled pull jobs when full; return a wait response to push clients so they can retry. Separate from the repository-lock limit. |
 | Repository and service locations | Candidate | Server repository roots and Unix-socket location, with explicit service-account and access rules. Exact deployment options remain open. |
 | Target pack size | Planned | The server controls the target size of new packs. The default is 50 MB (50,000,000 bytes). Close the pack after the complete record that reaches or exceeds the target. The target is independent of chunk-size limits. |
 | Pack buffering | Candidate | Buffering limits remain open within the shared memory budget. |

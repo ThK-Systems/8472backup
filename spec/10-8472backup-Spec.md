@@ -1,6 +1,6 @@
 # 8472backup — Project Specification for Codex
 
-Version: 0.48 — Content padding length, 2026-11-23
+Version: 0.49 — Concurrent backup-set limit, 2026-11-23
 
 Status: requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 

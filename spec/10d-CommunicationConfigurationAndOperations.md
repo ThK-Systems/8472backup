@@ -1,6 +1,6 @@
 # 8472backup — Communication, Configuration, and Operations
 
-Specification version: 0.48 — Content padding length, 2026-11-23
+Specification version: 0.49 — Concurrent backup-set limit, 2026-11-23
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 
@@ -39,6 +39,10 @@ The client can also connect to the server through SSH for init, set registration
 A client SSH key is separately authorized on the server through a restricted entry. Having a client-to-server key must not grant an arbitrary repository write API or deletion authority.
 
 Pull uses server-side scheduling and execution; push uses client-side scheduling and initiation. Both require server admission and the same protection rules. Whether a user can manually request backups in pull mode remains OPEN.
+
+The server limits the number of concurrently running backup-set operations across push and pull. The limit is configurable and defaults to 3. Scheduled pull jobs that cannot start because the limit is reached wait in a server-side queue. A push request that cannot start because the limit is reached receives a wait response; the client reports that it is waiting and retries after its configured interval, which defaults to 60 seconds. Repeated wait responses result in further retries. The backup-set limit is separate from the server-wide limit on operations holding repository locks. Existing per-repository and per-backup-set locking rules continue to apply.
+
+Queue ordering, retry limits, cancellation, and the wire format of the wait response remain OPEN.
 
 ### 13.3 Client SSH access to the server service
 
@@ -159,4 +163,4 @@ Import of Borg history through a mount was discussed as feasible but is not comm
 - Handle unreachable hosts, overlapping jobs, retries, interruption, and disk-full conditions predictably.
 - Keep normal configuration and deployment small. No web UI, SaaS dependency, or enterprise orchestration framework is required.
 
-OPEN: privilege model, service accounts, source filesystem privileges, default concurrency, schedules, retries, quotas, metrics, and package formats.
+OPEN: privilege model, service accounts, source filesystem privileges, schedules, retry limits, quotas, metrics, and package formats.

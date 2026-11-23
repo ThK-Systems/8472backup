@@ -14,6 +14,8 @@ Define the configuration for source paths, exclusions, and requested retention. 
 
 Provide commands for setup, backup, listing, restore, mounting, and changing the backup mode. In push mode, the client starts SSH to the server. In pull mode, the server invokes the restricted client command over SSH. Use the same client backup workflow in both modes. Provide clear exit codes and useful diagnostics for automation.
 
+When the server returns a wait response because the backup-set concurrency limit is reached, report the wait and retry after the configurable client interval, default 60 seconds. Retry after subsequent wait responses as well.
+
 ## 4. Source filesystem traversal
 
 Walk source paths, apply exclusions, and collect filesystem metadata. Define how to handle symlinks, hard links, read failures, and files that change while being read. Decide which conditions make a run fail or count as partial.

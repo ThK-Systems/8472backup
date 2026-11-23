@@ -1,6 +1,6 @@
 # 8472backup — Verification and Development
 
-Specification version: 0.48 — Content padding length, 2026-11-23
+Specification version: 0.49 — Concurrent backup-set limit, 2026-11-23
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 
@@ -15,6 +15,8 @@ Tests must exercise behaviour and invariants, not merely mirror implementation. 
 | Client invokes an unauthorized operation | Server rejects it; protected snapshots and repository state remain unchanged |
 | Client disconnects during a gateway session | Incomplete work is handled safely and committed history remains intact |
 | Equivalent source data backed up through push and pull | Common protocol and archive logic give the same reuse, restoration, commit, and protection behaviour |
+| Concurrent backup-set limit reached | Pull jobs wait in the server queue; push clients receive a wait response and retry after the configured interval, 60 seconds by default |
+| Push and pull backups run concurrently | Their combined number does not exceed the configured server-wide limit, 3 by default |
 | Registration with mode omitted | Pull is the default; server schedules the host |
 | Registration with `mode = "push"` | Server records push mode and never schedules the host for pull; push backup remains available |
 | Initially push host requests pull | Dedicated authenticated client command reactivates pull scheduling |

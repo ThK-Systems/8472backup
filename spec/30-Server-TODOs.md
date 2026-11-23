@@ -10,6 +10,8 @@ Define the inputs, results, and errors for `init_repository`, `backup`, `list`, 
 
 Route incoming push jobs and scheduled pull jobs through the same backup operation. The mode is already stored per client and defaults to pull. Implement pull scheduling and define how to record the SSH endpoint, retry failed jobs, and apply mode changes to queued and active jobs.
 
+Enforce the configurable server-wide limit for concurrent backup sets, default 3. Queue pull jobs when full and return a wait response to push clients. Define queue ordering and cancellation.
+
 ## 3. Server process and wire protocol
 
 Implement the systemd service and the restricted SSH entry points. Push goes through the SSH helper and the server's Unix socket. Pull starts an SSH connection from the server to the restricted client command. Define authentication and authorization, message framing, size limits, timeouts, and the object-ID exchange for sending only missing object bodies. Define how asynchronous connections interact with blocking file I/O and repository locks. See the [communication spec](10d-CommunicationConfigurationAndOperations.md#13-communication-execution-and-protocol).
