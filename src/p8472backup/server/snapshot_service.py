@@ -50,20 +50,20 @@ class SnapshotService:
 
         repository = self._repository
         with RepositoryLock(repository.path) as lock:
-            directory = lock.require_held_for(repository.snapshot_directory)
+            directory = lock.require_held_for(repository.snapshots_directory)
             if not directory.is_dir():
                 raise NotADirectoryError(directory)
-            path = repository.snapshot_path(snapshot_id)
+            path = repository.snapshot_file(snapshot_id)
             if os.path.lexists(path):
                 raise FileExistsError(f"Snapshot already exists: {path}")
 
-            index = LocationIndex.load_from(repository.index_path, lock)
+            index = LocationIndex.load_from(repository.index_file, lock)
             first = next(records, None)
             if first is None or first[0].object_type != TYPE_SNAPSHOT or first[0].object_id != root_id:
                 raise ValueError("The first record must be the declared type 3 snapshot root")
 
             catalogue = self._store_snapshot_objects(chain((first,), records), index, lock)
-            index.save_to(repository.index_path, lock)
+            index.save_to(repository.index_file, lock)
 
             committed_at = datetime.now(UTC)
             snapshot = Snapshot(
@@ -102,7 +102,7 @@ class SnapshotService:
                     yield obj, body
 
         missing = iter_missing_objects()
-        pack_directory = lock.require_held_for(self._repository.pack_directory)
+        pack_directory = lock.require_held_for(self._repository.packs_directory)
         destinations = self._pack_destinations(pack_directory)
         while (first := next(missing, None)) is not None:
             pack_id, path = next(destinations)

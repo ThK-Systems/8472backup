@@ -144,7 +144,7 @@ The client initiates repository setup in both modes. The server requires at leas
 
 `repository.json` in the repository root is UTF-8 JSON and contains both repository and backup-set metadata. Repository metadata includes the client UUID and mode. Set metadata is keyed by set UUID and includes its registered key-domain ID and the operational fields needed by the server. The façade must check the stored client UUID against the verified identity and resolve the key domain from the registered set. The exact schema for the pull SSH target, set names, scheduling, and retention remains OPEN.
 
-The current development code initializes one set at a time and stores set UUIDs directly mapped to key-domain UUIDs in `repository.json` version 1. Its pack and index directories are directly under the repository root. The transition from these development layouts remains OPEN.
+`ServerService.init_repository()` takes the verified client UUID, the initial set-to-key-domain mapping, and the mode. The repository code uses the layout above. The development implementation stores the direct UUID mapping in `repository.json` version 1 and initializes `snapshot-registry.json` with `version` set to `1` and an empty `snapshots` object. The final metadata schemas remain OPEN.
 
 ### Local snapshot record and commit
 

@@ -30,20 +30,20 @@ class Repository:
         object.__setattr__(self, "mode", mode)
 
     @property
-    def index_path(self) -> Path:
-        """Return the index checkpoint path for this key domain."""
-        return self.path / "index" / str(self.key_id)
+    def index_file(self) -> Path:
+        """Return the location index file for this key domain."""
+        return self.path / "data" / "index" / str(self.key_id)
 
     @property
-    def pack_directory(self) -> Path:
-        """Return the pack directory for this key domain."""
-        return self.path / "packs" / str(self.key_id)
+    def packs_directory(self) -> Path:
+        """Return the directory containing packs for this key domain."""
+        return self.path / "data" / "packs" / str(self.key_id)
 
     @property
-    def snapshot_directory(self) -> Path:
-        """Return the snapshot directory for this backup set."""
+    def snapshots_directory(self) -> Path:
+        """Return the directory containing snapshots for this backup set."""
         return self.path / "snapshots" / str(self.backup_set_id)
 
-    def snapshot_path(self, snapshot_id: UUID) -> Path:
-        """Return the file path for a snapshot in this backup set."""
-        return self.snapshot_directory / f"{snapshot_id}.snapshot"
+    def snapshot_file(self, snapshot_id: UUID) -> Path:
+        """Return the file for the given snapshot in this backup set."""
+        return self.snapshots_directory / f"{snapshot_id}.snapshot"

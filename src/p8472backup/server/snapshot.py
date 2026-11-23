@@ -41,7 +41,7 @@ class Snapshot:
 
     def save_to(self, repository: Repository, lock: RepositoryLock) -> None:
         """Durably publish the snapshot without replacing an existing record."""
-        path = repository.snapshot_path(self.snapshot_id)
+        path = repository.snapshot_file(self.snapshot_id)
         directory = lock.require_held_for(path.parent)
         path = directory / path.name
         if self.version != _SNAPSHOT_VERSION:
@@ -86,7 +86,7 @@ class Snapshot:
     @classmethod
     def load_from(cls, repository: Repository, snapshot_id: UUID, lock: RepositoryLock) -> Snapshot:
         """Read a committed snapshot record under its repository lock."""
-        path = lock.require_held_for(repository.snapshot_path(snapshot_id))
+        path = lock.require_held_for(repository.snapshot_file(snapshot_id))
         with path.open("rb") as source:
             header = source.read(_SNAPSHOT_HEADER.size)
             if len(header) != _SNAPSHOT_HEADER.size:

@@ -26,7 +26,7 @@ def test_init_repository_rejects_second_init_and_preserves_backup(tmp_path: Path
     root = Object(TYPE_SNAPSHOT, b"r" * 32, len(body))
     snapshots = SnapshotService(repository)
     snapshot = snapshots.create_snapshot(iter(((root, BytesIO(body)),)), root.object_id)
-    files = (path / "repository.json", repository.index_path, repository.pack_directory / "1.pack", repository.snapshot_path(snapshot.snapshot_id))
+    files = (path / "repository.json", repository.index_file, repository.packs_directory / "1.pack", repository.snapshot_file(snapshot.snapshot_id))
     contents = tuple(file.read_bytes() for file in files)
 
     with pytest.raises(FileExistsError):
@@ -48,16 +48,16 @@ def test_init_repository_leaves_missing_or_damaged_index_untouched(tmp_path: Pat
     path = tmp_path / "repo"
     repository = RepositoryService.init_repository(path, _CLIENT_ID, _BACKUP_SET_ID, _KEY_ID)
     if checkpoint is None:
-        repository.index_path.unlink()
+        repository.index_file.unlink()
     else:
-        repository.index_path.write_bytes(checkpoint)
+        repository.index_file.write_bytes(checkpoint)
 
     with pytest.raises(FileExistsError):
         RepositoryService.init_repository(path, _CLIENT_ID, _BACKUP_SET_ID, _KEY_ID)
     if checkpoint is None:
-        assert not repository.index_path.exists()
+        assert not repository.index_file.exists()
     else:
-        assert repository.index_path.read_bytes() == checkpoint
+        assert repository.index_file.read_bytes() == checkpoint
 
 
 def test_init_repository_requires_a_new_path(tmp_path: Path) -> None:

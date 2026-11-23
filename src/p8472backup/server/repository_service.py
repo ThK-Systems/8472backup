@@ -2,7 +2,7 @@
 
 import json
 import os
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import TypeGuard
@@ -15,6 +15,8 @@ from p8472backup.storage.file.lock import RepositoryLock
 
 _METADATA_NAME = "repository.json"
 _METADATA_VERSION = 1
+_SNAPSHOT_REGISTRY_NAME = "snapshot-registry.json"
+_SNAPSHOT_REGISTRY_VERSION = 1
 
 
 def _is_json_object(value: object) -> TypeGuard[Mapping[object, object]]:
@@ -26,18 +28,32 @@ class RepositoryService:
 
     @classmethod
     def init_repository(cls, path: Path, client_id: UUID, backup_set_id: UUID, key_id: UUID, *, mode: BackupMode = "pull") -> Repository:
-        """Create a repository at a new path below an existing parent directory."""
-        repository = Repository(path, client_id, backup_set_id, key_id, mode=mode)
+        """Create a repository with a single backup set."""
+        cls.init_repository_with_sets(path, client_id, ((backup_set_id, key_id),), mode=mode)
+        return Repository(path, client_id, backup_set_id, key_id, mode=mode)
+
+    @classmethod
+    def init_repository_with_sets(cls, path: Path, client_id: UUID, backup_sets: Iterable[tuple[object, object]], *, mode: BackupMode = "pull") -> None:
+        """Create a repository and register its initial backup sets together."""
+        key_ids: dict[UUID, UUID] = {}
+        for set_id, key_id in backup_sets:
+            if not isinstance(set_id, UUID) or not isinstance(key_id, UUID):
+                raise ValueError("Backup set and key domain IDs must be UUIDs")
+            if set_id in key_ids:
+                raise ValueError(f"Duplicate backup set ID: {set_id}")
+            key_ids[set_id] = key_id
+        if not key_ids:
+            raise ValueError("At least one backup set is required")
+        repositories = [Repository(path, client_id, set_id, key_id, mode=mode) for set_id, key_id in key_ids.items()]
+        repository = repositories[0]
         path.mkdir(mode=0o700)
         with RepositoryLock(repository.path) as lock:
-            index_path = repository.index_path
-            index_directory = lock.require_held_for(index_path.parent)
-            pack_directory = lock.require_held_for(repository.pack_directory)
-            snapshot_directory = lock.require_held_for(repository.snapshot_directory)
-
-            directories = (index_directory, pack_directory.parent, pack_directory, snapshot_directory.parent, snapshot_directory)
+            index_paths = dict.fromkeys(repo.index_file for repo in repositories)
+            pack_directories = dict.fromkeys(repo.packs_directory for repo in repositories)
+            index_directory = repository.index_file.parent
+            directories = (index_directory.parent, index_directory, repository.packs_directory.parent, repository.snapshots_directory.parent, *pack_directories, *(repo.snapshots_directory for repo in repositories))
             for directory in directories:
-                directory.mkdir(mode=0o700)
+                lock.require_held_for(directory).mkdir(mode=0o700)
             for directory in (*reversed(directories), repository.path, repository.path.parent):
                 fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
                 try:
@@ -45,10 +61,10 @@ class RepositoryService:
                 finally:
                     os.close(fd)
 
-            LocationIndex().save_to(index_path, lock)
-            cls._write_metadata(repository.path, lock, client_id, mode, {backup_set_id: key_id})
-
-        return repository
+            for index_path in index_paths:
+                LocationIndex().save_to(index_path, lock)
+            cls._write_json(repository.path / _SNAPSHOT_REGISTRY_NAME, lock, {"version": _SNAPSHOT_REGISTRY_VERSION, "snapshots": {}})
+            cls._write_metadata(repository.path, lock, client_id, mode, key_ids)
 
     @classmethod
     def open_repository(cls, path: Path, backup_set_id: UUID) -> Repository:
@@ -104,28 +120,23 @@ class RepositoryService:
             key_ids[backup_set_id] = UUID(key_id)
         return UUID(client_id), parsed_mode, key_ids
 
+    @classmethod
+    def _write_metadata(cls, path: Path, lock: RepositoryLock, client_id: UUID, mode: BackupMode, backup_sets: dict[UUID, UUID]) -> None:
+        key_ids_by_set = {str(set_id): str(key_id) for set_id, key_id in backup_sets.items()}
+        cls._write_json(path / _METADATA_NAME, lock, {"version": _METADATA_VERSION, "client_id": str(client_id), "mode": mode, "backup_sets": key_ids_by_set})
+
     @staticmethod
-    def _write_metadata(path: Path, lock: RepositoryLock, client_id: UUID, mode: BackupMode, backup_sets: dict[UUID, UUID]) -> None:
-        metadata_path = lock.require_held_for(path / _METADATA_NAME)
-        data: dict[str, object] = {
-            "version": _METADATA_VERSION,
-            "client_id": str(client_id),
-            "mode": mode,
-            "backup_sets": {str(set_id): str(key_id) for set_id, key_id in backup_sets.items()},
-        }
-        directory_fd = os.open(metadata_path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    def _write_json(path: Path, lock: RepositoryLock, data: dict[str, object]) -> None:
+        path = lock.require_held_for(path)
+        directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
         try:
-            output = NamedTemporaryFile(mode="w", encoding="utf-8", dir=metadata_path.parent, prefix=".repository-", delete=False)
-            temporary_path = Path(output.name)
-            try:
-                with output:
-                    json.dump(data, output, indent=2)
-                    output.write("\n")
-                    output.flush()
-                    os.fsync(output.fileno())
-                os.replace(temporary_path, metadata_path)
-            finally:
-                temporary_path.unlink(missing_ok=True)
+            with NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, prefix=f".{path.stem}-", delete_on_close=False) as output:
+                json.dump(data, output, indent=2)
+                output.write("\n")
+                output.flush()
+                os.fsync(output.fileno())
+                output.close()
+                os.replace(output.name, path)
             os.fsync(directory_fd)
         finally:
             os.close(directory_fd)

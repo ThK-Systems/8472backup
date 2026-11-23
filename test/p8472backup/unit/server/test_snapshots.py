@@ -45,7 +45,7 @@ def test_snapshot_catalogue_resolves_objects_through_saved_index(tmp_path: Path,
         (TYPE_METADATA, metadata_id, MetaContent(source.name.encode("utf-8"), (data_id,)).to_plaintext()),
     )
     records = ((Object(object_type, object_id, len(body)), BytesIO(body)) for object_type, object_id, body in bodies)
-    pack_path = repository.pack_directory / "1.pack"
+    pack_path = repository.packs_directory / "1.pack"
     committed = snapshot_service.create_snapshot(records, root_id)
     snapshot = snapshot_service.get_snapshot(committed.snapshot_id)
     assert snapshot == committed
@@ -56,7 +56,7 @@ def test_snapshot_catalogue_resolves_objects_through_saved_index(tmp_path: Path,
 
     restored: dict[ObjectId, bytes] = {}
     with RepositoryLock(repository.path) as lock:
-        saved_index = LocationIndex.load_from(repository.index_path, lock)
+        saved_index = LocationIndex.load_from(repository.index_file, lock)
         for object_id in snapshot.object_catalog.object_ids:
             location = saved_index.get(object_id)
             assert location is not None
@@ -76,14 +76,14 @@ def test_snapshot_catalogue_resolves_objects_through_saved_index(tmp_path: Path,
 
 
 def test_create_snapshot_allocates_past_an_unindexed_pack(repository: Repository, snapshot_service: SnapshotService) -> None:
-    directory = repository.pack_directory
+    directory = repository.packs_directory
     previous = Object(TYPE_DATA, b"d" * 32, 1)
     Pack.write_to(directory / "1.pack", iter(((previous, BytesIO(b"d")),)))
     root = Object(TYPE_SNAPSHOT, b"r" * 32, 1)
     snapshot = snapshot_service.create_snapshot(iter(((root, BytesIO(b"r")),)), root.object_id)
     assert snapshot.object_catalog.object_ids == {root.object_id}
     with RepositoryLock(repository.path) as lock:
-        index = LocationIndex.load_from(repository.index_path, lock)
+        index = LocationIndex.load_from(repository.index_file, lock)
         assert index.get(root.object_id) == ObjectLocation(2, PACK_HEADER_SIZE, OBJECT_HEADER_SIZE + 1)
     assert Pack.load_from(directory / "2.pack").object_count == 1
 
@@ -93,7 +93,7 @@ def test_creating_snapshot_requires_declared_root_first(repository: Repository, 
     records = iter(()) if first is None else iter(((first, BytesIO(b"a")),))
     with pytest.raises(ValueError, match="first record must be"):
         snapshot_service.create_snapshot(records, b"r" * 32)
-    assert not list(repository.pack_directory.iterdir())
+    assert not list(repository.packs_directory.iterdir())
 
 
 def test_failed_index_save_does_not_publish_snapshot(repository: Repository, snapshot_service: SnapshotService, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -105,9 +105,9 @@ def test_failed_index_save_does_not_publish_snapshot(repository: Repository, sna
     root = Object(TYPE_SNAPSHOT, b"r" * 32, 1)
     with pytest.raises(OSError, match="index sync failed"):
         snapshot_service.create_snapshot(iter(((root, BytesIO(b"r")),)), root.object_id)
-    assert not list(repository.snapshot_directory.iterdir())
+    assert not list(repository.snapshots_directory.iterdir())
     with RepositoryLock(repository.path) as lock:
-        assert LocationIndex.load_from(repository.index_path, lock).get(root.object_id) is None
+        assert LocationIndex.load_from(repository.index_file, lock).get(root.object_id) is None
 
 
 @pytest.mark.parametrize("target_size", (1, 1_000))
@@ -117,8 +117,8 @@ def test_snapshot_filter_stores_missing_objects_and_indexes_locations(repository
     second = Object(TYPE_DATA, b"c" * 32, 1)
     known_body = BytesIO(b"a")
     duplicate_body = BytesIO(b"b")
-    index_path = repository.index_path
-    pack_directory = repository.pack_directory
+    index_path = repository.index_file
+    pack_directory = repository.packs_directory
     known_location = ObjectLocation(1, PACK_HEADER_SIZE, OBJECT_HEADER_SIZE + known.length)
     with RepositoryLock(repository.path) as lock:
         Pack.write_to(pack_directory / "1.pack", iter(((known, BytesIO(b"a")),)))
@@ -155,7 +155,7 @@ def test_snapshot_filter_needs_no_pack_when_all_objects_are_known(repository: Re
     snapshot_service.create_snapshot(iter(((obj, BytesIO(b"a")),)), obj.object_id)
     snapshot = snapshot_service.create_snapshot(iter(((obj, BytesIO(b"a")),)), obj.object_id)
     assert snapshot.object_catalog.object_ids == {obj.object_id}
-    assert {path.name for path in repository.pack_directory.iterdir()} == {"1.pack"}
+    assert {path.name for path in repository.packs_directory.iterdir()} == {"1.pack"}
 
 
 def test_incomplete_pack_adds_no_index_entries(repository: Repository, snapshot_service: SnapshotService) -> None:
@@ -163,6 +163,6 @@ def test_incomplete_pack_adds_no_index_entries(repository: Repository, snapshot_
     with pytest.raises(ValueError, match="Truncated object body"):
         snapshot_service.create_snapshot(iter(((obj, BytesIO(b"a")),)), obj.object_id)
     with RepositoryLock(repository.path) as lock:
-        index = LocationIndex.load_from(repository.index_path, lock)
+        index = LocationIndex.load_from(repository.index_file, lock)
         assert index.get(obj.object_id) is None
-    assert not list(repository.pack_directory.iterdir())
+    assert not list(repository.packs_directory.iterdir())
