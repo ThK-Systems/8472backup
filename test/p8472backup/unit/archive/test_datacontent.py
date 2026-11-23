@@ -7,9 +7,17 @@ class TestDataContent:
     def test_plaintext_round_trip(self) -> None:
         chunk = bytes(range(256))
         obj = DataContent(compression=0, chunk_size=len(chunk), data=chunk)
-        plaintext = bytes.fromhex("00 00 01 00 00 00 00 00 00") + chunk
+        plaintext = bytes.fromhex("00 00 01 00 00 00 00 00 00 00 00 00 00") + chunk
         assert obj.to_plaintext() == plaintext
         assert DataContent.from_plaintext(plaintext) == obj
+
+    def test_padding_round_trip_and_invalid_length(self) -> None:
+        obj = DataContent(COMPRESSION_NONE, 3, b"abc", b"padding")
+        plaintext = obj.to_plaintext()
+        assert plaintext[9:13] == (7).to_bytes(4, "little")
+        assert DataContent.from_plaintext(plaintext) == obj
+        with pytest.raises(ValueError, match="Padding exceeds"):
+            DataContent.from_plaintext(plaintext[:9] + (100).to_bytes(4, "little") + plaintext[13:])
 
     @pytest.mark.parametrize("plaintext", (bytes(8), bytes.fromhex("ff") + bytes(8), bytes(9) + b"x"))
     def test_rejects_invalid_plaintext(self, plaintext: bytes) -> None:

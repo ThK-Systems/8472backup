@@ -1,6 +1,6 @@
 # 8472backup — Project Specification for Codex
 
-Version: 0.47 — Threshold-triggered combined maintenance, 2026-11-21
+Version: 0.48 — Content padding length, 2026-11-23
 
 Status: requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 

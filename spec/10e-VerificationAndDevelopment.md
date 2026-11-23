@@ -1,6 +1,6 @@
 # 8472backup — Verification and Development
 
-Specification version: 0.47 — Threshold-triggered combined maintenance, 2026-11-21
+Specification version: 0.48 — Content padding length, 2026-11-23
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 

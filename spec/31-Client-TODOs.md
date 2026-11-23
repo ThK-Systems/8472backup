@@ -53,3 +53,7 @@ Add Linux FUSE support and load metadata on demand. Include chunk lengths or off
 ## 13. End-to-end tests
 
 Back up real files twice, change part of the source data between runs, and verify that unchanged objects are reused. Restore a single file on a fresh client using the recovery export. Exercise the same backup workflow over push and pull.
+
+## 14. Size obfuscation
+
+Choose an optional padding strategy for data, metadata, and snapshot root content. Evaluate the protection against size-based fingerprinting and the storage overhead. Generate padding before encryption, keep object IDs independent of padding, and account for the object body size limit.

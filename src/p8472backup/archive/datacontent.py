@@ -9,7 +9,7 @@ from struct import Struct
 from p8472backup.archive.objects import MAX_OBJECT_BODY_SIZE
 
 
-_DATA_SUBHEADER = Struct("<BQ")
+_DATA_SUBHEADER = Struct("<BQI")
 
 COMPRESSION_NONE = 0
 COMPRESSION_LZ4 = 1
@@ -23,13 +23,14 @@ class DataContent:
     compression: int
     chunk_size: int
     data: bytes
+    padding: bytes = b""
 
     def __post_init__(self) -> None:
         if self.compression not in (COMPRESSION_NONE, COMPRESSION_LZ4, COMPRESSION_ZSTD):
             raise ValueError(f"Unsupported chunk compression: {self.compression}")
         if self.chunk_size != len(self.data):
             raise ValueError("Uncompressed data length must match chunk_size")
-        if _DATA_SUBHEADER.size + len(self.data) > MAX_OBJECT_BODY_SIZE:
+        if len(self.padding) > 0xFFFFFFFF or _DATA_SUBHEADER.size + len(self.data) + len(self.padding) > MAX_OBJECT_BODY_SIZE:
             raise ValueError("Data object exceeds the stored body size limit")
 
     def to_plaintext(self) -> bytes:
@@ -41,9 +42,9 @@ class DataContent:
             zstd = import_module("zstandard")
             data = zstd.ZstdCompressor(write_content_size=bool(data)).compress(data)
 
-        if _DATA_SUBHEADER.size + len(data) > MAX_OBJECT_BODY_SIZE:
+        if _DATA_SUBHEADER.size + len(data) + len(self.padding) > MAX_OBJECT_BODY_SIZE:
             raise ValueError("Data object exceeds the stored body size limit")
-        return _DATA_SUBHEADER.pack(self.compression, self.chunk_size) + data
+        return _DATA_SUBHEADER.pack(self.compression, self.chunk_size, len(self.padding)) + data + self.padding
 
     @classmethod
     def from_plaintext(cls, plaintext: bytes, compression: int | None = None) -> DataContent:
@@ -52,13 +53,18 @@ class DataContent:
             raise ValueError(f"Invalid data object plaintext length: {len(plaintext)}")
         stored_compression: int
         chunk_size: int
-        stored_compression, chunk_size = _DATA_SUBHEADER.unpack_from(plaintext)
+        padding_length: int
+        stored_compression, chunk_size, padding_length = _DATA_SUBHEADER.unpack_from(plaintext)
         if compression is not None and compression != stored_compression:
             raise ValueError("Stored compression does not match expected compression")
         if _DATA_SUBHEADER.size + chunk_size > MAX_OBJECT_BODY_SIZE:
             raise ValueError(f"Invalid chunk size: {chunk_size}")
 
-        data = plaintext[_DATA_SUBHEADER.size :]
+        if padding_length > len(plaintext) - _DATA_SUBHEADER.size:
+            raise ValueError("Padding exceeds the plaintext length")
+        data_end = len(plaintext) - padding_length
+        data = plaintext[_DATA_SUBHEADER.size : data_end]
+        padding = plaintext[data_end:]
         if stored_compression == COMPRESSION_LZ4:
             decoder = import_module("lz4.frame").LZ4FrameDecompressor()
             try:
@@ -87,4 +93,4 @@ class DataContent:
             except zstd.ZstdError as error:
                 raise ValueError("Invalid Zstandard chunk") from error
 
-        return cls(stored_compression, chunk_size, data)
+        return cls(stored_compression, chunk_size, data, padding)

@@ -1,6 +1,6 @@
 # 8472backup — Cryptography, Objects, and Packs
 
-Specification version: 0.47 — Threshold-triggered combined maintenance, 2026-11-21
+Specification version: 0.48 — Content padding length, 2026-11-23
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 
@@ -172,7 +172,7 @@ The immutable `Pack` class in `src/p8472backup/storage/file/packs.py` implements
 
 #### Common object header (agreed development format)
 
-All integer fields are unsigned and little endian, with no alignment padding. The common object-format version is initially `1`, independent of the application release. The plaintext layouts for types 1, 2, and 3 are specified below.
+All integer fields are unsigned and little endian, with no alignment padding. The common object-format version remains `1` until the 1.0 release. The plaintext layouts for types 1, 2, and 3 are specified below.
 
 | Offset | Field | Encoding | Meaning |
 | --- | --- | --- | --- |
@@ -191,13 +191,15 @@ Keep type-specific subheaders conditional on concrete requirements. Corruption d
 
 #### Type 1 data object
 
-The client encrypts and authenticates the 9-byte subheader and chunk data together. The server uses the common object header to locate and store the encrypted body.
+The client encrypts and authenticates the 13-byte subheader, chunk data, and padding together. The server uses the common object header to locate and store the encrypted body.
 
 | Plaintext offset | Field | Encoding |
 | --- | --- | --- |
 | 0 | `compression` | Unsigned byte. 0: uncompressed, 1: LZ4 frame, 2: Zstandard frame. |
 | 1 | `chunk_size` | Little-endian unsigned 64-bit length of the original chunk. |
-| 9 | Chunk data | All remaining bytes. For uncompressed data the length must equal `chunk_size`. |
+| 9 | `padding_length` | Little-endian unsigned 32-bit length of the trailing padding. |
+| 13 | Chunk data | Bytes up to the trailing padding. For uncompressed data the length must equal `chunk_size`. |
+| After chunk data | Padding | Exactly `padding_length` bytes. |
 
 The client rejects unknown compression identifiers and checks that decoding produces exactly `chunk_size` bytes. A compressed chunk contains one complete frame. A Zstandard frame includes its content size for a nonempty chunk and omits it for an empty chunk to work around a decoder limitation in Debian Trixie. The common header's size limit applies to the entire stored body, including cryptographic overhead.
 
@@ -205,24 +207,30 @@ The provisional code constants for encryption are 1 (AES-256-GCM) and 2 (AES-256
 
 #### Type 2 metadata object
 
-Each type 2 object describes one filesystem entry. The client encrypts and authenticates the 8-byte subheader, metadata block, and chunk references together.
+Each type 2 object describes one filesystem entry. The client encrypts and authenticates the 12-byte subheader, metadata block, chunk references, and padding together.
 
 | Plaintext offset | Field | Encoding |
 | --- | --- | --- |
 | 0 | `metadata_length` | Little-endian unsigned 64-bit byte length of the metadata block. |
-| 8 | Metadata block | Exactly `metadata_length` bytes supplied by the client. The block carries the filesystem entry type, path, and attributes. Its internal encoding remains open. |
-| 8 + `metadata_length` | Chunk references | Ordered 32-byte type 1 object IDs through the end of the plaintext, including repeated IDs. |
+| 8 | `padding_length` | Little-endian unsigned 32-bit length of the trailing padding. |
+| 12 | Metadata block | Exactly `metadata_length` bytes supplied by the client. The block carries the filesystem entry type, path, and attributes. Its internal encoding remains open. |
+| 12 + `metadata_length` | Chunk references | Ordered 32-byte type 1 object IDs up to the trailing padding, including repeated IDs. |
+| After chunk references | Padding | Exactly `padding_length` bytes. |
 
 The client interprets the entry type and validates which types may carry chunk references. The reference region may be empty and must contain a whole number of IDs.
 
 #### Type 3 snapshot root
 
-The client encrypts and authenticates the 8-byte subheader, snapshot description, and metadata references together.
+The client encrypts and authenticates the 12-byte subheader, snapshot description, metadata references, and padding together.
 
 | Plaintext offset | Field | Encoding |
 | --- | --- | --- |
 | 0 | `description_length` | Little-endian unsigned 64-bit byte length of the snapshot description. |
-| 8 | Snapshot description | Exactly `description_length` bytes supplied by the client, including the backup configuration used for the run. The internal encoding remains open. |
-| 8 + `description_length` | Metadata references | 32-byte type 2 object IDs through the end of the plaintext. |
+| 8 | `padding_length` | Little-endian unsigned 32-bit length of the trailing padding. |
+| 12 | Snapshot description | Exactly `description_length` bytes supplied by the client, including the backup configuration used for the run. The internal encoding remains open. |
+| 12 + `description_length` | Metadata references | 32-byte type 2 object IDs up to the trailing padding. |
+| After metadata references | Padding | Exactly `padding_length` bytes. |
 
 The reference region must contain a whole number of IDs and can be empty. The order of metadata references carries no restore semantics. Server commit time, protection deadline, and the authoritative object catalogue are stored in the server's snapshot record.
+
+For all three content types, reject a padding length that exceeds the available plaintext. Padding is removed before decoding references or decompressing chunk data. The padding strategy is open; padding and its length must not affect the logical object ID. The common object body limit includes padding and cryptographic overhead.
