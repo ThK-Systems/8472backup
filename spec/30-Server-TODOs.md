@@ -4,7 +4,13 @@ This backlog tracks implementation gaps and open design decisions for the server
 
 ## 1. Façade and repository lookup
 
-Define the inputs, results, and errors for `init_repository`, `backup`, `list`, `restore`, `mount`, and `set_mode`. Resolve the repository from the authenticated `client_id` and authorize access to the requested backup set and its key domain. `RepositoryService` currently initializes and opens repositories by path. Define how approved SSH credentials map to client UUIDs and how those UUIDs map to server-side paths.
+Define the inputs, results, errors, and permissions for `init_repository`, `add_backup_set`, `remove_backup_set`, `remove_repository`, `backup`, `list`, `restore`, `recover`, `mount`, and `set_mode`. `restore` covers a complete snapshot. `recover` selects a file or directory tree on the client. Both use the shared object read path.
+
+- **Caller identity.** The Unix-socket handler and the pull scheduler call the same façade. The scheduler supplies the client identity from the registered job. Define how the socket verifies its local caller and how the later SSH helper carries the client UUID bound to the approved SSH credential. Define how the systemd service accesses the key generated during server installation for outgoing pull connections.
+- **Repository lookup.** Derive `<storage_root>/<client_id>` from the verified identity. Check the stored `client_id` before operating on the repository, resolve the requested backup-set UUID, and take its `key_id` from the registered set. Define the error responses for a missing repository, an identity mismatch, and an unavailable set.
+- **Initialization.** The client calls `init_repository` in both modes. The mode applies to the entire client, and each backup set has its own client-side TOML configuration. Report invalid sets individually and register all accepted sets together. At least one valid set is required. Extend the current single-set initialization and define how to distinguish an interrupted initialization from an existing initialized repository.
+- **Server metadata.** Keep repository and backup-set metadata together in `repository.json` at the repository root. Decide the schema for the pull SSH target and the per-set name, key-domain ID, schedule, and retention fields. Define schema versioning and how to handle the current mapping of set UUIDs directly to key-domain UUIDs. The complete per-set TOML stays on the client and is preserved in the encrypted snapshot description.
+- **Set and repository removal.** Define permissions and lifecycle state for adding and retiring sets and for retiring an entire repository. Stop new backups for retired scopes and keep their snapshots available for recovery until eligible for deletion. Add an asynchronous job that checks retired scopes during idle periods and reclaims their data under the repository lock. Preserve objects referenced by other retained snapshots. Define how time-based and count-based retention apply after retirement and how running jobs are handled when a scope is retired.
 
 ## 2. Push, pull, and scheduling
 
@@ -14,19 +20,19 @@ Enforce the configurable server-wide limit for concurrent backup sets, default 3
 
 ## 3. Server process and wire protocol
 
-Implement the systemd service and the restricted SSH entry points. Push goes through the SSH helper and the server's Unix socket. Pull starts an SSH connection from the server to the restricted client command. Define authentication and authorization, message framing, size limits, timeouts, and the object-ID exchange for sending only missing object bodies. Define how asynchronous connections interact with blocking file I/O and repository locks. See the [communication spec](10d-CommunicationConfigurationAndOperations.md#13-communication-execution-and-protocol).
+Implement the systemd service and Unix-socket handler as a caller of the façade. Add the restricted SSH relay in a later increment. Push uses one SSH session for requests and replies through the relay and socket. Pull starts an SSH connection from the server to the restricted client command. Define authentication and authorization, message framing, size limits, timeouts, and the object-ID exchange for sending only missing object bodies. Define how asynchronous connections interact with blocking file I/O and repository locks. See the [communication spec](10d-CommunicationConfigurationAndOperations.md#13-communication-execution-and-protocol).
 
 ## 4. Backup completion and snapshot commit
 
-Use the complete final snapshot root object as the upload completion signal. `SnapshotService.create_snapshot()` currently expects the root first and requires its ID up front. Include both new and reused object IDs in the snapshot catalogue. Acknowledge the backup after the packs and index are durable and the snapshot record has been durably published.
+Use the complete final snapshot root object as the upload completion signal. `SnapshotService.create_snapshot()` currently expects the root first and requires its ID up front. Adopt the `data/` subdirectories for packs and the index. Persist snapshot JSON and the binary catalogue, including both new and reused IDs. Update the server-owned snapshot register durably after the packs, index, and both files are durable. Acknowledge the backup after the register update.
 
 ## 5. Snapshot listing
 
-Implement `list` for published snapshots that the authenticated client is authorized to see, with an optional backup-set filter. Read the header information needed for listing without loading every snapshot's object catalogue.
+Implement `list` for published snapshots that the authenticated client is authorized to see, with an optional backup-set filter. Read the register and snapshot JSON for the listing.
 
 ## 6. Shared object read path
 
-Serve objects for restore and mount. Check requested IDs against the selected snapshot's catalogue, find them through the location index, and verify that the record at the indexed pack offset matches the requested object ID and expected length. The current `get_snapshot()` operation returns the snapshot record.
+Serve objects for restore, recover, and mount. Check requested IDs against the selected snapshot's catalogue, find them through the location index, and verify that the record at the indexed pack offset matches the requested object ID and expected length. The current `get_snapshot()` operation returns the snapshot record.
 
 ## 7. Directory tree and snapshot description
 
@@ -34,7 +40,7 @@ Replace the current flat metadata-ID list in the client-encrypted snapshot root 
 
 ## 8. Restore
 
-Support restoring a full snapshot or a single file directly. The client resolves the requested path through the decrypted directory tree and reads the file's referenced chunks. Define what happens when a destination file already exists or an interrupted restore leaves a partially written file.
+Support `restore` for a full snapshot and `recover` for a selected file or directory tree. The client resolves the requested path through the decrypted directory tree. Define what happens when a destination file already exists or an interrupted restore leaves a partially written file.
 
 ## 9. Mount
 
@@ -46,7 +52,7 @@ Connect source traversal and content-defined chunking to the existing object and
 
 ## 11. Locks and shared memory budget
 
-Keep the existing exclusive repository lock and enforce one active backup run per `(client_id, backup_set_id)`. Define admission and waiting behavior when a lock or server-wide slot is unavailable. The planned default is 10 simultaneous repository locks. The 64–128 MiB target applies across active server operations, including index and catalogue memory and any server-side caching for mount readers. See the [configuration roadmap](70-ConfigurationRoadmap.md).
+Keep the existing exclusive repository lock and enforce one active backup run per `(client_id, backup_set_id)`. Enforce server-wide capacity through admission accounting for active operations. The planned default is 10 concurrent repository operations. Define admission and waiting behavior for capacity limits and lock contention. The 64–128 MiB target applies across active server operations, including index and catalogue memory and any server-side caching for mount readers. See the [configuration roadmap](70-ConfigurationRoadmap.md).
 
 ## 12. Interrupted runs and recovery
 
@@ -54,7 +60,7 @@ On the next backup, clean up temporary files from an interrupted run under the r
 
 ## 13. Prune and compact
 
-Run prune after a successful backup and compact only when the reclamation threshold is reached. Define the retention rules and threshold metric, denominator, and default. Enforce minimum snapshot protection and preserve objects referenced by retained snapshots or active operations. Make replacement packs and the updated index durable before removing the old packs. See the [snapshot and retention spec](10c-SnapshotsCommitAndRetention.md).
+Run prune after a successful backup. Schedule compact and retired-scope cleanup as asynchronous jobs during idle periods. Use the affected repository's exclusive `RepositoryLock` and its own location index. Define the idle criteria, job frequency, contention handling, and how job admission interacts with backup-run locks and the server-wide limit. Define the exact compaction criterion, including its threshold, default, metric, denominator, and scope. Validate the register and all expected catalogues before compaction, then stream ID lists and mark one bit per occupied index record. Preserve objects referenced by retained snapshots or active operations. Make replacement packs and the updated index durable before removing the old packs. See the [snapshot and retention spec](10c-SnapshotsCommitAndRetention.md).
 
 ## 14. End-to-end verification
 
@@ -66,8 +72,12 @@ For each writing session, derive an AES key on the client from its durable backu
 
 ## 16. Initial server and client setup
 
-Keep the standard setup short. On the server, configure the storage path and start the systemd service. At client setup, supply the server address and first backup set. The client generates its UUID, SSH key, and backup secrets and offers a recovery export. The administrator approves the client's SSH public key once. For pull, the client also authorizes the server's public SSH key with a restricted command. After authenticated registration, use the same create-once repository operation in both modes. Backup secrets stay with the client. Define how the first SSH contact establishes trust and how scheduled backups unlock client key material. See [initialization and registration](10d-CommunicationConfigurationAndOperations.md#14-initialization-registration-and-identity-recovery).
+Keep the standard setup short. On the server, configure the storage path and start the systemd service. At client setup, supply the server address, mode, and at least one valid backup-set configuration. The client generates its UUID, SSH key, and backup secrets and offers a recovery export. The administrator approves the client's SSH public key once. For pull, the client also authorizes the server's public SSH key with a restricted command. The client requests repository creation and registration of all valid sets in both modes. Backup secrets stay with the client. Define how the first SSH contact establishes trust and how scheduled backups unlock client key material. See [initialization and registration](10d-CommunicationConfigurationAndOperations.md#14-initialization-registration-and-identity-recovery).
 
 During server installation, generate an Ed25519 SSH key pair for the user running the installation. Use the account name and the server's fully qualified domain name in the key comment `8472backup-<user>@<fqdn>`.
 
 Plan the switch to a post-quantum SSH authentication key once the supported OpenSSH versions can use it on both peers. Track Kyber-based ML-KEM separately for the SSH key exchange.
+
+## 17. Logging
+
+Add logs suitable for systemd and journald. Record backup admission, commit and failure, and the results of retention and cleanup. Include client, backup-set, run, and snapshot IDs where available. Keep logs free of credentials, source paths, and file contents. Keep diagnostics separate from protocol traffic.

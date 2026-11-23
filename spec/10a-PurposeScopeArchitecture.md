@@ -1,6 +1,6 @@
 # 8472backup — Purpose, Scope, and Architecture
 
-Specification version: 0.50 — Server SSH key at installation, 2026-11-23
+Specification version: 0.54 — Operation admission and repository locking, 2026-11-23
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 
@@ -46,7 +46,7 @@ After setup, scheduled backup, protection enforcement, retention, and eligible s
 - A Go library may be considered only as a last resort when suitable packaged C/C++ options cannot meet the requirements. Establish the concrete need and review Debian availability, Python integration, and maintenance before adopting it.
 - Full non-Linux support is outside version 1.0.
 
-Performance and storage efficiency comparable to Borg are goals requiring benchmarks, not pre-existing guarantees.
+Prioritize integrity, security, storage efficiency, and maintainability over peak backup speed. Evaluate performance and storage efficiency with representative benchmarks.
 
 Design for HDD-backed backup storage and low available RAM on modest server hardware. The location-index design must not assume that complete indexes for all clients fit in physical memory; an individual index may also exceed available RAM. Evaluate bounded application buffers, batched lookups, and disk-access locality. Compare warm-cache and cold-HDD behavior and measure actual memory use before selecting the index engine. LMDB and the current Borg 2 in-memory hash-index approach are evaluation references, not adopted implementations or dependencies. Thomas explicitly excludes `borghash` as a production dependency because upstream declares its API unstable and provides no migration tools for its serialized tables. Its recorded measurements remain comparison evidence; a custom replacement is not authorized by this exclusion.
 
@@ -100,11 +100,11 @@ Transport authentication is separate from encryption keys and stable UUIDs. SSH 
 | Key lifecycle | Session-derived encryption keys, separate stable identity key material | KDF, session identifier format, concurrency rules |
 | Passphrase protection | Argon2id required for the client's master passphrase | Library, parameters, key wrapping, unattended unlocking |
 | Deduplication identifiers | Development uses HMAC-SHA-256 over plaintext; fixed 32-byte binary IDs; no user-configurable algorithm | Pre-release algorithm review, key derivation, domain separation, authenticated context, format; migration deferred |
-| Snapshots | Independent snapshot roots and a final server-controlled publication step | Serialization, index engine, durable commit mechanism |
+| Snapshots | Independent snapshot roots, server snapshot JSON, binary object catalogues, and publication through a server-owned register | Exact JSON schemas, registry integrity and recovery, development-format transition |
 | Physical storage | Packs of independently encrypted objects from the first snapshot increment, following Borg 2's logical/physical separation | Layout, sizes, recovery, concurrency |
-| Cleanup | Server uses committed object membership without decryption | Reference counting versus tracing; concurrency protocol |
+| Cleanup | Asynchronous jobs reclaim retired scopes and compact packs during idle periods. The server validates registered snapshot catalogues and marks referenced objects for compaction. | Idle admission, frequency, threshold, crash recovery, and whether a persistent reference index is needed later |
 | Client/server communication | Common framed binary request/response protocol over SSH, with a separate push/pull connection-setup boundary | Framing, serialization, operation sequencing, and authenticated session context |
 | Storage backend | Server defines available backends; client selects from them or uses defaults. Version 1.0 only provides `file` (`file`) | Interface, server definitions, future selection syntax and scope |
 | Additional native backends | Future server-side cloud, SFTP, S3, and similar implementations | DEFERRED: much, much later; not version 1.0 |
 
-These directions supersede generic older options. In particular, do not introduce a global long-lived encryption nonce counter, a client-replaceable global snapshot manifest, or client-controlled protection timestamps. Packs are adopted as the physical-storage direction, but their concrete format and parameters remain OPEN. The index engine and reference counting versus tracing also remain OPEN rather than being selected automatically from Borg.
+These directions supersede generic older options. In particular, do not introduce a global long-lived encryption nonce counter, a client-replaceable global snapshot manifest, or client-controlled protection timestamps. The remaining pack and index details are tracked in chapters 8 and 11.

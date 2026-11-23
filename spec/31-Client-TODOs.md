@@ -4,11 +4,11 @@ This backlog tracks implementation gaps and open design decisions for the client
 
 ## 1. Initial setup and recovery
 
-Prompt for the server address and first backup set. Generate the client UUID, SSH credentials, and backup key material, establish SSH trust, and register the client. Support exporting recovery material and importing it on another machine. See the [setup spec](10d-CommunicationConfigurationAndOperations.md#14-initialization-registration-and-identity-recovery).
+Prompt for the server address and client mode. Generate the client UUID, SSH credentials, and backup key material and establish SSH trust. Validate the per-set TOML files, report invalid sets individually, and send the required operational fields for all valid sets in one client-initiated repository creation request. Require at least one valid set. Support exporting recovery material and importing it on another machine. See the [setup spec](10d-CommunicationConfigurationAndOperations.md#14-initialization-registration-and-identity-recovery).
 
 ## 2. Backup-set configuration
 
-Define the configuration for source paths, exclusions, and requested retention. Capture and validate one configuration version per run. Send the required operational fields to the server before uploading objects. Include the complete configuration in the encrypted snapshot description. See the [configuration spec](10d-CommunicationConfigurationAndOperations.md#15-backup-descriptions-and-configuration).
+Define the per-set TOML schema for source paths, exclusions, and requested retention. Capture and validate one configuration version per run. Send the required operational fields to the server before uploading objects. Include the complete configuration in the encrypted snapshot description. See the [configuration spec](10d-CommunicationConfigurationAndOperations.md#15-backup-descriptions-and-configuration).
 
 ## 3. CLI and SSH
 
@@ -46,7 +46,7 @@ Transfer objects with bounded buffers and send the complete snapshot root as the
 
 ## 11. Snapshot selection and direct restore
 
-List published snapshots and let the client resolve selected paths in the decrypted directory tree. Fetch and verify the referenced objects when restoring a single file or a complete snapshot. Define overwrite behavior, safe handling of paths and symlinks, and cleanup after an interrupted restore. See the [restore spec](10d-CommunicationConfigurationAndOperations.md#16-restore-and-read-only-mounting).
+List published snapshots. Use `restore` for a complete snapshot and `recover` for a selected file or directory tree. Resolve selected paths in the decrypted directory tree, then fetch and verify the required objects. Define overwrite behavior, safe handling of paths and symlinks, and cleanup after an interrupted restore. See the [restore spec](10d-CommunicationConfigurationAndOperations.md#16-restore-and-read-only-mounting).
 
 ## 12. Read-only mount
 
@@ -59,3 +59,7 @@ Back up real files twice, change part of the source data between runs, and verif
 ## 14. Size obfuscation
 
 Choose an optional padding strategy for data, metadata, and snapshot root content. Evaluate the protection against size-based fingerprinting and the storage overhead. Generate padding before encryption, keep object IDs independent of padding, and account for the object body size limit.
+
+## 15. Logging
+
+Report backup, restore, and mount failures with enough context for diagnosis. Include the backup set and run or snapshot ID where available. Report push waits and retries. Send diagnostics to stderr and reserve stdout for protocol messages during SSH sessions. Keep credentials and file contents out of logs.

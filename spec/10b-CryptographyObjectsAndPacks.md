@@ -1,6 +1,6 @@
 # 8472backup — Cryptography, Objects, and Packs
 
-Specification version: 0.50 — Server SSH key at installation, 2026-11-23
+Specification version: 0.54 — Operation admission and repository locking, 2026-11-23
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 
@@ -134,7 +134,7 @@ The intended separation is:
 | `offset` | `int` | 8 bytes, unsigned | Absolute byte offset of the object's common header within the pack file |
 | `length` | `int` | 8 bytes, unsigned | Complete stored record length, including the 44-byte object header |
 
-These fields total 56 raw bytes, with a 24-byte location value after the 32-byte key. This is not the memory footprint of a Python instance. A maximum-sized object needs a record length of 16 GiB plus 44 bytes; 32-bit offsets or lengths are insufficient. The snapshot service writes packs as `packs/<key-domain-id>/<pack-id>.pack`, with decimal pack IDs. Under the repository lock, it assigns new IDs starting one above the highest existing pack filename in that key domain, or at 1 for an empty directory. Pack integrity checks still require review.
+These fields total 56 raw bytes, with a 24-byte location value after the 32-byte key. This is not the memory footprint of a Python instance. A maximum-sized object needs a record length of 16 GiB plus 44 bytes; 32-bit offsets or lengths are insufficient. The agreed pack path is `data/packs/<key-domain-id>/<pack-id>.pack`, with decimal pack IDs. The development implementation assigns new IDs under the repository lock starting one above the highest existing pack filename in that key domain, or at 1 for an empty directory. Pack integrity checks still require review.
 
 The development location index checkpoint contains an 18-byte header, the packed 56-byte records, and a 32-byte SHA-256 digest over the header and records. The header layout is `<8sHQ`: the eight-byte marker `8472IDX\x00`, version 1 as an unsigned 16-bit integer, and the record count as an unsigned 64-bit integer. Header integers and the three unsigned 64-bit location fields are little endian. The loader checks the header, count, exact file size, checksum, and uniqueness of the IDs. It rebuilds the in-memory bucket array from the records. The digest detects accidental corruption.
 
@@ -231,6 +231,6 @@ The client encrypts and authenticates the 12-byte subheader, snapshot descriptio
 | 12 + `description_length` | Metadata references | 32-byte type 2 object IDs up to the trailing padding. |
 | After metadata references | Padding | Exactly `padding_length` bytes. |
 
-The reference region must contain a whole number of IDs and can be empty. The order of metadata references carries no restore semantics. Server commit time, protection deadline, and the authoritative object catalogue are stored in the server's snapshot record.
+The current development codec allows a flat sequence of metadata references. The agreed directory tree uses a reference to the root directory as described in chapter 9. The exact client-side encoding remains OPEN. The server's snapshot JSON and binary object catalogue record the authoritative commit time, protection deadline, and membership independently of this object.
 
 For all three content types, reject a padding length that exceeds the available plaintext. Padding is removed before decoding references or decompressing chunk data. The padding strategy is open; padding and its length must not affect the logical object ID. The common object body limit includes padding and cryptographic overhead.

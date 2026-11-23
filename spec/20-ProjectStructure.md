@@ -106,22 +106,25 @@ Boundary tests also cover host/key-domain isolation and preservation of committe
 
 The initial implementation needs the archive-processing modules, server repository/catalogue, and file pack/index code. Service startup, SSH, CLI commands, and scheduling follow in later increments.
 
-## 4. File-based catalogue proposal
+## 4. File-based snapshot catalogue
 
-Use a server-owned file-based snapshot catalogue, distinct from the rebuildable pack location index. One committed snapshot record contains its authenticated scope, root identity, complete membership, server commit time, and protection information. Paths, file attributes, and data references remain in client-encrypted objects.
+Use a server-owned snapshot register and per-snapshot files. The snapshot JSON records scope, identity, commit time, and protection. The binary catalogue records the accepted membership. Paths, file attributes, and data references remain in client-encrypted objects.
 
-A possible logical repository layout is:
+The agreed repository layout is:
 
 ```text
-repository/
-  packs/<key-domain>/
-  index/<key-domain>/
-  snapshots/<set-id>/
+<repo-root>/
+  repository.json
+  snapshot-registry.json
+  snapshots/<set-id>/<snapshot-id>.json
+  snapshots/<set-id>/<snapshot-id>.catalog
+  data/packs/<key-id>/<pack-id>.pack
+  data/index/<key-id>
 ```
 
-These are roles and namespaces, not a chosen serialization or naming scheme. Unfinished work is represented by the run state and provisional versions of the existing structures; a separate staging structure or directory is not required. Snapshot publication follows durable pack and index persistence and a durable write of the complete server record. The publication operation must be crash-safe, must not replace an existing committed snapshot, and must have defined retry semantics.
+Chapter 11 defines the layout and commit rules. The register update publishes the snapshot after the packs, index, and both snapshot files are durable. Unfinished work is represented by the run state and provisional versions of the existing structures.
 
-Before coding, review the minimal object/pack framing, snapshot record serialization, catalogue publication/recovery sequence, and first concrete chunker/hash/compression/AEAD choices. Real packs require a concrete initial format; any experimental format and its compatibility limits must be explicit. Do not fill those gaps by silently choosing a format or by substituting synthetic end-to-end payloads.
+Review the remaining schema, recovery, and cryptography decisions before implementing the relevant increments. Document compatibility limits for experimental formats.
 
 ## 5. Existing project metadata
 

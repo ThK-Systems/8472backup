@@ -1,6 +1,6 @@
 # 8472backup — Snapshots, Commit, and Retention
 
-Specification version: 0.50 — Server SSH key at installation, 2026-11-23
+Specification version: 0.54 — Operation admission and repository locking, 2026-11-23
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 
@@ -14,17 +14,17 @@ The immutable `Snapshot` dataclass in `server/snapshot.py` contains `snapshot_id
 
 Snapshot annotations use the shared `ObjectId` alias from `archive/objects.py` for the root ID and catalogue members.
 
-The encrypted snapshot root references file-metadata objects, which in turn reference data objects. The authoritative server record separately captures the complete required object membership. This describes logical relationships, not a prescribed serialization or tree shape.
+The encrypted snapshot root references the root directory's metadata object. Directory metadata references its direct children by name and object ID. File metadata references its ordered data chunks. The authoritative server record separately captures the complete required object membership. The client-side encoding of directory entries and filesystem metadata remains OPEN.
 
-The root is an ordinary client-encrypted object of type `3`, with an object ID and a pack location. A pack containing a root does not contain the whole snapshot by implication: the referenced metadata and data objects may reside in other packs and be shared with other snapshots. The server-owned catalogue records the snapshot identity and root ID; the location index resolves that root ID to a pack and byte range. Client restoration follows the decrypted references. The server preserves all accepted dependencies using its separately recorded membership without decrypting the root.
+The root is a client-encrypted object of type `3` with an object ID and a pack location. Its referenced metadata and data objects may reside in other packs and be shared with other snapshots. The server snapshot JSON records the snapshot identity and root ID. The location index resolves the root ID to a pack and byte range. The client restores data by following decrypted references. The server preserves the accepted dependencies using the binary catalogue.
 
 Snapshots MAY share unchanged data and metadata objects within the permitted deduplication scope. Logical objects required by retained snapshots MUST NOT be changed in place by a client.
 
 Restore MUST NOT depend on replaying earlier snapshots. Deleting the first snapshot cannot invalidate a retained later snapshot.
 
-Avoid a design that requires replacing a single client-controlled global manifest on every backup. Independent roots still require a durable server-owned catalogue and a crash-safe publication mechanism. The concrete catalogue persistence mechanism remains OPEN. SQLite is now permitted for location-index evaluation only; it has not been selected for the authoritative snapshot catalogue.
+The server owns the snapshot register and the per-snapshot records described in chapter 11. Independent roots allow each retained snapshot to restore independently. The server controls publication and updates the register under the repository lock.
 
-OPEN: snapshot ID generation, root/content ID relationship, metadata chunking, serialization, and metadata reuse strategy.
+OPEN: snapshot ID generation details, root/content ID relationship, metadata chunking, client metadata encoding, and metadata reuse strategy.
 
 Each snapshot MUST also have its own snapshot-specific metadata, distinct from source file attributes. The client-encrypted snapshot description must retain the configuration used for the run; descriptive text, source-side timing, and summary statistics are possible additional fields whose schema remains OPEN. The snapshot root carries or references this metadata; inline placement versus separate metadata objects is not decided here. The server separately owns authoritative commit time, scope, membership, and protection state. Client-reported snapshot timestamps cannot determine protection expiry. No snapshot metadata implementation is authorized by this clarification.
 
@@ -49,7 +49,7 @@ Server-readable object membership reveals relationships among opaque objects. Th
 
 The authoritative snapshot catalogue and its committed dependencies MUST NOT be replaceable by a client. Define storage, checking, and recovery for this authority separately from rebuildable location indexes and caches.
 
-The snapshot header does not contain `object_count`. The count belongs to the per-snapshot object catalogue; its encoding remains OPEN. This does not change the separate pack header's object count.
+The snapshot object count comes from the length of its binary catalogue. The separate pack header records the number of object records in that pack.
 
 The per-snapshot object catalogue is logically a set of unique object IDs containing every dependency required for complete restoration, including the snapshot root, snapshot-description metadata, file metadata, and data objects. Reused objects are included even when first stored by an earlier snapshot. Once committed, this membership is immutable. It contains no physical pack locations. A separate repository location index, scoped to the applicable key domain, maps an object ID to a pack and byte range. Compaction changes that location index without rewriting snapshot membership.
 
@@ -112,11 +112,11 @@ Required logical sequence:
 2. Process the membership stream and persist missing encrypted objects while preserving previously stored objects.
 3. Receive the type 3 snapshot root as the final record and take the root ID from its header. The complete header and all declared body bytes signal the end of the backup input, including when the root ID is already indexed. A connection closure before the complete record interrupts the run.
 4. Verify required object existence and scope, including objects reused from earlier runs.
-5. Durably record membership and authoritative snapshot metadata.
-6. Publish the completed snapshot together with the server-assigned commit time and applicable protection state through a crash-safe commit mechanism.
+5. Sync the packs and location index. Durably write the snapshot metadata JSON and its binary object catalogue.
+6. Publish the completed snapshot by atomically updating and syncing the server-owned snapshot register.
 7. Acknowledge completion only after that commit is durable.
 
-Steps describe required ordering and visibility. On the local filesystem, sync the packs and location index before publishing the snapshot record.
+The durable register update is the commit point. Readers use the register to determine which snapshots are published.
 
 A crash before commit may leave staging or unreferenced objects, but MUST NOT publish an incomplete snapshot. A crash after commit or a lost acknowledgement MUST have a defined recovery and retry outcome. Cleanup MUST protect active operations as well as committed snapshots.
 
@@ -126,13 +126,25 @@ Define persistent states for staging, data and index persistence, accepted membe
 
 ### Local repository initialization
 
-`server.repository.Repository` binds a filesystem path to `client_id`, `backup_set_id`, and `key_id`. Here `key_id` identifies the key domain. It determines the checkpoint at `index/<key-id>`, the pack directory at `packs/<key-id>/`, and the snapshot directory at `snapshots/<backup-set-id>/`.
+The façade derives the repository path as `<storage_root>/<client_id>` from the verified client identity. Each backup set has a key-domain ID (`key_id`) recorded by the server. The agreed layout is:
+
+```text
+<repo-root>/
+  repository.json
+  snapshot-registry.json
+  snapshots/<backup-set-id>/<snapshot-id>.json
+  snapshots/<backup-set-id>/<snapshot-id>.catalog
+  data/packs/<key-id>/<pack-id>.pack
+  data/index/<key-id>
+```
 
 The repository object carries the host's backup `mode`, which defaults to `pull`. `Repository.set_mode()` changes it in memory. `RepositoryService.set_mode(path, mode)` persists the selected mode for the entire repository under its lock. It writes and syncs a temporary file, atomically replaces the metadata file, and syncs the repository directory. Section 13.1 defines how host mode changes are communicated for scheduling.
 
-The client initiates repository setup in push mode. The server initiates it in pull mode. Both use `RepositoryService.init_repository(path, client_id, backup_set_id, key_id, mode=...)` on the repository's server-side storage with the approved path and IDs. The class method validates the mode and reserves the new root with an atomic directory creation. It raises `FileExistsError` for an existing path before touching the repository contents. Under the repository lock, it creates and syncs the required directories, saves an empty index checkpoint, publishes `repository.json`, and returns the initialized `Repository`. An interrupted setup leaves the created path reserved for recovery.
+The client initiates repository setup in both modes. The server requires at least one valid backup set and registers all accepted sets as one initialization. Reserve the new path exclusively, prepare storage for the accepted sets and their key domains, and initialize an empty snapshot register. Publish `repository.json` after these dependencies are durable. An existing initialized repository must be preserved. How to distinguish and recover an interrupted initialization remains OPEN.
 
-`repository.json` in the repository root is UTF-8 JSON. Version 1 contains the integer `version`, the UUID string `client_id`, the host `mode`, and a `backup_sets` object that maps backup-set UUID strings to key-domain UUID strings. The server service façade selects the client by UUID and resolves the authorized repository path for storage operations. `RepositoryService.open_repository(path, backup_set_id)` reads the metadata under the repository lock and returns the recorded client ID, key ID, and mode for that set as a `Repository`. Missing metadata, invalid values, and unknown backup sets cause an error.
+`repository.json` in the repository root is UTF-8 JSON and contains both repository and backup-set metadata. Repository metadata includes the client UUID and mode. Set metadata is keyed by set UUID and includes its registered key-domain ID and the operational fields needed by the server. The façade must check the stored client UUID against the verified identity and resolve the key domain from the registered set. The exact schema for the pull SSH target, set names, scheduling, and retention remains OPEN.
+
+The current development code initializes one set at a time and stores set UUIDs directly mapped to key-domain UUIDs in `repository.json` version 1. Its pack and index directories are directly under the repository root. The transition from these development layouts remains OPEN.
 
 ### Local snapshot record and commit
 
@@ -140,19 +152,20 @@ The client initiates repository setup in push mode. The server initiates it in p
 
 The current development implementation of `create_snapshot(records, root_id)` acquires the exclusive repository lock before reading the input and validates the first record as the root. Implementing the final-root ordering defined above is pending. The service stores missing objects and saves the index. It generates a snapshot UUID unless its server-side caller supplies one, assigns the UTC commit time, and calculates the protection deadline using the configured minimum duration, which defaults to seven days. `get_snapshot(snapshot_id)` loads the committed record under the repository lock and verifies its identity and scope.
 
-The server writes one file named `<snapshot-id>.snapshot` in the snapshot directory. Version 1 uses a 106-byte header without padding. Integers are little endian.
+The agreed format stores two server-owned files in the backup set's snapshot directory. Both are stored without compression or encryption.
 
-| Field | Encoding |
+| File | Contents |
 | --- | --- |
-| Version | Unsigned 16-bit integer, initially 1 |
-| Snapshot ID, client ID, backup-set ID | Three consecutive UUIDs in standard 16-byte representation |
-| Root ID | 32 binary bytes |
-| Commit time, protection deadline | Two signed 64-bit counts of microseconds since the Unix epoch in UTC |
-| Catalogue count | Unsigned 64-bit count of subsequent object IDs |
+| `<snapshot-id>.json` | Format version, snapshot UUID, client UUID, backup-set UUID, `root_id`, server commit time, stored protection deadline, and a checksum of the binary catalogue. Store `root_id` as 64 hexadecimal characters representing the original 32-byte object ID. |
+| `<snapshot-id>.catalog` | Consecutive, distinct 32-byte binary object IDs in unspecified order, including the root ID and all reused dependencies. The format contains stable object IDs and can be read in bounded blocks independently of the location index. |
 
-The header is followed by exactly that many distinct 32-byte object IDs in unspecified order. The catalogue includes the root ID. `Snapshot.save_to()` syncs a complete temporary record, publishes it with a hard link at the final path, and syncs the directory before returning success. A duplicate snapshot ID fails without replacing the existing file. A failure before publication can leave unreferenced packs or index entries. A directory sync failure after linking leaves durability unresolved and raises an error. `Snapshot.load_from()` reads the record under the repository lock.
+On restore, decode the JSON root ID back into its original 32 bytes. IDs read from the binary catalogue are already in the representation used by the location index.
 
-OPEN: transport and authenticated admission, retry acknowledgement, data integrity checks for opaque ciphertext, and corruption recovery.
+`snapshot-registry.json` lives at the repository root and records the published snapshot IDs and their backup sets. Initialize it explicitly for a new repository. Update it atomically and durably under the repository lock as the last step of commit. During prune, check retention and protection, then durably remove the eligible entry from the register before removing its files. A crash between the durable writes can leave unregistered files for later recovery or cleanup. Treat a missing or invalid register in an initialized repository as an error.
+
+The current `Snapshot.save_to()` and `Snapshot.load_from()` use a single `.snapshot` development file with a 106-byte binary header followed by the membership IDs. The JSON, binary catalogue, and register described above are the agreed next design.
+
+OPEN: exact JSON schemas, catalogue checksum encoding, registry integrity and recovery, handling existing development records, transport and authenticated admission, retry acknowledgement, data integrity checks for opaque ciphertext, and corruption recovery.
 
 ### 11.1 Backup-run locking
 
@@ -164,7 +177,7 @@ The backup-run lock identifies the admitted run for one set. The exclusive repos
 
 ### 11.2 Client repository locking and maintenance
 
-Each backup client has its own repository and repository-level location index. Independent key domains retain separate identifier namespaces within it. The server MUST grant exclusive access to one operation at a time per client repository. This applies to push, pull, mounts, restores, and maintenance that accesses the repository. All sets and key domains of the client share this lock.
+Each backup client has its own repository and location index. A repository's index covers only its own packs, with separate checkpoints and identifier namespaces for independent key domains. The server MUST grant exclusive access to one operation at a time per client repository. This applies to push, pull, mounts, restores, and maintenance that accesses the repository. All sets and key domains of the client share this lock.
 
 Acquire the repository lock before opening the index or accessing packs. Hold it through durable snapshot publication or safe abort for a backup, through unmount or session cleanup for a mount, and through completion or safe abort for restore and maintenance. An active mount can delay a scheduled backup. The server must report the lock conflict and its cause. Queueing, timeouts, lock ownership, and restart recovery remain OPEN.
 
@@ -202,11 +215,13 @@ Example: a three-month-old snapshot A and yesterday's protected snapshot B refer
 
 Once a snapshot's protection period expires, client-specified retention may remove it. An older snapshot is not granted a fresh seven-day delay when a retention policy changes. No additional deletion-grace requirement has been agreed.
 
-After a completed backup, the server automatically evaluates the set's retention rules, applies the protection override, and reclaims eligible space safely. Logical snapshot deletion and physical reclamation may be separate internal operations.
+After a completed backup, the server automatically evaluates the set's retention rules and applies the protection override. The background maintenance jobs handle physical space reclamation during idle periods.
 
 The server MUST enforce protection at every application-level deletion path, not merely during a scheduled prune job. No ordinary client or maintenance API may bypass it. A host administrator with direct filesystem control remains outside this guarantee.
 
-OPEN: exact calendar/count retention semantics, timezone handling, treatment of retired sets, and any explicit administrator override. Preserve the last completed snapshot automatically only if Thomas adopts that additional policy; it is not currently an agreed requirement.
+`remove_backup_set` retires a backup set and `remove_repository` retires the repository and all its sets. Retirement stops new backups within the affected scope and preserves access to retained snapshots. An asynchronous server job checks retired scopes during idle periods, independently of new backups and under the repository lock. A snapshot is eligible for deletion only when its retention rule and effective server protection allow it. Reclaim a retired repository only after all its snapshots are eligible and active operations no longer require it. Objects shared with retained snapshots remain live when an individual set is removed.
+
+OPEN: exact calendar/count retention semantics, timezone handling, the expiry rule for count-based retention after retirement, handling active jobs during retirement, removal permissions, and any explicit administrator override. Preserve the last completed snapshot automatically only if Thomas adopts that additional policy.
 
 ### 12.1 Liveness and garbage collection
 
@@ -214,9 +229,17 @@ Logical snapshot removal and physical object reclamation may be separate operati
 
 The server MUST derive liveness from its authoritative records for retained snapshots and active operations. It MUST NOT rely solely on traversing client-encrypted file metadata or on a client-replaceable reference cache.
 
-Tracing and reference counting remain alternatives to evaluate. Borg 2's choice of garbage collection does not automatically settle our implementation.
+For initial compaction, use the register to enumerate the expected retained snapshots. Before reclaiming any data, check that each expected snapshot JSON and binary catalogue is present and readable, the stored snapshot and scope match the expected entry, and the catalogue checksum matches. Stop reclamation for that repository on any failed check, including a missing or invalid register or a required object that cannot be located.
 
-DEFERRED implementation: combine authorized snapshot deletion/pruning and conditional pack compaction in one automatic maintenance workflow. After deletion/pruning, run compaction only when a percentage threshold is reached; otherwise continue normal operation. The threshold value, default, measurement basis, and denominator remain OPEN. Proposed basis for review: currently reclaimable pack bytes, including space left by earlier maintenance runs, relative to total pack bytes. Snapshot counts alone do not measure reclaimable space because snapshots share objects. Protection and active-operation liveness remain mandatory inputs to the reclaimability decision.
+Read the retained catalogues in bounded blocks under the repository lock. For each key domain, use a temporary bitmap with one bit per occupied location-index record, initially clear. Resolve each binary object ID to its record number in the loaded index and set the corresponding bit. Repeated references leave the same bit set. The marks are valid only for that loaded index during the compaction run. A persistent reference index is a future option if measurements show that scanning the catalogues is too costly.
+
+DEFERRED implementation of the maintenance workflow. Run prune after a successful backup and schedule physical compaction as an asynchronous server job during idle periods, using the same scheduling approach as retired-scope cleanup. The compaction job holds the exclusive repository lock, determines liveness from the catalogues, and uses a percentage threshold to decide whether to reclaim space. Define idle admission and job frequency later.
+
+OPEN compaction criterion. Define the metric, denominator, threshold value and default, and whether the criterion applies per repository, per pack, or at both levels. One candidate metric is reclaimable pack bytes, including space left by earlier runs, relative to total pack bytes. Measuring actual reclaimable bytes requires determining liveness.
+
+Compaction and retired-scope cleanup operate independently per repository. Each job holds the affected repository's exclusive `RepositoryLock` while it checks and reclaims that repository's data. The server accounts for active operations at admission and applies the shared resource limits defined in chapter 13.
+
+OPEN maintenance admission. Define how the jobs handle repository lock contention and how admission interacts with backup-run locks and the server-wide repository operation limit. Preserve the protection of retained snapshots and active operations.
 
 Pack compaction reclaims space occupied by objects that are no longer required by retained snapshots or active operations. Copy the still-live object records unchanged into replacement packs; do not decrypt, recompress, or change their object IDs. Persist the replacements and switch their location-index entries durably before removing old packs, accounting for active readers. A wholly unused pack can be removed without copying; a wholly live pack needs no reclamation. Snapshot roots, metadata, and data have the same liveness protection. Exact selection thresholds, concurrency, crash recovery, and publication mechanics remain OPEN; compaction is not implemented by the header increment.
 

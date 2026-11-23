@@ -1,6 +1,6 @@
 # 8472backup — Communication, Configuration, and Operations
 
-Specification version: 0.50 — Server SSH key at installation, 2026-11-23
+Specification version: 0.54 — Operation admission and repository locking, 2026-11-23
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 
@@ -40,7 +40,7 @@ A client SSH key is separately authorized on the server through a restricted ent
 
 Pull uses server-side scheduling and execution; push uses client-side scheduling and initiation. Both require server admission and the same protection rules. Whether a user can manually request backups in pull mode remains OPEN.
 
-The server limits the number of concurrently running backup-set operations across push and pull. The limit is configurable and defaults to 3. Scheduled pull jobs that cannot start because the limit is reached wait in a server-side queue. A push request that cannot start because the limit is reached receives a wait response; the client reports that it is waiting and retries after its configured interval, which defaults to 60 seconds. Repeated wait responses result in further retries. The backup-set limit is separate from the server-wide limit on operations holding repository locks. Existing per-repository and per-backup-set locking rules continue to apply.
+The server limits the number of concurrently running backup-set operations across push and pull. The limit is configurable and defaults to 3. Scheduled pull jobs that cannot start because the limit is reached wait in a server-side queue. A push request that cannot start because the limit is reached receives a wait response; the client reports that it is waiting and retries after its configured interval, which defaults to 60 seconds. Repeated wait responses result in further retries. The server also limits concurrently active repository operations across all clients, with a configurable default of 10. Both limits are enforced at operation admission by accounting for active operations. The per-repository and per-backup-set locks protect access to their respective scopes.
 
 Queue ordering, retry limits, cancellation, and the wire format of the wait response remain OPEN.
 
@@ -75,13 +75,13 @@ OPEN: exact framing, serialization, operation sequencing, session admission, aut
 
 ### 13.5 Push/pull boundary and common backup sessions
 
-The server service façade is the common entry point for operations between the server and its clients. It addresses each client by its stable `client_id` UUID and resolves repository paths from the authorized server context. The scheduler submits due pull runs through this façade, and inbound push runs enter through the same façade. Both use the common backup session and snapshot commit path.
+The server service façade is the common entry point for operations between the server and its clients. It addresses each client by its stable `client_id` UUID and resolves the repository from the authorized server context. The Unix-socket handler and pull scheduler both call the façade. The socket handler is a separate entry point, and the SSH relay to that socket is a later increment. The scheduler supplies the registered client and set for a due pull job. Both callers use the common backup session and snapshot commit path.
 
-The façade's `list()` operation lists committed snapshots across the client's authorized backup sets. An optional backup-set filter narrows the result. The server reads the snapshot record headers for this listing.
+The façade covers `init_repository`, `add_backup_set`, `remove_backup_set`, `remove_repository`, `backup`, `list`, `restore`, `recover`, `mount`, and `set_mode`. Adding a set registers it in the existing repository under that client's mode. Chapter 12 defines retirement and reclamation. `list` reads the register and snapshot JSON for committed snapshots across the client's authorized sets, optionally filtered by set. The exact method inputs, results, errors, and permissions remain OPEN.
 
 Push/pull MUST have its own small, explicit boundary for mode-specific scheduling and invocation, connection establishment, and handoff to the common backup session:
 
-- Push: the source CLI starts SSH to the server. The restricted server-side helper relays the common protocol over the local Unix-domain socket to the running server service.
+- Push: the source CLI starts SSH to the server. The restricted server-side helper relays the common protocol in both directions over the local Unix-domain socket to the running server service. The server requests data over the same SSH session.
 - Pull (default): the running server service starts SSH to the source host and invokes the restricted source CLI. The service exchanges the common protocol directly over the SSH subprocess's standard input/output.
 - Both paths provide a bidirectional byte stream and a server-validated host/set authorization context to the same backup protocol and archive logic. The detailed authorization handoff remains OPEN.
 - At the start of the common backup session, the client sends the required operational fields extracted from the run's captured, validated configuration to the server. This exchange and server validation precede object-existence queries and source-data transfer in both push and pull. The complete backup description, including source paths and exclusions, stays client-side and is archived client-encrypted with the snapshot. The run uses the same fixed configuration version as specified in chapter 15.
@@ -106,18 +106,18 @@ These requirements define the concurrency architecture. Implementation details r
 The intended user workflow is:
 
 1. Install the Linux server. During installation, generate an Ed25519 SSH key pair for the user running the installation. Set the SSH key comment to `8472backup-<user>@<fqdn>`, using that account's username and the server's fully qualified domain name.
-2. Install the client and run client setup with the server address and optional set name and encryption-passphrase input.
+2. Install the client and run client setup with the server address, the client mode, at least one valid backup-set configuration, and any encryption-passphrase input.
 3. Generate a client authentication key without a passphrase for unattended operations where needed.
 4. Display instructions for installing that public key on the server with the restricted command.
 5. For server-initiated pull, install the server's public SSH key on the client with the corresponding restricted command. Push-only operation does not itself require a server-to-client SSH connection; bootstrap details remain OPEN.
 6. Generate a stable host UUID and the selected encryption material.
 7. Persist the client's recoverable identity/key state under `/var/lib/8472backup/state/` on Linux.
-8. Register host UUID, hostname, address, initial set, and transmit the required operational configuration over an authenticated channel. Set initial server scheduling state from its validated mode: push hosts are not added to pull scheduling; omitted mode defaults to pull.
+8. Authenticate to the server and request repository initialization with the client mode and the required operational fields for all valid sets. The client reports invalid set configurations individually. The server validates the submitted operational fields and registers all accepted sets together. Pull scheduling starts after successful registration for a client in pull mode. Omitted mode defaults to pull.
 9. Clearly tell the user to back up the recovery state separately.
 
 Registration must be bound to approved authentication credentials, not self-asserted UUID/hostname/IP values. The bootstrap trust exchange must be documented; do not silently auto-enrol arbitrary clients.
 
-In push mode, the client requests creation of the remote repository. In pull mode, the server initiates repository creation. Both use the same create-once operation on server storage. An init request for an existing repository path fails. Section 11 defines local initialization.
+The client starts `init_repository` in both modes. Repository creation is a create-once operation on server storage. An init request for an existing initialized repository fails. Chapter 11 defines local initialization.
 
 The user may supply a passphrase through the CLI. Exact secure input mechanisms remain OPEN; prevent accidental secret exposure in logs and avoid argv exposure as the only input mechanism.
 
@@ -126,7 +126,7 @@ The passphrase-protection and key-separation direction is defined in chapter 7. 
 Switch the server's SSH authentication key to a post-quantum signature key once a suitable algorithm is supported by the OpenSSH versions on both peers. An ML-DSA-based key is a candidate. Hybrid SSH key exchange with ML-KEM, the standard derived from Kyber, is evaluated separately under [the quantum security review](10b-CryptographyObjectsAndPacks.md#76-quantum-security-review).
 ## 15. Backup descriptions and configuration
 
-Each set has a local backup-description file, conceptually similar to a borgmatic configuration but with a smaller configuration vocabulary and less verbosity. It defines source selections, exclusions, and requested retention. The exact syntax and schema remain OPEN.
+Each backup set has its own local TOML file defining source selections, exclusions, and requested retention. The exact schema remains OPEN.
 
 - Descriptions can change between runs.
 - Read and validate one fixed configuration version per run.
@@ -139,7 +139,7 @@ Each set has a local backup-description file, conceptually similar to a borgmati
 - An invalid description fails the run and cannot become an empty/default deletion policy.
 - The host-level backup mode defaults to `pull` and can be set to `push`; exact file placement remains OPEN.
 
-OPEN: syntax, file locations, schema, supported rule vocabulary, and scheduling configuration location. Do not assume existing `retentions` semantics without review.
+OPEN: file locations, TOML schema, supported rule vocabulary, and scheduling configuration location. Do not assume existing `retentions` semantics without review.
 
 The server does not need a separate readable copy of the complete backup description. The pre-run exchange exposes only required operational fields; source paths and exclusions are evaluated locally and retained in the client-encrypted snapshot description. The exact operational field schema remains OPEN.
 
@@ -147,7 +147,8 @@ See the [configuration roadmap](70-ConfigurationRoadmap.md) for planned settings
 ## 16. Restore and read-only mounting
 
 - Restore is initiated on a client with the required recovery keys.
-- Direct restore to a client-side destination supports both a complete snapshot and individual files. The client resolves selected paths using decrypted metadata and requests the data objects for the selected files.
+- `restore` restores a complete snapshot to a client-side destination. `recover` restores a selected file or a complete directory tree without mounting. The client resolves the selected path using decrypted metadata.
+- Restore, recover, and mount use the same server-side object read path. Check membership in the selected snapshot and match the stored record's ID and length to the requested object before sending its body.
 - The server returns encrypted metadata and objects; the client decrypts and verifies them locally.
 - Read-only FUSE mounting is a planned Linux 1.0 feature and runs on the client.
 - Mount support is optional to the core backup/restore installation and not a universal future-platform requirement.

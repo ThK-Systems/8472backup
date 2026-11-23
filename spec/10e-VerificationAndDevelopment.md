@@ -1,6 +1,6 @@
 # 8472backup — Verification and Development
 
-Specification version: 0.50 — Server SSH key at installation, 2026-11-23
+Specification version: 0.54 — Operation admission and repository locking, 2026-11-23
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 
@@ -20,7 +20,8 @@ Tests must exercise behaviour and invariants, not merely mirror implementation. 
 | Registration with mode omitted | Pull is the default; server schedules the host |
 | Registration with `mode = "push"` | Server records push mode and never schedules the host for pull; push backup remains available |
 | Initially push host requests pull | Dedicated authenticated client command reactivates pull scheduling |
-| Registration configuration is invalid or unavailable | Registration fails without silently falling back to pull or activating scheduling |
+| Client initializes a repository with multiple valid sets | One client-initiated operation publishes all accepted sets in either mode |
+| A set configuration is invalid or unavailable at initialization | The client reports the affected set. Init with zero valid sets or invalid host-level settings fails. |
 | Scheduled pull observes `mode = "push"` | Server persists push state, removes the host from the pull scheduling list, and does not initiate a pull backup |
 | Host in push scheduling state | Server does not poll it for mode changes; authorized client-initiated backups can succeed |
 | Client requests return to pull | Dedicated authenticated command adds the host back to pull scheduling; repeated requests are safe |
@@ -32,15 +33,20 @@ Tests must exercise behaviour and invariants, not merely mirror implementation. 
 | Earlier snapshot removed | Every retained snapshot still restores independently |
 | Old chunk referenced by new protected snapshot | Old chunk remains available |
 | Client requests shorter retention | Unexpired server protection wins |
+| A set or repository is retired | New backup runs stop and retained snapshots remain available until their retention and protection allow deletion |
 | Client supplies old/future timestamps | Trusted protection clock is unaffected |
 | Client floods new snapshots | Existing snapshots cannot be displaced inside their protection period |
 | Client submits deletion/overwrite/foreign IDs | Existing committed data and other scopes remain protected |
 | Client modifies description during a run | The run uses its captured configuration |
 | Crash/disconnect around commit | Recovery has a defined durable result; no published incomplete snapshot |
+| Crash before the snapshot register update | Written snapshot files are provisional. Readers see only registered snapshots. |
 | Retry after lost commit acknowledgement | No corruption or ambiguous duplicate semantics |
 | Concurrent GC and backup/restore | Required objects remain accessible |
 | Disk fills during backup or compaction | Existing protected history remains intact |
 | Data/index corruption | Detected failure; no speculative destructive cleanup |
+| A registered snapshot JSON or catalogue is missing, or its catalogue checksum fails | Reclamation stops for that repository |
+| Many retained snapshots share object IDs | The compaction scan uses one bit per occupied index entry and preserves referenced objects |
+| Compaction or retired-scope cleanup becomes eligible | The server runs the maintenance job asynchronously during an idle period and acquires the repository lock before reclamation |
 | Client cache lost | Documented rebuild/recovery works with required keys |
 | Wrong or modified ciphertext | Restore fails verification rather than returning accepted corrupt data |
 | Cross-host and independent-set keys | No shared key or deduplication scope |
@@ -48,6 +54,7 @@ Tests must exercise behaviour and invariants, not merely mirror implementation. 
 | Parallel writing, retry, or restart | No repeated session-key/nonce pair for a new encryption |
 | Ciphertext, object role, ID, or authenticated context modified | Verification fails; no accepted corrupt restoration |
 | Restore from another authorized recovery client | Durable recovery secrets and stored metadata suffice; original source host not required |
+| Recover selects a file or directory | The client restores the selected file or complete directory tree directly |
 | Client tries to replace committed membership | Earlier retained history and its dependencies remain unchanged |
 | Pack location index lost | Documented rebuild without inventing authoritative protection state |
 | Version 1.0 client supplies no backend selection | Default `file` works without a client selector |
@@ -96,7 +103,7 @@ The immediate focus is the server-side snapshot core with real chunks, packs, an
 
 Explicitly approved on 2026-11-19: implement the common header codec as the immutable concrete class `Object` in `src/p8472backup/archive/objects.py`, with focused tests in `test/p8472backup/unit/archive/test_objects.py`. `to_header()` returns the serialized header; the class method `from_header()` returns an `Object`, not a tuple of fields. Construction validates the header state. Configure mypy's source search path relative to `pyproject.toml` so individual-file checking finds the package. Payload handling is discussion-only and is not authorized for implementation by this increment. The remaining pack and snapshot implementation still requires explicit approval.
 
-The non-normative [project structure proposal](20-ProjectStructure.md) describes the proposed package hierarchy and first test-driven snapshot increment. Package naming, file-based catalogue details, and the exact module breakdown require review; this specification remains the requirements authority.
+The non-normative [project structure proposal](20-ProjectStructure.md) describes the proposed package hierarchy and first test-driven snapshot increment. The exact module breakdown requires review. Chapter 11 defines the agreed snapshot and catalogue layout.
 
 ### 20.1 Initial focus: archive design and dedicated tests
 

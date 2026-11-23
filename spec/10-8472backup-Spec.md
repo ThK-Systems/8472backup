@@ -1,6 +1,6 @@
 # 8472backup — Project Specification for Codex
 
-Version: 0.50 — Server SSH key at installation, 2026-11-23
+Version: 0.54 — Operation admission and repository locking, 2026-11-23
 
 Status: requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 
