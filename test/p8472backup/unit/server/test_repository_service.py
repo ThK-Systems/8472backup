@@ -7,6 +7,7 @@ import pytest
 
 from p8472backup.archive.objects import TYPE_SNAPSHOT, Object
 from p8472backup.archive.snapshotrootcontent import SnapshotRootContent
+from p8472backup.common.error import InconsistentStateError
 from p8472backup.server.repository import BackupMode, Repository
 from p8472backup.server.repository_service import RepositoryService
 from p8472backup.server.snapshot_service import SnapshotService
@@ -63,7 +64,7 @@ def test_init_repository_leaves_missing_or_damaged_index_untouched(tmp_path: Pat
 def test_init_repository_requires_a_new_path(tmp_path: Path) -> None:
     path = tmp_path / "repo"
     path.mkdir()
-    with pytest.raises(FileExistsError):
+    with pytest.raises(InconsistentStateError):
         RepositoryService.init_repository(path, _CLIENT_ID, _BACKUP_SET_ID, _KEY_ID)
     assert not list(path.iterdir())
 

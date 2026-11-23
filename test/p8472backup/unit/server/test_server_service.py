@@ -4,6 +4,7 @@ from uuid import UUID
 
 import pytest
 
+from p8472backup.common.error import InconsistentStateError
 from p8472backup.server.repository_service import RepositoryService
 from p8472backup.server.server_service import ServerService
 from p8472backup.storage.file.index import LocationIndex
@@ -46,7 +47,7 @@ def test_init_repository_keeps_existing_repositories_and_scopes_paths_by_client(
     metadata_path = first.path / "repository.json"
     original_metadata = metadata_path.read_bytes()
 
-    with pytest.raises(FileExistsError):
+    with pytest.raises(FileExistsError, match=r"^Backup repository already exists\.$"):
         service.init_repository(_CLIENT_ID, {_SECOND_SET: _OTHER_KEY_ID}, mode="push")
 
     other_client = UUID(int=7)
@@ -79,9 +80,14 @@ def test_init_repository_does_not_publish_metadata_on_index_failure(tmp_path: Pa
         raise OSError("Index write failed")
 
     monkeypatch.setattr(LocationIndex, "save_to", fail_save)
+    service = ServerService(tmp_path)
     with pytest.raises(OSError, match="Index write failed"):
-        ServerService(tmp_path).init_repository(_CLIENT_ID, {_FIRST_SET: _KEY_ID})
+        service.init_repository(_CLIENT_ID, {_FIRST_SET: _KEY_ID})
 
     path = tmp_path / str(_CLIENT_ID)
+    with pytest.raises(InconsistentStateError, match=r"^Repository metadata is missing\. A previous initialization may have been interrupted\.$"):
+        service.init_repository(_CLIENT_ID, {_FIRST_SET: _KEY_ID})
+
+    assert path.is_dir()
     assert not (path / "repository.json").exists()
     assert not (path / "snapshot-registry.json").exists()

@@ -8,6 +8,7 @@ from tempfile import NamedTemporaryFile
 from typing import TypeGuard
 from uuid import UUID
 
+from p8472backup.common.error import InconsistentStateError
 from p8472backup.server.repository import BackupMode, Repository
 from p8472backup.storage.file.index import LocationIndex
 from p8472backup.storage.file.lock import RepositoryLock
@@ -46,7 +47,14 @@ class RepositoryService:
             raise ValueError("At least one backup set is required")
         repositories = [Repository(path, client_id, set_id, key_id, mode=mode) for set_id, key_id in key_ids.items()]
         repository = repositories[0]
-        path.mkdir(mode=0o700)
+        try:
+            path.mkdir(mode=0o700)
+        except FileExistsError as error:
+            if path.is_dir():
+                if not (path / _METADATA_NAME).exists():
+                    raise InconsistentStateError("Repository metadata is missing. A previous initialization may have been interrupted.") from error
+                raise FileExistsError("Backup repository already exists.") from error
+            raise
         with RepositoryLock(repository.path) as lock:
             index_paths = dict.fromkeys(repo.index_file for repo in repositories)
             pack_directories = dict.fromkeys(repo.packs_directory for repo in repositories)
