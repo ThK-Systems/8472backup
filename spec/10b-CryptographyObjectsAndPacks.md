@@ -1,6 +1,6 @@
 # 8472backup — Cryptography, Objects, and Packs
 
-Specification version: 0.59 — Calendar retention and server check and version commands, 2026-11-23
+Specification version: 0.60 — Client backup cleanup and per-run prune rules, 2026-11-23
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 

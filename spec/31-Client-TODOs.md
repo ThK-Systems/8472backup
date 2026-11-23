@@ -10,9 +10,13 @@ Prompt for the server address and client mode. Generate the client UUID, SSH cre
 
 Define the per-set TOML schema for source paths, exclusions, and requested retention. Capture and validate one configuration version per run. Send the required operational fields to the server before uploading objects. Include the complete configuration in the encrypted snapshot description. See the [configuration spec](10d-CommunicationConfigurationAndOperations.md#15-backup-descriptions-and-configuration).
 
+Support the per-set `auto-cleanup` setting, default `false`, and send it with the backup's operational fields.
+
 ## 3. CLI and SSH
 
 Provide commands for setup, backup, listing, restore, mounting, and changing the backup mode. In push mode, the client starts SSH to the server. In pull mode, the server invokes the restricted client command over SSH. Use the same client backup workflow in both modes. Provide clear exit codes and useful diagnostics for automation.
+
+Provide `cleanup` in the regular client CLI for the client administrator to clean up interrupted runs for an authorized backup set.
 
 When the server returns a wait response because the backup-set concurrency limit is reached, report the wait and retry after the configurable client interval, default 60 seconds. Retry after subsequent wait responses as well.
 

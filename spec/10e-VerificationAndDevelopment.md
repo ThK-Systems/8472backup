@@ -1,6 +1,6 @@
 # 8472backup — Verification and Development
 
-Specification version: 0.59 — Calendar retention and server check and version commands, 2026-11-23
+Specification version: 0.60 — Client backup cleanup and per-run prune rules, 2026-11-23
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 
@@ -34,6 +34,9 @@ Tests must exercise behaviour and invariants, not merely mirror implementation. 
 | Calendar rules span empty periods and week, month, quarter, or year boundaries | Each occupied period contributes its newest snapshot. Coarser rules skip periods covered by finer selections. Empty periods do not count. |
 | A prune candidate reaches its effective protection deadline | The snapshot is preserved at the deadline and may be pruned strictly after it. |
 | The repository lock is held when a second operation starts | The second operation reports contention immediately. A later operation can acquire the lock once the holder releases it. |
+| A backup aborts with automatic cleanup enabled | The server stops the writer and cleans up its provisional files and run record under the repository lock. A subsequent backup handles work left by a server crash. |
+| A backup aborts with `auto-cleanup` omitted or disabled | The writer stops and releases its locks. The server leaves provisional files for an explicit cleanup request from the authorized client. Cleanup preserves published snapshots and finalized packs. |
+| The client requests cleanup while an operation holds the repository lock | The server reports contention immediately and leaves repository files intact. |
 | Earlier snapshot removed | Every retained snapshot still restores independently |
 | Old chunk referenced by new protected snapshot | Old chunk remains available |
 | Client requests shorter retention | Unexpired server protection wins |

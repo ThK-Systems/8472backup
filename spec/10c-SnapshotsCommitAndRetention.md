@@ -1,6 +1,6 @@
 # 8472backup — Snapshots, Commit, and Retention
 
-Specification version: 0.59 — Calendar retention and server check and version commands, 2026-11-23
+Specification version: 0.60 — Client backup cleanup and per-run prune rules, 2026-11-23
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 
@@ -140,7 +140,7 @@ The façade derives the repository path as `<storage_root>/<client_id>` from the
 
 The repository object carries the host's backup `mode`, which defaults to `pull`. `Repository.set_mode()` changes it in memory. `RepositoryService.set_mode(path, mode)` persists the selected mode for the entire repository under its lock. It writes and syncs a temporary file, atomically replaces the metadata file, and syncs the repository directory. Section 13.1 defines how host mode changes are communicated for scheduling.
 
-The client initiates repository setup in both modes. The server requires at least one valid backup set and registers all accepted sets as one initialization. Reserve the new path exclusively, prepare storage for the accepted sets and their key domains, and initialize an empty snapshot register. Publish `repository.json` after these dependencies are durable. If the repository directory already exists and `repository.json` is missing, report that initialization may have been interrupted. Propagate initialization errors to the caller and preserve any existing or partially created repository files. The backup administrator handles inspection and cleanup before retrying.
+The client initiates repository setup in both modes. The server requires at least one valid backup set and registers all accepted sets as one initialization. Reserve the new path exclusively, prepare storage for the accepted sets and their key domains, and initialize an empty snapshot register. Publish `repository.json` after these dependencies are durable. If the repository directory already exists and `repository.json` is missing, report that initialization may have been interrupted. Propagate initialization errors to the caller and preserve any existing or partially created repository files. The backup server administrator handles inspection and cleanup before retrying.
 
 `repository.json` in the repository root is UTF-8 JSON and contains both repository and backup-set metadata. Repository metadata includes the client UUID and mode. Set metadata is keyed by set UUID and includes its registered key-domain ID and the operational fields needed by the server. The façade must check the stored client UUID against the verified identity and resolve the key domain from the registered set. The exact schema for the pull SSH target, set names, scheduling, and retention remains OPEN.
 
@@ -185,11 +185,17 @@ Different client repositories may run independently within the shared server mem
 
 The file backend provides a `RepositoryLock` context manager for local filesystems. It requests an exclusive, nonblocking `flock` on the repository's `.repository.lock` file. Acquisition reports contention immediately. The lock file stays in place so callers lock the same file. Repository operations will hold the context for their full lifetime.
 
+If a lock-holding process hangs, the backup server administrator can terminate it with `kill -TERM <PID>`. Terminating a shared server process interrupts every job it owns. Cleanup can acquire the lock once the last file descriptor holding it closes.
+
 ### 11.3 Backup-run states and provisional data
 
 A backup run has one of three coarse states: `in_progress`, `failed`, or `committed`. `in_progress` receives objects and prepares the snapshot; `failed` means the run ended without successful commit; `committed` means its required packs, index state, and authoritative snapshot record are durably published. `completed` is not a separate success state. These are run states, not a requirement to expose unfinished snapshots in the snapshot catalogue.
 
 Unfinished packs and unpublished catalogues are existing data structures being created during an `in_progress` run. The informal term staging describes this phase; it does not require a separate domain entity, catalogue, class, or dedicated directory. The run state and ownership identify the associated provisional work. A failed run may leave unfinished files or unreferenced stored objects; cleanup must preserve anything needed by retained snapshots or active operations. Technical choices such as temporary filenames for atomic publication, state serialization, and restart recovery remain OPEN.
+
+The client administrator can run `cleanup` from the regular client CLI for an authorized backup set. The server acquires the regular repository lock and removes only provisional files that it can attribute to stopped, uncommitted runs in that set, followed by their run records. Report lock contention immediately. Published snapshots remain valid, and finalized packs remain subject to normal compaction rules.
+
+The per-set `auto-cleanup` client setting defaults to `false`. By default, the server leaves provisional files for an explicit `cleanup` request and reports that cleanup is required if the next backup cannot safely start. With `auto-cleanup = true`, the server cleans up after an aborted run stops writing. If a server crash leaves provisional files, the next backup for that set cleans them up under the repository lock. The server always stops an aborted writer safely and releases its locks.
 
 The handling and reconciliation of a commit whose acknowledgement is lost is deferred to a later edge-case discussion. This does not change the durable publication and acknowledgement ordering in chapter 11. The coarse server-side storage model is agreed; this documentation does not authorize implementation of snapshots or run management.
 ## 12. Retention, minimum protection, and garbage collection
@@ -215,7 +221,7 @@ Example: a three-month-old snapshot A and yesterday's protected snapshot B refer
 
 Once a snapshot's protection period expires, client-specified retention may remove it. An older snapshot is not granted a fresh seven-day delay when a retention policy changes. No additional deletion-grace requirement has been agreed.
 
-After a successful backup commit, the server runs prune for that backup set. It selects from published snapshots using the server-assigned `committed_at` and then applies the server protection override. A snapshot is eligible for removal only when server time is strictly after its effective protection deadline and the retention policy does not select it.
+After a successful backup commit, the server runs prune for that backup set using the rules passed to `backup()` for that run. It selects from published snapshots using the server-assigned `committed_at` and then applies the server protection override. A snapshot is eligible for removal only when server time is strictly after its effective protection deadline and the retention policy does not select it.
 
 Use the hierarchical calendar selection from [retentions](https://github.com/tkn777/retentions/blob/master/retentions.py#L795-L919). Evaluate enabled rules in this order: hours, days, ISO weeks, months, calendar quarters, 13-ISO-week blocks, and years. Use UTC calendar boundaries. For each rule, keep the newest snapshot in each of the requested number of occupied periods, starting with the most recent eligible period. A coarser rule considers only periods strictly before the period containing the oldest snapshot selected so far. Empty periods consume no slots. With no enabled rules, keep every snapshot. The `minutes` and `last` rules are excluded.
 

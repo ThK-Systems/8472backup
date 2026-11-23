@@ -1,6 +1,6 @@
 # 8472backup — Communication, Configuration, and Operations
 
-Specification version: 0.59 — Calendar retention and server check and version commands, 2026-11-23
+Specification version: 0.60 — Client backup cleanup and per-run prune rules, 2026-11-23
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 
@@ -77,10 +77,11 @@ OPEN: exact framing, serialization, operation sequencing, session admission, aut
 
 The server service façade is the common entry point for operations between the server and its clients. It addresses each client by its stable `client_id` UUID and resolves the repository from the authorized server context. The Unix-socket handler and pull scheduler both call the façade. The socket handler is a separate entry point, and the SSH relay to that socket is a later increment. The scheduler supplies the registered client and set for a due pull job. Both callers use the common backup session and snapshot commit path.
 
-The façade covers `init_repository`, `add_backup_set`, `remove_backup_set`, `remove_repository`, `backup`, `list`, `restore`, `recover`, `mount`, `set_mode`, `check`, and `version`. Adding a set registers it in the existing repository under that client's mode. Chapter 12 defines retirement and reclamation. `list` reads the register and snapshot JSON for committed snapshots across the client's authorized sets, optionally filtered by set. The exact method inputs, results, errors, and permissions remain OPEN.
+The façade covers `init_repository`, `add_backup_set`, `remove_backup_set`, `remove_repository`, `backup`, `list`, `restore`, `recover`, `mount`, `set_mode`, `cleanup`, `check`, and `version`. Adding a set registers it in the existing repository under that client's mode. Chapter 12 defines retirement and reclamation. `list` reads the register and snapshot JSON for committed snapshots across the client's authorized sets, optionally filtered by set. The exact method inputs, results, errors, and permissions remain OPEN.
 
 - `check` is a separate administrator command backed by the façade. Acquire the regular repository lock and report consistency findings for the snapshot register, the expected snapshot metadata and catalogues, and their location-index references into packs. The check is read-only.
 - `version` is a separate command backed by the façade. It returns the running server's software version and requires neither a repository lookup nor a repository lock.
+- `cleanup` is a command in the regular client CLI for the client administrator. It calls the façade for an authorized backup set in either mode, following chapter 11.3.
 
 Push/pull MUST have its own small, explicit boundary for mode-specific scheduling and invocation, connection establishment, and handoff to the common backup session:
 
@@ -88,6 +89,8 @@ Push/pull MUST have its own small, explicit boundary for mode-specific schedulin
 - Pull (default): the running server service starts SSH to the source host and invokes the restricted source CLI. The service exchanges the common protocol directly over the SSH subprocess's standard input/output.
 - Both paths provide a bidirectional byte stream and a server-validated host/set authorization context to the same backup protocol and archive logic. The detailed authorization handoff remains OPEN.
 - At the start of the common backup session, the client sends the required operational fields extracted from the run's captured, validated configuration to the server. This exchange and server validation precede object-existence queries and source-data transfer in both push and pull. The complete backup description, including source paths and exclusions, stays client-side and is archived client-encrypted with the snapshot. The run uses the same fixed configuration version as specified in chapter 15.
+- Pass the selected backup set's prune rules as an explicit argument to the façade's `backup()` call in both modes. The server validates the supplied rules and uses them for that run's post-commit prune.
+- Send the selected backup set's `auto-cleanup` setting with the other operational fields at backup start. The server applies the interrupted-run cleanup rules in chapter 11.3.
 - The source client always reads, chunks, compresses, and encrypts source data. The server always controls admission, repository state, snapshot publication, retention, and cleanup. Starting the SSH connection does not exchange those application roles or grant additional permissions.
 - Object-existence queries, transfer, membership submission, commit, and failure handling MUST use the same semantics and common implementation in both modes. Archive and repository code must not branch on which side started SSH.
 
