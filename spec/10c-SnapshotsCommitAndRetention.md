@@ -1,6 +1,6 @@
 # 8472backup — Snapshots, Commit, and Retention
 
-Specification version: 0.55 — Server-assigned snapshot IDs, 2026-11-23
+Specification version: 0.56 — Final deletion of retired backup scopes, 2026-11-23
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 
@@ -219,9 +219,11 @@ After a completed backup, the server automatically evaluates the set's retention
 
 The server MUST enforce protection at every application-level deletion path, not merely during a scheduled prune job. No ordinary client or maintenance API may bypass it. A host administrator with direct filesystem control remains outside this guarantee.
 
-`remove_backup_set` retires a backup set and `remove_repository` retires the repository and all its sets. Retirement stops new backups within the affected scope and preserves access to retained snapshots. An asynchronous server job checks retired scopes during idle periods, independently of new backups and under the repository lock. A snapshot is eligible for deletion only when its retention rule and effective server protection allow it. Reclaim a retired repository only after all its snapshots are eligible and active operations no longer require it. Objects shared with retained snapshots remain live when an individual set is removed.
+`remove_backup_set` marks the backup set as `removed`. `remove_repository` marks the repository as `removed`, which applies to all its sets. Marking a scope stops new backups within it and preserves access to retained snapshots.
 
-OPEN: exact calendar/count retention semantics, timezone handling, the expiry rule for count-based retention after retirement, handling active jobs during retirement, removal permissions, and any explicit administrator override. Preserve the last completed snapshot automatically only if Thomas adopts that additional policy.
+The asynchronous cleanup job checks retired scopes during idle periods. It calls the internal `RepositoryService.delete_backup_set()` or `RepositoryService.delete()` for final deletion. Under the affected repository's lock, verify the `removed` state, snapshot retention and effective protection, and that active operations no longer require the scope. Delete a set's records and files once all of its snapshots are eligible. The repository's compaction rules govern reclamation of its objects in packs, including objects shared with retained snapshots. Delete the entire repository once all its snapshots are eligible and its data is no longer in use.
+
+OPEN: exact calendar/count retention semantics, timezone handling, the expiry rule for count-based retention after retirement, handling active jobs during retirement, removal permissions, recovery after an interrupted deletion, and any explicit administrator override. Preserve the last completed snapshot automatically only if Thomas adopts that additional policy.
 
 ### 12.1 Liveness and garbage collection
 

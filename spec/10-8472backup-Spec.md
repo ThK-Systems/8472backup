@@ -1,6 +1,6 @@
 # 8472backup — Project Specification for Codex
 
-Version: 0.55 — Server-assigned snapshot IDs, 2026-11-23
+Version: 0.56 — Final deletion of retired backup scopes, 2026-11-23
 
 Status: requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 
