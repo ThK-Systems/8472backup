@@ -1,6 +1,6 @@
 # 8472backup — Snapshots, Commit, and Retention
 
-Specification version: 0.54 — Operation admission and repository locking, 2026-11-23
+Specification version: 0.55 — Server-assigned snapshot IDs, 2026-11-23
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 
@@ -8,7 +8,7 @@ requirements and agreed architectural direction; early design phase. No producti
 
 ### 9.1 Independent roots and shared immutable objects
 
-Each completed snapshot MUST have its own stable identity and an encrypted root object describing how to reach its complete recoverable file selection.
+Each completed snapshot MUST have its own stable identity and an encrypted root object describing how to reach its complete recoverable file selection. The server generates the snapshot UUID with `uuid4()` for every new snapshot.
 
 The immutable `Snapshot` dataclass in `server/snapshot.py` contains `snapshot_id` as a `UUID`, `root_id` as `ObjectId`, `committed_at` and `protected_until` as UTC `datetime` values, an `object_catalog` reference, and `version`, initially 1. `ObjectCatalogue` contains a `frozenset` of object IDs. The `Repository` supplies the client and backup-set IDs when the snapshot record is saved or loaded. Section 11 defines the persistent representation.
 
@@ -24,7 +24,7 @@ Restore MUST NOT depend on replaying earlier snapshots. Deleting the first snaps
 
 The server owns the snapshot register and the per-snapshot records described in chapter 11. Independent roots allow each retained snapshot to restore independently. The server controls publication and updates the register under the repository lock.
 
-OPEN: snapshot ID generation details, root/content ID relationship, metadata chunking, client metadata encoding, and metadata reuse strategy.
+OPEN: root/content ID relationship, metadata chunking, client metadata encoding, and metadata reuse strategy.
 
 Each snapshot MUST also have its own snapshot-specific metadata, distinct from source file attributes. The client-encrypted snapshot description must retain the configuration used for the run; descriptive text, source-side timing, and summary statistics are possible additional fields whose schema remains OPEN. The snapshot root carries or references this metadata; inline placement versus separate metadata objects is not decided here. The server separately owns authoritative commit time, scope, membership, and protection state. Client-reported snapshot timestamps cannot determine protection expiry. No snapshot metadata implementation is authorized by this clarification.
 
@@ -150,7 +150,7 @@ The current development code initializes one set at a time and stores set UUIDs 
 
 `server.snapshot_service.SnapshotService` accepts an initialized `Repository` for the authorized scope. It uses the repository's paths for the index, packs, and snapshot records.
 
-The current development implementation of `create_snapshot(records, root_id)` acquires the exclusive repository lock before reading the input and validates the first record as the root. Implementing the final-root ordering defined above is pending. The service stores missing objects and saves the index. It generates a snapshot UUID unless its server-side caller supplies one, assigns the UTC commit time, and calculates the protection deadline using the configured minimum duration, which defaults to seven days. `get_snapshot(snapshot_id)` loads the committed record under the repository lock and verifies its identity and scope.
+The current development implementation of `create_snapshot()` acquires the exclusive repository lock before reading the input and validates the first record as the root. The switch to final-root ordering and removal of the optional `snapshot_id` parameter are pending. The service stores missing objects and saves the index, assigns the UTC commit time, and calculates the protection deadline using the configured minimum duration, which defaults to seven days. `get_snapshot(snapshot_id)` loads the committed record under the repository lock and verifies its identity and scope.
 
 The agreed format stores two server-owned files in the backup set's snapshot directory. Both are stored without compression or encryption.
 

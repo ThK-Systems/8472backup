@@ -24,7 +24,7 @@ Implement the systemd service and Unix-socket handler as a caller of the façade
 
 ## 4. Backup completion and snapshot commit
 
-Use the complete final snapshot root object as the upload completion signal. `SnapshotService.create_snapshot()` currently expects the root first and requires its ID up front. Adopt the `data/` subdirectories for packs and the index. Persist snapshot JSON and the binary catalogue, including both new and reused IDs. Update the server-owned snapshot register durably after the packs, index, and both files are durable. Acknowledge the backup after the register update.
+Use the complete final snapshot root object as the upload completion signal. `SnapshotService.create_snapshot()` currently expects the root first and requires its ID up front. Remove its optional `snapshot_id` parameter and always generate the snapshot UUID on the server. Adopt the `data/` subdirectories for packs and the index. Persist snapshot JSON and the binary catalogue, including both new and reused IDs. Update the server-owned snapshot register durably after the packs, index, and both files are durable. Acknowledge the backup after the register update.
 
 ## 5. Snapshot listing
 
