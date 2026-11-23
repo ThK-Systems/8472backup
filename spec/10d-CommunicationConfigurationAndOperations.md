@@ -1,6 +1,6 @@
 # 8472backup — Communication, Configuration, and Operations
 
-Specification version: 0.60 — Client backup cleanup and per-run prune rules, 2026-11-23
+Specification version: 0.61 — Framed backup exchange and request correlation, 2026-11-23
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 
@@ -71,7 +71,15 @@ Use a common framed binary request/response protocol for client/server operation
 - Verify SSH peer identity; do not disable host-key checking as a convenience default.
 - Specify reconnect, abort, duplicate request, and commit acknowledgement behaviour.
 
-OPEN: exact framing, serialization, operation sequencing, session admission, authenticated identity mapping, and detailed gateway/socket protocol. SSH, the framed binary request/response approach, and the restricted-command-to-local-socket path are agreed; concrete message formats remain unselected.
+For a remote backup, the full exchange within one façade `backup()` call uses a single bidirectional SSH session. Each protocol message has a type and a payload length.
+
+1. The client announces a block of object IDs for the backup set.
+2. The server checks the set's key-domain location index and replies with the missing IDs. Both the existing and missing IDs are part of the snapshot membership.
+3. The client sends the requested objects. After satisfying the outstanding requests, it sends the complete snapshot root as the final object, even if the root ID is already indexed. Chapter 11 defines publication and acknowledgement.
+
+To support pipelining, an object-ID query carries a request ID that the server echoes in its reply. Request IDs are unique among outstanding queries within the session. Several ID blocks can be outstanding on the same channel. Bound the number of outstanding queries and the bytes buffered for them.
+
+OPEN: exact framing fields and serialization, pipelining limits and detailed sequencing, session admission, authenticated identity mapping, and detailed gateway/socket protocol.
 
 ### 13.5 Push/pull boundary and common backup sessions
 

@@ -21,7 +21,7 @@ Enforce the configurable server-wide limit for concurrent backup sets, default 3
 
 ## 3. Server process and wire protocol
 
-Implement the systemd service and Unix-socket handler as a caller of the façade. Add the restricted SSH relay in a later increment. Push uses one SSH session for requests and replies through the relay and socket. Pull starts an SSH connection from the server to the restricted client command. Define authentication and authorization, message framing, size limits, timeouts, and the object-ID exchange for sending only missing object bodies. Define how asynchronous connections interact with blocking file I/O and repository locks. See the [communication spec](10d-CommunicationConfigurationAndOperations.md#13-communication-execution-and-protocol).
+Implement the systemd service and Unix-socket handler as a caller of the façade. Add the restricted SSH relay in a later increment. Push uses one SSH session for requests and replies through the relay and socket. Pull starts an SSH connection from the server to the restricted client command. Implement the batched object-ID exchange and request correlation specified in chapter 13.4. Define authentication and authorization, the exact message encoding, size and pipelining limits, and timeouts. Define how asynchronous connections interact with blocking file I/O and repository locks. See the [communication spec](10d-CommunicationConfigurationAndOperations.md#134-protocol-requirements).
 
 ## 4. Backup completion and snapshot commit
 

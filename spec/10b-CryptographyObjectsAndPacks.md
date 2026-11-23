@@ -1,6 +1,6 @@
 # 8472backup — Cryptography, Objects, and Packs
 
-Specification version: 0.60 — Client backup cleanup and per-run prune rules, 2026-11-23
+Specification version: 0.61 — Framed backup exchange and request correlation, 2026-11-23
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 
