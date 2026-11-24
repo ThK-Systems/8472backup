@@ -1,6 +1,3 @@
-# Editor configuration for retentions
-# https://editorconfig.org
-
 root = true
 
 [*]
