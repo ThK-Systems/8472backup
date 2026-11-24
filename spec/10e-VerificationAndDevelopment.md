@@ -1,6 +1,6 @@
 # 8472backup — Verification and Development
 
-Specification version: 0.62 — Align retention configuration with approved rules, 2026-11-24
+Specification version: 0.63 — Register backup sets in an existing repository, 2026-11-24
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 

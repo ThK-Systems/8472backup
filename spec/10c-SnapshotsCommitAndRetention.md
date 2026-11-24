@@ -1,6 +1,6 @@
 # 8472backup — Snapshots, Commit, and Retention
 
-Specification version: 0.62 — Align retention configuration with approved rules, 2026-11-24
+Specification version: 0.63 — Register backup sets in an existing repository, 2026-11-24
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 
@@ -144,7 +144,9 @@ The client initiates repository setup in both modes. The server requires at leas
 
 `repository.json` in the repository root is UTF-8 JSON and contains both repository and backup-set metadata. Repository metadata includes the client UUID and mode. Set metadata is keyed by set UUID and includes its registered key-domain ID and the operational fields needed by the server. The façade must check the stored client UUID against the verified identity and resolve the key domain from the registered set. The exact schema for the pull SSH target, set names, scheduling, and retention remains OPEN.
 
-`ServerService.init_repository()` takes the verified client UUID, the initial set-to-key-domain mapping, and the mode. The repository code uses the layout above. The development implementation stores the direct UUID mapping in `repository.json` version 1 and initializes `snapshot-registry.json` with `version` set to `1` and an empty `snapshots` object. The final metadata schemas remain OPEN.
+`ServerService.init_repository()` takes the verified client UUID, the initial set-to-key-domain mapping, and the mode. After registering all supplied sets, it returns a `Repository` scoped to the first supplied set. The repository code uses the layout above. The development implementation stores the direct UUID mapping in `repository.json` version 1 and initializes `snapshot-registry.json` with `version` set to `1` and an empty `snapshots` object. The final metadata schemas remain OPEN.
+
+`ServerService.add_backup_set()` takes the verified client UUID, backup-set UUID, and key-domain UUID. The façade looks up the repository by client UUID and checks the stored identity under the repository lock. The lookup returns a `Repository` scoped to the first registered set. The repository service takes that object and the two IDs for the new set. Under the repository lock it rechecks the client identity, rejects an already registered set, creates the set's snapshot directory, and prepares an empty index and pack directory for a new key domain. A registered key domain reuses its existing index and packs. After the new storage is durable, the server registers the set in `repository.json`. Existing unregistered storage is reported as an inconsistent state for the backup server administrator to inspect. The repository mode and snapshot register remain unchanged.
 
 ### Local snapshot record and commit
 

@@ -1,6 +1,6 @@
 # 8472backup — Project Specification for Codex
 
-Version: 0.62 — Align retention configuration with approved rules, 2026-11-24
+Version: 0.63 — Register backup sets in an existing repository, 2026-11-24
 
 Status: requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 
