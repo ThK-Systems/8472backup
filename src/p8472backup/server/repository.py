@@ -14,10 +14,11 @@ type BackupMode = Literal["pull", "push"]
 
 @dataclass(frozen=True)
 class BackupSet:
-    """Identify one backup set and its key domain."""
+    """Identify one backup set, its key domain, and its deletion state."""
 
     backup_set_id: UUID
     key_id: UUID
+    deleted: bool = False
 
 
 @dataclass(frozen=True)

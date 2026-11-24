@@ -1,12 +1,18 @@
 import json
+from datetime import UTC, datetime, timedelta
+from io import BytesIO
 from pathlib import Path
+from unittest.mock import patch
 from uuid import UUID
 
 import pytest
 
+from p8472backup.archive.objects import TYPE_SNAPSHOT, Object
 from p8472backup.common.error import InconsistentStateError
 from p8472backup.server.repository_admin_service import RepositoryAdminService
 from p8472backup.server.server_service import ServerService
+from p8472backup.server.snapshot import Snapshot
+from p8472backup.server.snapshot_service import SnapshotService
 from p8472backup.storage.file.index import LocationIndex, ObjectLocation
 from p8472backup.storage.file.lock import RepositoryLock
 
@@ -30,10 +36,10 @@ def test_init_repository_registers_sets_and_prepares_each_key_domain(tmp_path: P
     assert repository.backup_sets.keys() == backup_sets.keys()
     assert not repository.snapshots
     assert json.loads((path / "repository.json").read_text()) == {
-        "version": 1,
+        "version": 2,
         "client_id": str(_CLIENT_ID),
         "mode": "push",
-        "backup_sets": {str(set_id): str(key_id) for set_id, key_id in backup_sets.items()},
+        "backup_sets": {str(set_id): {"key_id": str(key_id), "deleted": False} for set_id, key_id in backup_sets.items()},
     }
     assert json.loads((path / "snapshot-registry.json").read_text()) == {"version": 1, "snapshots": {}}
     for set_id, key_id in backup_sets.items():
@@ -215,3 +221,84 @@ def test_add_backup_set_rejects_abandoned_key_domain_and_locked_repository(tmp_p
     assert not (path / "snapshots" / str(_SECOND_SET)).exists()
     with RepositoryLock(path), pytest.raises(BlockingIOError):
         service.add_backup_set(_CLIENT_ID, _SECOND_SET, _KEY_ID)
+
+
+def test_remove_backup_set_respects_effective_protection_and_shared_packs(tmp_path: Path) -> None:
+    service = ServerService(tmp_path, protection_duration=timedelta(days=10))
+    repository = service.init_repository(_CLIENT_ID, {_FIRST_SET: _KEY_ID, _SECOND_SET: _KEY_ID})
+    snapshots = SnapshotService()
+    root = Object(TYPE_SNAPSHOT, b"r" * 32, 1)
+    started_at = datetime(2026, 1, 1, tzinfo=UTC)
+
+    def take_snapshot(set_id: UUID, days: int = 7) -> Snapshot:
+        return snapshots.create_snapshot(repository, set_id, iter(((root, BytesIO(b"r")),)), root.object_id, protection_duration=timedelta(days=days))
+
+    with patch("p8472backup.server.snapshot_service.datetime") as clock:
+        clock.now.return_value = started_at
+        expired = take_snapshot(_FIRST_SET)
+        stored_protection = take_snapshot(_FIRST_SET, days=12)
+        other_set = take_snapshot(_SECOND_SET)
+        clock.now.return_value = started_at + timedelta(days=1)
+        extended_protection = take_snapshot(_FIRST_SET)
+
+        index_file = repository.index_directory / str(_KEY_ID)
+        pack_file = repository.packs_root / str(_KEY_ID) / "1.pack"
+        index_bytes, pack_bytes = index_file.read_bytes(), pack_file.read_bytes()
+
+        clock.now.return_value = started_at + timedelta(days=11)
+        service.remove_backup_set(_CLIENT_ID, _FIRST_SET)
+        reopened = RepositoryAdminService.find_by_client_id(tmp_path, _CLIENT_ID)
+        assert reopened.get_backup_set(_FIRST_SET).deleted
+        assert not reopened.get_backup_set(_SECOND_SET).deleted
+        assert reopened.snapshots == {stored_protection, extended_protection, other_set}
+        assert not repository.snapshot_file(_FIRST_SET, expired.snapshot_id).exists()
+        assert snapshots.get_snapshot(reopened, _FIRST_SET, extended_protection.snapshot_id) == extended_protection
+
+        assert not repository.get_backup_set(_FIRST_SET).deleted
+        with pytest.raises(ValueError, match="Backup set is deleted"):
+            take_snapshot(_FIRST_SET)
+
+        clock.now.return_value = started_at + timedelta(days=11, microseconds=1)
+        service.remove_backup_set(_CLIENT_ID, _FIRST_SET)
+        assert RepositoryAdminService.find_by_client_id(tmp_path, _CLIENT_ID).snapshots == {stored_protection, other_set}
+
+    assert index_file.read_bytes() == index_bytes
+    assert pack_file.read_bytes() == pack_bytes
+
+
+def test_remove_backup_set_persists_state_and_can_retry_failed_unlink(tmp_path: Path) -> None:
+    service = ServerService(tmp_path)
+    repository = service.init_repository(_CLIENT_ID, {_FIRST_SET: _KEY_ID})
+    root = Object(TYPE_SNAPSHOT, b"r" * 32, 1)
+    snapshot = SnapshotService().create_snapshot(repository, _FIRST_SET, iter(((root, BytesIO(b"r")),)), root.object_id)
+    path = repository.snapshot_file(_FIRST_SET, snapshot.snapshot_id)
+
+    with patch("p8472backup.server.snapshot_service.datetime") as clock:
+        clock.now.return_value = snapshot.protected_until + timedelta(seconds=1)
+        with patch.object(Path, "unlink", side_effect=PermissionError("Unlink failed")), pytest.raises(PermissionError, match="Unlink failed"):
+            service.remove_backup_set(_CLIENT_ID, _FIRST_SET)
+        assert path.is_file()
+        assert RepositoryAdminService.find_by_client_id(tmp_path, _CLIENT_ID).get_backup_set(_FIRST_SET).deleted
+        service.remove_backup_set(_CLIENT_ID, _FIRST_SET)
+
+    assert not path.exists()
+    service.add_backup_set(_CLIENT_ID, _SECOND_SET, _KEY_ID)
+    reopened = RepositoryAdminService.find_by_client_id(tmp_path, _CLIENT_ID)
+    assert reopened.get_backup_set(_FIRST_SET).deleted
+    assert not reopened.get_backup_set(_SECOND_SET).deleted
+
+
+def test_remove_backup_set_reads_metadata_version_one_and_requires_lock(tmp_path: Path) -> None:
+    service = ServerService(tmp_path)
+    repository = service.init_repository(_CLIENT_ID, {_FIRST_SET: _KEY_ID})
+    metadata_file = repository.path / "repository.json"
+    metadata_v1 = {"version": 1, "client_id": str(_CLIENT_ID), "mode": "pull", "backup_sets": {str(_FIRST_SET): str(_KEY_ID)}}
+    metadata_file.write_text(json.dumps(metadata_v1), encoding="utf-8")
+
+    assert not RepositoryAdminService.find_by_client_id(tmp_path, _CLIENT_ID).get_backup_set(_FIRST_SET).deleted
+    with RepositoryLock(repository.path), pytest.raises(BlockingIOError):
+        service.remove_backup_set(_CLIENT_ID, _FIRST_SET)
+    assert json.loads(metadata_file.read_text(encoding="utf-8")) == metadata_v1
+
+    service.remove_backup_set(_CLIENT_ID, _FIRST_SET)
+    assert RepositoryAdminService.find_by_client_id(tmp_path, _CLIENT_ID).get_backup_set(_FIRST_SET).deleted
