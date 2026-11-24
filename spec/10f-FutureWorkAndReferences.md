@@ -1,6 +1,6 @@
 # 8472backup — Future Work and References
 
-Specification version: 0.61 — Framed backup exchange and request correlation, 2026-11-23
+Specification version: 0.62 — Align retention configuration with approved rules, 2026-11-24
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 

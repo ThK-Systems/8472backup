@@ -1,6 +1,6 @@
 # 8472backup — Communication, Configuration, and Operations
 
-Specification version: 0.61 — Framed backup exchange and request correlation, 2026-11-23
+Specification version: 0.62 — Align retention configuration with approved rules, 2026-11-24
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 
@@ -153,7 +153,7 @@ Each backup set has its own local TOML file defining source selections, exclusio
 - An invalid description fails the run and cannot become an empty/default deletion policy.
 - The host-level backup mode defaults to `pull` and can be set to `push`; exact file placement remains OPEN.
 
-OPEN: file locations, TOML schema, supported rule vocabulary, and scheduling configuration location. Do not assume existing `retentions` semantics without review.
+The supported retention rules and their calendar semantics are defined in chapter 12. OPEN: file locations, the TOML schema, and the scheduling configuration location.
 
 The server does not need a separate readable copy of the complete backup description. The pre-run exchange exposes only required operational fields; source paths and exclusions are evaluated locally and retained in the client-encrypted snapshot description. The exact operational field schema remains OPEN.
 
