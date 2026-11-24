@@ -11,7 +11,7 @@ from typing import BinaryIO
 from uuid import UUID, uuid4
 
 from p8472backup.archive.objects import OBJECT_ID_SIZE, TYPE_SNAPSHOT, Object, ObjectId
-from p8472backup.server.repository import Repository
+from p8472backup.server.repository import BackupSet, Repository
 from p8472backup.server.snapshot import SNAPSHOT_VERSION, ObjectCatalogue, Snapshot
 from p8472backup.storage.file.index import LocationIndex, ObjectLocation
 from p8472backup.storage.file.lock import RepositoryLock
@@ -34,57 +34,52 @@ class SnapshotService:
         records: Iterator[tuple[Object, BinaryIO]],
         root_id: ObjectId,
         *,
+        lock: RepositoryLock,
         snapshot_id: UUID | None = None,
         protection_duration: timedelta = DEFAULT_PROTECTION_DURATION,
         target_size: int = DEFAULT_TARGET_SIZE,
     ) -> Snapshot:
-        """Write a snapshot and return it once its record is durable."""
-        # Repository lookup calls this service to list published snapshots.
-        from p8472backup.server.repository_admin_service import RepositoryAdminService
-
+        """Write a snapshot using the repository and lock from locked_repository()."""
         if protection_duration < timedelta():
             raise ValueError("Snapshot protection duration must be nonnegative")
         if target_size <= 0:
             raise ValueError("Pack target size must be positive")
 
+        backup_set = repository.get_backup_set(backup_set_id)
+        if backup_set.deleted:
+            raise ValueError(f"Backup set is deleted: {backup_set_id}")
         Object.validate_object_id(root_id)
         if snapshot_id is None:
             snapshot_id = uuid4()
 
-        with RepositoryLock(repository.path) as lock:
-            current = RepositoryAdminService().read_metadata(repository.path, lock, client_id=repository.client_id)
-            backup_set = current.get_backup_set(backup_set_id)
-            if backup_set.deleted:
-                raise ValueError(f"Backup set is deleted: {backup_set_id}")
+        path = repository.snapshot_file(backup_set_id, snapshot_id)
+        directory = lock.require_held_for(path.parent)
+        if not directory.is_dir():
+            raise NotADirectoryError(directory)
+        path = directory / path.name
+        if os.path.lexists(path):
+            raise FileExistsError(f"Snapshot already exists: {path}")
 
-            path = current.snapshot_file(backup_set_id, snapshot_id)
-            directory = lock.require_held_for(path.parent)
-            if not directory.is_dir():
-                raise NotADirectoryError(directory)
-            path = directory / path.name
-            if os.path.lexists(path):
-                raise FileExistsError(f"Snapshot already exists: {path}")
+        index_path = repository.index_directory / str(backup_set.key_id)
+        index = LocationIndex.load_from(index_path, lock)
+        first = next(records, None)
+        if first is None or first[0].object_type != TYPE_SNAPSHOT or first[0].object_id != root_id:
+            raise ValueError("The first record must be the declared type 3 snapshot root")
 
-            index_path = current.index_directory / str(backup_set.key_id)
-            index = LocationIndex.load_from(index_path, lock)
-            first = next(records, None)
-            if first is None or first[0].object_type != TYPE_SNAPSHOT or first[0].object_id != root_id:
-                raise ValueError("The first record must be the declared type 3 snapshot root")
+        catalogue = self._store_snapshot_objects(chain((first,), records), index, lock, repository.packs_root / str(backup_set.key_id), target_size)
+        index.save_to(index_path, lock)
 
-            catalogue = self._store_snapshot_objects(chain((first,), records), index, lock, current.packs_root / str(backup_set.key_id), target_size)
-            index.save_to(index_path, lock)
-
-            committed_at = datetime.now(UTC)
-            snapshot = Snapshot(
-                snapshot_id=snapshot_id,
-                backup_set_id=backup_set_id,
-                root_id=root_id,
-                committed_at=committed_at,
-                protected_until=committed_at + protection_duration,
-                object_catalog=catalogue,
-            )
-            self._save_snapshot(snapshot, current, path)
-            return snapshot
+        committed_at = datetime.now(UTC)
+        snapshot = Snapshot(
+            snapshot_id=snapshot_id,
+            backup_set_id=backup_set_id,
+            root_id=root_id,
+            committed_at=committed_at,
+            protected_until=committed_at + protection_duration,
+            object_catalog=catalogue,
+        )
+        self._save_snapshot(snapshot, repository, path)
+        return snapshot
 
     def get_snapshot(self, repository: Repository, backup_set_id: UUID, snapshot_id: UUID) -> Snapshot:
         """Load a committed snapshot in this service's client and backup set."""
@@ -101,10 +96,11 @@ class SnapshotService:
             snapshots.update(snapshot for _, snapshot in self._read_set_snapshots(repository, backup_set_id, directory, lock))
         return frozenset(snapshots)
 
-    def remove_unprotected_snapshots(self, repository: Repository, backup_set_id: UUID, lock: RepositoryLock, *, protection_duration: timedelta) -> None:
+    def remove_unprotected_snapshots(self, repository: Repository, backup_set: BackupSet, lock: RepositoryLock, *, protection_duration: timedelta) -> None:
         """Remove expired snapshot records from a deleted backup set."""
-        if not repository.get_backup_set(backup_set_id).deleted:
-            raise ValueError(f"Backup set is not deleted: {backup_set_id}")
+        backup_set_id = backup_set.backup_set_id
+        if not backup_set.deleted or repository.backup_sets.get(backup_set_id) != backup_set:
+            raise ValueError(f"Backup set is not deleted in this repository: {backup_set_id}")
         directory = lock.require_held_for(repository.snapshots_root / str(backup_set_id))
         now = datetime.now(UTC)
         expired: list[Path] = []

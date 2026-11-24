@@ -231,7 +231,8 @@ def test_remove_backup_set_respects_effective_protection_and_shared_packs(tmp_pa
     started_at = datetime(2026, 1, 1, tzinfo=UTC)
 
     def take_snapshot(set_id: UUID, days: int = 7) -> Snapshot:
-        return snapshots.create_snapshot(repository, set_id, iter(((root, BytesIO(b"r")),)), root.object_id, protection_duration=timedelta(days=days))
+        with RepositoryAdminService().locked_repository(tmp_path, _CLIENT_ID) as (current, lock):
+            return snapshots.create_snapshot(current, set_id, iter(((root, BytesIO(b"r")),)), root.object_id, lock=lock, protection_duration=timedelta(days=days))
 
     with patch("p8472backup.server.snapshot_service.datetime") as clock:
         clock.now.return_value = started_at
@@ -270,7 +271,8 @@ def test_remove_backup_set_persists_state_and_can_retry_failed_unlink(tmp_path: 
     service = ServerService(tmp_path)
     repository = service.init_repository(_CLIENT_ID, {_FIRST_SET: _KEY_ID})
     root = Object(TYPE_SNAPSHOT, b"r" * 32, 1)
-    snapshot = SnapshotService().create_snapshot(repository, _FIRST_SET, iter(((root, BytesIO(b"r")),)), root.object_id)
+    with RepositoryAdminService().locked_repository(tmp_path, _CLIENT_ID) as (current, lock):
+        snapshot = SnapshotService().create_snapshot(current, _FIRST_SET, iter(((root, BytesIO(b"r")),)), root.object_id, lock=lock)
     path = repository.snapshot_file(_FIRST_SET, snapshot.snapshot_id)
 
     with patch("p8472backup.server.snapshot_service.datetime") as clock:

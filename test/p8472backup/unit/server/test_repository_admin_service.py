@@ -22,14 +22,16 @@ _KEY_ID = UUID(int=3)
 def test_init_repository_rejects_second_init_and_preserves_backup(tmp_path: Path) -> None:
     path = tmp_path / str(_CLIENT_ID)
     other_set_id = UUID(int=6)
-    repository = RepositoryAdminService().init_repository(path, _CLIENT_ID, ((other_set_id, _KEY_ID), (_BACKUP_SET_ID, _KEY_ID)))
+    admin_service = RepositoryAdminService()
+    repository = admin_service.init_repository(path, _CLIENT_ID, ((other_set_id, _KEY_ID), (_BACKUP_SET_ID, _KEY_ID)))
     assert repository.mode == "pull"
 
     body = SnapshotRootContent(b"backup set configuration").to_plaintext()
     root = Object(TYPE_SNAPSHOT, b"r" * 32, len(body))
     snapshots = SnapshotService()
-    snapshot = snapshots.create_snapshot(repository, _BACKUP_SET_ID, iter(((root, BytesIO(body)),)), root.object_id)
-    other_snapshot = snapshots.create_snapshot(repository, other_set_id, iter(((root, BytesIO(body)),)), root.object_id)
+    with admin_service.locked_repository(tmp_path, _CLIENT_ID) as (current, lock):
+        snapshot = snapshots.create_snapshot(current, _BACKUP_SET_ID, iter(((root, BytesIO(body)),)), root.object_id, lock=lock)
+        other_snapshot = snapshots.create_snapshot(current, other_set_id, iter(((root, BytesIO(body)),)), root.object_id, lock=lock)
     (repository.snapshots_root / str(_BACKUP_SET_ID) / ".snapshot-interrupted").write_bytes(b"incomplete")
     files = (path / "repository.json", repository.index_directory / str(_KEY_ID), repository.packs_root / str(_KEY_ID) / "1.pack", repository.snapshot_file(_BACKUP_SET_ID, snapshot.snapshot_id))
     contents = tuple(file.read_bytes() for file in files)

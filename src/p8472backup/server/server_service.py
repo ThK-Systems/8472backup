@@ -33,4 +33,5 @@ class ServerService:
         """Retire a registered set for a verified client."""
         service = RepositoryAdminService()
         with service.locked_repository(self._storage_root, client_id) as (repository, lock):
-            service.remove_backup_set(repository, backup_set_id, lock, protection_duration=self._protection_duration)
+            backup_set = repository.get_backup_set(backup_set_id)
+            service.remove_backup_set(repository, backup_set, lock, protection_duration=self._protection_duration)
