@@ -1,6 +1,6 @@
 # 8472backup — Verification and Development
 
-Specification version: 0.64 — Model repositories, backup sets, and snapshots, 2026-11-24
+Specification version: 0.65 — Retire backup sets and preserve protected snapshots, 2026-11-24
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 
@@ -40,7 +40,9 @@ Tests must exercise behaviour and invariants, not merely mirror implementation. 
 | Earlier snapshot removed | Every retained snapshot still restores independently |
 | Old chunk referenced by new protected snapshot | Old chunk remains available |
 | Client requests shorter retention | Unexpired server protection wins |
-| A set or repository is retired | New backup runs stop and retained snapshots remain available until their retention and protection allow deletion |
+| A backup set is retired | New backup runs stop. The server removes the set's unprotected snapshots and keeps protected snapshots available for restore. |
+| Snapshot removal fails after a set is marked deleted | The set stays deleted and a retry rechecks protection before removing the remaining eligible snapshots. |
+| A repository is retired | New backup runs stop and retained snapshots remain available until their retention and protection allow deletion. |
 | Client supplies old/future timestamps | Trusted protection clock is unaffected |
 | Client floods new snapshots | Existing snapshots cannot be displaced inside their protection period |
 | Client submits deletion/overwrite/foreign IDs | Existing committed data and other scopes remain protected |

@@ -1,6 +1,6 @@
 # 8472backup — Cryptography, Objects, and Packs
 
-Specification version: 0.64 — Model repositories, backup sets, and snapshots, 2026-11-24
+Specification version: 0.65 — Retire backup sets and preserve protected snapshots, 2026-11-24
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 

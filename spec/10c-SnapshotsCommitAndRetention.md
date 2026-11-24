@@ -1,6 +1,6 @@
 # 8472backup — Snapshots, Commit, and Retention
 
-Specification version: 0.64 — Model repositories, backup sets, and snapshots, 2026-11-24
+Specification version: 0.65 — Retire backup sets and preserve protected snapshots, 2026-11-24
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 
@@ -144,9 +144,9 @@ The client initiates repository setup in both modes. The server requires at leas
 
 `repository.json` in the repository root is UTF-8 JSON and contains both repository and backup-set metadata. Repository metadata includes the client UUID and mode. Set metadata is keyed by set UUID and includes its registered key-domain ID and the operational fields needed by the server. The façade must check the stored client UUID against the verified identity and resolve the key domain from the registered set. The exact schema for the pull SSH target, set names, scheduling, and retention remains OPEN.
 
-`Repository` represents the whole client repository. It holds the path, client UUID, mode, and all registered `BackupSet` records by set UUID. Each `BackupSet` holds its set UUID and key-domain UUID. `Repository.snapshots` is the immutable set of published `Snapshot` objects as of the lookup. `RepositoryAdminService` reads and writes the repository and backup-set metadata using this model. It obtains the snapshots through `SnapshotService`.
+`Repository` represents the whole client repository. It holds the path, client UUID, mode, and all registered `BackupSet` records by set UUID. Each `BackupSet` holds its set UUID, key-domain UUID, and boolean `deleted` flag. `Repository.snapshots` is the immutable set of published `Snapshot` objects as of the lookup. `RepositoryAdminService` reads and writes the repository and backup-set metadata using this model. It obtains the snapshots through `SnapshotService`.
 
-`ServerService.init_repository()` takes the verified client UUID, the initial set-to-key-domain mapping, and the mode. It returns the repository with all its initial sets and an empty snapshot collection. The development implementation stores the direct UUID mapping in `repository.json` version 1 and initializes `snapshot-registry.json` with `version` set to `1` and an empty `snapshots` object. The final metadata schemas remain OPEN.
+`ServerService.init_repository()` takes the verified client UUID, the initial set-to-key-domain mapping, and the mode. It returns the repository with all its initial sets and an empty snapshot collection. In `repository.json` version 2, each entry in `backup_sets` is keyed by the set UUID and contains a UUID string `key_id` and a boolean `deleted`. When reading version 1, the direct UUID mapping supplies the key-domain IDs and all sets are treated as active. A metadata write stores version 2. Initialization also creates `snapshot-registry.json` with `version` set to `1` and an empty `snapshots` object.
 
 `ServerService.add_backup_set()` opens the repository through `RepositoryAdminService.locked_repository()` using the verified client UUID. This context acquires the repository lock, reads the current metadata, and checks the stored client identity. The façade passes the resulting `Repository` and the held lock to `RepositoryAdminService.add_backup_set()` along with the new set and key-domain UUIDs. The service rejects an already registered set, creates the set's snapshot directory, and prepares an empty index and pack directory for a new key domain. A registered key domain reuses its existing index and packs. After the new storage is durable, the service updates the repo's set mapping in `repository.json`. Existing unregistered storage is reported as an inconsistent state for the backup server administrator to inspect.
 
@@ -154,7 +154,7 @@ The client initiates repository setup in both modes. The server requires at leas
 
 `server.snapshot_service.SnapshotService` is stateless. Its create and read operations accept a `Repository` and an explicit backup-set UUID. The service uses the selected set's key domain for index and pack access. It owns snapshot reads, writes, and listing.
 
-The current development implementation of `create_snapshot()` acquires the exclusive repository lock before reading the input and validates the first record as the root. The switch to final-root ordering and removal of the optional `snapshot_id` parameter are pending. The service stores missing objects and saves the index, assigns the UTC commit time, and calculates the protection deadline using the configured minimum duration, which defaults to seven days. `get_snapshot()` loads the committed record under the repository lock and verifies its identity and scope.
+The current development implementation of `create_snapshot()` acquires the exclusive repository lock, checks the current state of the set in the repository metadata, and rejects a deleted set before reading the input. It validates the first record as the root. The switch to final-root ordering and removal of the optional `snapshot_id` parameter are pending. The service stores missing objects and saves the index, assigns the UTC commit time, and calculates the protection deadline using the configured minimum duration, which defaults to seven days. `get_snapshot()` loads the committed record under the repository lock and verifies its identity and scope.
 
 The agreed format stores two server-owned files in the backup set's snapshot directory. Both are stored without compression or encryption.
 
@@ -233,11 +233,13 @@ Prune removes only the eligible snapshot's register entry, JSON, and catalogue i
 
 The server MUST enforce protection at every application-level deletion path, not merely during a scheduled prune job. No ordinary client or maintenance API may bypass it. A host administrator with direct filesystem control remains outside this guarantee.
 
-`remove_backup_set` marks the backup set as `removed`. `remove_repository` marks the repository as `removed`, which applies to all its sets. Marking a scope stops new backups within it and preserves access to retained snapshots.
+`ServerService.remove_backup_set()` opens the verified client's repository under its exclusive lock. `RepositoryAdminService` durably sets `deleted` to true, blocking new backups in that set. Under the same lock, `SnapshotService` validates the set's snapshot records and removes those strictly beyond their effective protection deadline. Calendar retention applies to normal prune. Set removal applies the protection rule to every snapshot in the set. Protected snapshots remain available for recovery.
 
-The asynchronous cleanup job checks retired scopes during idle periods. It calls the internal `RepositoryAdminService.delete_backup_set()` or `RepositoryAdminService.delete()` for final deletion. Under the affected repository's lock, verify the `removed` state, snapshot retention and effective protection, and that active operations no longer require the scope. Delete a set's records and files once all of its snapshots are eligible. The repository's compaction rules govern reclamation of its objects in packs, including objects shared with retained snapshots. Delete the entire repository once all its snapshots are eligible and its data is no longer in use.
+The local implementation uses the server-side protection duration supplied at façade construction, with a seven-day default. It deletes the eligible published `.snapshot` files and syncs the set directory. Repeating the operation on a deleted set can remove snapshots whose protection has since expired. If removal fails after persisting the flag, the set stays deleted and the caller can retry. The index and packs remain available for restore and subsequent compaction.
 
-OPEN: resolve how calendar retention expires after retirement, when no new snapshots can fill newer periods. Handling active jobs during retirement, removal permissions, recovery after an interrupted deletion, and any explicit administrator override remain open.
+`remove_repository` will mark the repository as `removed`, stopping new backups in all its sets and preserving access to retained snapshots. The asynchronous cleanup job will check retired scopes during idle periods and call `RepositoryAdminService.delete_backup_set()` or `RepositoryAdminService.delete()` for final deletion. Under the repository lock, check the retirement state, the applicable retention and effective protection rules, and active use before deleting the set or repository. The repository's compaction rules govern reclamation of objects in shared packs.
+
+OPEN questions include calendar retention after repository retirement, remote removal permissions, coordination with scheduled jobs, and recovery after interrupted final deletion.
 
 ### 12.1 Liveness and garbage collection
 
