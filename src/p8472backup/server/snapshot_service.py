@@ -5,87 +5,176 @@ from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from itertools import chain, count
 from pathlib import Path
+from struct import Struct
+from tempfile import NamedTemporaryFile
 from typing import BinaryIO
 from uuid import UUID, uuid4
 
-from p8472backup.archive.objects import TYPE_SNAPSHOT, Object, ObjectId
+from p8472backup.archive.objects import OBJECT_ID_SIZE, TYPE_SNAPSHOT, Object, ObjectId
 from p8472backup.server.repository import Repository
-from p8472backup.server.snapshot import ObjectCatalogue, Snapshot
+from p8472backup.server.snapshot import SNAPSHOT_VERSION, ObjectCatalogue, Snapshot
 from p8472backup.storage.file.index import LocationIndex, ObjectLocation
 from p8472backup.storage.file.lock import RepositoryLock
 from p8472backup.storage.file.packs import DEFAULT_TARGET_SIZE, Pack
 
 
+_SNAPSHOT_HEADER = Struct(f"<H16s16s16s{OBJECT_ID_SIZE}sqqQ")
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+_MICROSECOND = timedelta(microseconds=1)
+
+
 class SnapshotService:
     """Use one repository, backup set, and key domain for snapshot operations."""
 
-    def __init__(
+    def create_snapshot(
         self,
         repository: Repository,
+        backup_set_id: UUID,
+        records: Iterator[tuple[Object, BinaryIO]],
+        root_id: ObjectId,
         *,
+        snapshot_id: UUID | None = None,
         protection_duration: timedelta = timedelta(days=7),
         target_size: int = DEFAULT_TARGET_SIZE,
-    ) -> None:
+    ) -> Snapshot:
+        """Write a snapshot and return it once its record is durable."""
         if protection_duration < timedelta():
             raise ValueError("Snapshot protection duration must be nonnegative")
         if target_size <= 0:
             raise ValueError("Pack target size must be positive")
 
-        repository.path.resolve(strict=True)
-        self._repository = repository
-        self._protection_duration = protection_duration
-        self._target_size = target_size
-
-    def create_snapshot(
-        self,
-        records: Iterator[tuple[Object, BinaryIO]],
-        root_id: ObjectId,
-        *,
-        snapshot_id: UUID | None = None,
-    ) -> Snapshot:
-        """Write a snapshot and return it once its record is durable."""
+        backup_set = repository.get_backup_set(backup_set_id)
         Object.validate_object_id(root_id)
         if snapshot_id is None:
             snapshot_id = uuid4()
 
-        repository = self._repository
         with RepositoryLock(repository.path) as lock:
-            directory = lock.require_held_for(repository.snapshots_directory)
+            path = repository.snapshot_file(backup_set_id, snapshot_id)
+            directory = lock.require_held_for(path.parent)
             if not directory.is_dir():
                 raise NotADirectoryError(directory)
-            path = repository.snapshot_file(snapshot_id)
+            path = directory / path.name
             if os.path.lexists(path):
                 raise FileExistsError(f"Snapshot already exists: {path}")
 
-            index = LocationIndex.load_from(repository.index_file, lock)
+            index_path = repository.index_directory / str(backup_set.key_id)
+            index = LocationIndex.load_from(index_path, lock)
             first = next(records, None)
             if first is None or first[0].object_type != TYPE_SNAPSHOT or first[0].object_id != root_id:
                 raise ValueError("The first record must be the declared type 3 snapshot root")
 
-            catalogue = self._store_snapshot_objects(chain((first,), records), index, lock)
-            index.save_to(repository.index_file, lock)
+            catalogue = self._store_snapshot_objects(chain((first,), records), index, lock, repository.packs_root / str(backup_set.key_id), target_size)
+            index.save_to(index_path, lock)
 
             committed_at = datetime.now(UTC)
             snapshot = Snapshot(
                 snapshot_id=snapshot_id,
+                backup_set_id=backup_set_id,
                 root_id=root_id,
                 committed_at=committed_at,
-                protected_until=committed_at + self._protection_duration,
+                protected_until=committed_at + protection_duration,
                 object_catalog=catalogue,
             )
-            snapshot.save_to(repository, lock)
+            self._save_snapshot(snapshot, repository, path)
             return snapshot
 
-    def get_snapshot(self, snapshot_id: UUID) -> Snapshot:
+    def get_snapshot(self, repository: Repository, backup_set_id: UUID, snapshot_id: UUID) -> Snapshot:
         """Load a committed snapshot in this service's client and backup set."""
-        with RepositoryLock(self._repository.path) as lock:
-            return Snapshot.load_from(self._repository, snapshot_id, lock)
+        repository.get_backup_set(backup_set_id)
+        with RepositoryLock(repository.path) as lock:
+            path = lock.require_held_for(repository.snapshot_file(backup_set_id, snapshot_id))
+            return self._load_snapshot(repository, backup_set_id, snapshot_id, path)
+
+    def list_snapshots(self, repository: Repository, lock: RepositoryLock) -> frozenset[Snapshot]:
+        """Load the published development records for all registered sets."""
+        snapshots: set[Snapshot] = set()
+        for backup_set_id in repository.backup_sets:
+            directory = lock.require_held_for(repository.snapshots_root / str(backup_set_id))
+            for path in directory.iterdir():
+                if path.suffix == ".snapshot":
+                    snapshots.add(self._load_snapshot(repository, backup_set_id, UUID(path.stem), lock.require_held_for(path)))
+        return frozenset(snapshots)
+
+    def _save_snapshot(self, snapshot: Snapshot, repository: Repository, path: Path) -> None:
+        """Durably publish the snapshot without replacing an existing record."""
+        directory = path.parent
+        if snapshot.version != SNAPSHOT_VERSION:
+            raise ValueError("Unsupported snapshot format")
+        if snapshot.committed_at.utcoffset() is None or snapshot.protected_until.utcoffset() is None:
+            raise ValueError("Snapshot timestamps must include a time zone")
+        if snapshot.protected_until < snapshot.committed_at:
+            raise ValueError("Snapshot protection deadline precedes commit time")
+        object_ids = snapshot.object_catalog.object_ids
+        if snapshot.root_id not in object_ids:
+            raise ValueError("Snapshot root is missing from the object catalogue")
+
+        header = _SNAPSHOT_HEADER.pack(
+            snapshot.version,
+            snapshot.snapshot_id.bytes,
+            repository.client_id.bytes,
+            snapshot.backup_set_id.bytes,
+            snapshot.root_id,
+            (snapshot.committed_at - _EPOCH) // _MICROSECOND,
+            (snapshot.protected_until - _EPOCH) // _MICROSECOND,
+            len(object_ids),
+        )
+        directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            output = NamedTemporaryFile(dir=directory, prefix=".snapshot-", delete=False)
+            temporary_path = Path(output.name)
+            try:
+                with output:
+                    output.write(header)
+                    for object_id in object_ids:
+                        Object.validate_object_id(object_id)
+                        output.write(object_id)
+                    output.flush()
+                    os.fsync(output.fileno())
+                os.link(temporary_path, path)
+            finally:
+                temporary_path.unlink()
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+
+    @staticmethod
+    def _load_snapshot(repository: Repository, backup_set_id: UUID, snapshot_id: UUID, path: Path) -> Snapshot:
+        """Read a committed snapshot record under its repository lock."""
+        with path.open("rb") as source:
+            header = source.read(_SNAPSHOT_HEADER.size)
+            if len(header) != _SNAPSHOT_HEADER.size:
+                raise ValueError("Truncated snapshot header")
+            version, stored_snapshot_id, client_id, stored_backup_set_id, root_id, committed_at, protected_until, count = _SNAPSHOT_HEADER.unpack(header)
+            if version != SNAPSHOT_VERSION:
+                raise ValueError("Unsupported snapshot format")
+            if (stored_snapshot_id, client_id, stored_backup_set_id) != (snapshot_id.bytes, repository.client_id.bytes, backup_set_id.bytes):
+                raise ValueError("Snapshot identity or scope does not match the requested record")
+            if protected_until < committed_at:
+                raise ValueError("Snapshot protection deadline precedes commit time")
+            if os.fstat(source.fileno()).st_size != len(header) + count * OBJECT_ID_SIZE:
+                raise ValueError("Snapshot file size does not match its catalogue count")
+
+            object_ids = frozenset(iter(lambda: source.read(OBJECT_ID_SIZE), b""))
+            if len(object_ids) != count or root_id not in object_ids or any(len(object_id) != OBJECT_ID_SIZE for object_id in object_ids):
+                raise ValueError("Invalid snapshot object catalogue")
+
+        return Snapshot(
+            snapshot_id=snapshot_id,
+            backup_set_id=backup_set_id,
+            root_id=root_id,
+            committed_at=_EPOCH + timedelta(microseconds=committed_at),
+            protected_until=_EPOCH + timedelta(microseconds=protected_until),
+            object_catalog=ObjectCatalogue(object_ids),
+            version=version,
+        )
 
     def _store_snapshot_objects(
         self,
         records: Iterator[tuple[Object, BinaryIO]],
         index: LocationIndex,
         lock: RepositoryLock,
+        pack_directory: Path,
+        target_size: int,
     ) -> ObjectCatalogue:
         """Collect the catalogue and write new objects to packs.
 
@@ -102,8 +191,7 @@ class SnapshotService:
                     yield obj, body
 
         missing = iter_missing_objects()
-        pack_directory = lock.require_held_for(self._repository.packs_directory)
-        destinations = self._pack_destinations(pack_directory)
+        destinations = self._pack_destinations(lock.require_held_for(pack_directory))
         while (first := next(missing, None)) is not None:
             pack_id, path = next(destinations)
             if pack_id >= 2**64:
@@ -113,7 +201,7 @@ class SnapshotService:
             def record_location(object_id: ObjectId, offset: int, length: int) -> None:
                 index.put(object_id, ObjectLocation(pack_id, offset, length))
 
-            Pack.write_to(path, chain((first,), missing), self._target_size, on_stored=record_location)
+            Pack.write_to(path, chain((first,), missing), target_size, on_stored=record_location)
 
         return ObjectCatalogue(frozenset(object_ids))
 

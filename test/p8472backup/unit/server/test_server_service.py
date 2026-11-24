@@ -5,7 +5,7 @@ from uuid import UUID
 import pytest
 
 from p8472backup.common.error import InconsistentStateError
-from p8472backup.server.repository_service import RepositoryService
+from p8472backup.server.repository_admin_service import RepositoryAdminService
 from p8472backup.server.server_service import ServerService
 from p8472backup.storage.file.index import LocationIndex, ObjectLocation
 from p8472backup.storage.file.lock import RepositoryLock
@@ -25,28 +25,37 @@ def test_init_repository_registers_sets_and_prepares_each_key_domain(tmp_path: P
     repository = service.init_repository(_CLIENT_ID, backup_sets, mode="push")
     path = tmp_path / str(_CLIENT_ID)
 
-    assert repository == RepositoryService.open_repository(path, _FIRST_SET)
     assert repository.mode == "push"
-    assert RepositoryService.find_by_client_id(tmp_path, _CLIENT_ID) == repository
+    assert RepositoryAdminService.find_by_client_id(tmp_path, _CLIENT_ID) == repository
+    assert repository.backup_sets.keys() == backup_sets.keys()
+    assert not repository.snapshots
+    assert json.loads((path / "repository.json").read_text()) == {
+        "version": 1,
+        "client_id": str(_CLIENT_ID),
+        "mode": "push",
+        "backup_sets": {str(set_id): str(key_id) for set_id, key_id in backup_sets.items()},
+    }
     assert json.loads((path / "snapshot-registry.json").read_text()) == {"version": 1, "snapshots": {}}
     for set_id, key_id in backup_sets.items():
-        repo = RepositoryService.open_repository(path, set_id)
-        assert repo.client_id == _CLIENT_ID
-        assert repo.mode == "push"
-        assert repo.snapshots_directory == path / "snapshots" / str(set_id)
-        assert repo.snapshots_directory.is_dir()
-        assert repo.packs_directory == path / "data" / "packs" / str(key_id)
-        assert repo.packs_directory.is_dir()
-        assert repo.index_file == path / "data" / "index" / str(key_id)
+        backup_set = repository.get_backup_set(set_id)
+        assert backup_set.key_id == key_id
+        snapshots_directory = repository.snapshots_root / str(set_id)
+        packs_directory = repository.packs_root / str(key_id)
+        index_file = repository.index_directory / str(key_id)
+        assert snapshots_directory == path / "snapshots" / str(set_id)
+        assert snapshots_directory.is_dir()
+        assert packs_directory == path / "data" / "packs" / str(key_id)
+        assert packs_directory.is_dir()
+        assert index_file == path / "data" / "index" / str(key_id)
         with RepositoryLock(path) as lock:
-            assert LocationIndex.load_from(repo.index_file, lock).get(bytes(32)) is None
+            assert LocationIndex.load_from(index_file, lock).get(bytes(32)) is None
     assert {file.name for file in (path / "data" / "index").iterdir()} == {str(_KEY_ID), str(_OTHER_KEY_ID)}
 
 
 def test_init_repository_keeps_existing_repositories_and_scopes_paths_by_client(tmp_path: Path) -> None:
     service = ServerService(tmp_path)
     service.init_repository(_CLIENT_ID, {_FIRST_SET: _KEY_ID})
-    first = RepositoryService.open_repository(tmp_path / str(_CLIENT_ID), _FIRST_SET)
+    first = RepositoryAdminService.find_by_client_id(tmp_path, _CLIENT_ID)
     metadata_path = first.path / "repository.json"
     original_metadata = metadata_path.read_bytes()
 
@@ -55,9 +64,9 @@ def test_init_repository_keeps_existing_repositories_and_scopes_paths_by_client(
 
     other_client = UUID(int=7)
     service.init_repository(other_client, {_FIRST_SET: _OTHER_KEY_ID})
-    second = RepositoryService.open_repository(tmp_path / str(other_client), _FIRST_SET)
+    second = RepositoryAdminService.find_by_client_id(tmp_path, other_client)
     assert second.path == tmp_path / str(other_client)
-    assert second.key_id == _OTHER_KEY_ID
+    assert second.get_backup_set(_FIRST_SET).key_id == _OTHER_KEY_ID
     assert first.mode == "pull"
     assert metadata_path.read_bytes() == original_metadata
 
@@ -72,7 +81,7 @@ def test_init_repository_requires_a_backup_set_before_creating_anything(tmp_path
 def test_init_repository_rejects_invalid_set_ids_before_creating_anything(tmp_path: Path) -> None:
     path = tmp_path / str(_CLIENT_ID)
     with pytest.raises(ValueError, match="IDs must be UUIDs"):
-        RepositoryService.init_repository_with_sets(path, _CLIENT_ID, ((_FIRST_SET, _KEY_ID), ("invalid", _KEY_ID)))
+        RepositoryAdminService().init_repository(path, _CLIENT_ID, ((_FIRST_SET, _KEY_ID), ("invalid", _KEY_ID)))
 
     assert not path.exists()
 
@@ -100,29 +109,31 @@ def test_add_backup_set_with_shared_and_new_key_domains(tmp_path: Path) -> None:
     service = ServerService(tmp_path)
     service.init_repository(_CLIENT_ID, {_FIRST_SET: _KEY_ID}, mode="push")
     path = tmp_path / str(_CLIENT_ID)
-    first = RepositoryService.open_repository(path, _FIRST_SET)
+    repository = RepositoryAdminService.find_by_client_id(tmp_path, _CLIENT_ID)
+    index_file = repository.index_directory / str(_KEY_ID)
     registry = (path / "snapshot-registry.json").read_bytes()
-    marker = first.packs_directory / "1.pack"
+    marker = repository.packs_root / str(_KEY_ID) / "1.pack"
     marker.write_bytes(b"existing")
     with RepositoryLock(path) as lock:
-        index = LocationIndex.load_from(first.index_file, lock)
+        index = LocationIndex.load_from(index_file, lock)
         index.put(b"o" * 32, ObjectLocation(pack_id=1, offset=0, length=8))
-        index.save_to(first.index_file, lock)
-    checkpoint = first.index_file.read_bytes()
+        index.save_to(index_file, lock)
+    checkpoint = index_file.read_bytes()
 
     service.add_backup_set(_CLIENT_ID, _SECOND_SET, _KEY_ID)
     service.add_backup_set(_CLIENT_ID, _THIRD_SET, _OTHER_KEY_ID)
 
-    shared = RepositoryService.open_repository(path, _SECOND_SET)
-    independent = RepositoryService.open_repository(path, _THIRD_SET)
-    assert shared.snapshots_directory.is_dir()
-    assert shared.index_file.read_bytes() == checkpoint
+    reopened = RepositoryAdminService.find_by_client_id(tmp_path, _CLIENT_ID)
+    assert reopened.get_backup_set(_SECOND_SET).key_id == _KEY_ID
+    assert reopened.get_backup_set(_THIRD_SET).key_id == _OTHER_KEY_ID
+    assert (reopened.snapshots_root / str(_SECOND_SET)).is_dir()
+    assert index_file.read_bytes() == checkpoint
     assert marker.read_bytes() == b"existing"
-    assert independent.snapshots_directory.is_dir()
-    assert independent.packs_directory.is_dir()
-    assert independent.mode == "push"
+    assert (reopened.snapshots_root / str(_THIRD_SET)).is_dir()
+    assert (reopened.packs_root / str(_OTHER_KEY_ID)).is_dir()
+    assert reopened.mode == "push"
     with RepositoryLock(path) as lock:
-        assert LocationIndex.load_from(independent.index_file, lock).get(bytes(32)) is None
+        assert LocationIndex.load_from(reopened.index_directory / str(_OTHER_KEY_ID), lock).get(bytes(32)) is None
     assert (path / "snapshot-registry.json").read_bytes() == registry
 
     with pytest.raises(FileExistsError, match="Backup set already exists"):
@@ -131,7 +142,7 @@ def test_add_backup_set_with_shared_and_new_key_domains(tmp_path: Path) -> None:
 
 def test_add_backup_set_checks_client_identity(tmp_path: Path) -> None:
     service = ServerService(tmp_path)
-    repository = service.init_repository(_CLIENT_ID, {_FIRST_SET: _KEY_ID})
+    service.init_repository(_CLIENT_ID, {_FIRST_SET: _KEY_ID})
     path = tmp_path / str(_CLIENT_ID)
     metadata_path = path / "repository.json"
     metadata = json.loads(metadata_path.read_text())
@@ -139,30 +150,28 @@ def test_add_backup_set_checks_client_identity(tmp_path: Path) -> None:
     metadata_path.write_text(json.dumps(metadata))
     with pytest.raises(ValueError, match="client ID does not match"):
         service.add_backup_set(_CLIENT_ID, _SECOND_SET, _KEY_ID)
-    with pytest.raises(ValueError, match="client ID does not match"):
-        RepositoryService().add_backup_set(repository, _SECOND_SET, _KEY_ID)
     assert not (path / "snapshots" / str(_SECOND_SET)).exists()
 
 
 def test_find_by_client_id_requires_initialized_repository(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError, match="Backup repository not found for client"):
-        RepositoryService.find_by_client_id(tmp_path, _CLIENT_ID)
+        RepositoryAdminService.find_by_client_id(tmp_path, _CLIENT_ID)
 
     (tmp_path / str(_CLIENT_ID)).mkdir()
     with pytest.raises(InconsistentStateError, match="Repository metadata is missing"):
-        RepositoryService.find_by_client_id(tmp_path, _CLIENT_ID)
+        RepositoryAdminService.find_by_client_id(tmp_path, _CLIENT_ID)
 
 
 def test_add_backup_set_rejects_invalid_ids(tmp_path: Path) -> None:
     service = ServerService(tmp_path)
     service.init_repository(_CLIENT_ID, {_FIRST_SET: _KEY_ID})
-    repository = RepositoryService.find_by_client_id(tmp_path, _CLIENT_ID)
-    repository_service = RepositoryService()
-    with pytest.raises(ValueError, match="IDs must be UUIDs"):
-        repository_service.add_backup_set(repository, "invalid", _KEY_ID)
-    with pytest.raises(ValueError, match="IDs must be UUIDs"):
-        repository_service.add_backup_set(repository, _SECOND_SET, "invalid")
-    assert not (repository.path / "snapshots" / str(_SECOND_SET)).exists()
+    repository_admin_service = RepositoryAdminService()
+    with repository_admin_service.locked_repository(tmp_path, _CLIENT_ID) as (repository, lock):
+        with pytest.raises(ValueError, match="IDs must be UUIDs"):
+            repository_admin_service.add_backup_set(repository, "invalid", _KEY_ID, lock)
+        with pytest.raises(ValueError, match="IDs must be UUIDs"):
+            repository_admin_service.add_backup_set(repository, _SECOND_SET, "invalid", lock)
+    assert not (tmp_path / str(_CLIENT_ID) / "snapshots" / str(_SECOND_SET)).exists()
 
 
 def test_add_backup_set_detects_interrupted_registration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -181,15 +190,15 @@ def test_add_backup_set_detects_interrupted_registration(tmp_path: Path, monkeyp
     with pytest.raises(InconsistentStateError, match="previous registration may have been interrupted"):
         service.add_backup_set(_CLIENT_ID, _SECOND_SET, _OTHER_KEY_ID)
     assert (path / "repository.json").read_bytes() == metadata
-    assert RepositoryService.open_repository(path, _FIRST_SET).key_id == _KEY_ID
+    assert RepositoryAdminService.find_by_client_id(tmp_path, _CLIENT_ID).get_backup_set(_FIRST_SET).key_id == _KEY_ID
 
 
 def test_add_backup_set_rejects_incomplete_shared_key_domain(tmp_path: Path) -> None:
     service = ServerService(tmp_path)
     service.init_repository(_CLIENT_ID, {_FIRST_SET: _KEY_ID})
     path = tmp_path / str(_CLIENT_ID)
-    repository = RepositoryService.open_repository(path, _FIRST_SET)
-    repository.index_file.unlink()
+    repository = RepositoryAdminService.find_by_client_id(tmp_path, _CLIENT_ID)
+    (repository.index_directory / str(_KEY_ID)).unlink()
     with pytest.raises(InconsistentStateError, match="key domain storage is incomplete"):
         service.add_backup_set(_CLIENT_ID, _SECOND_SET, _KEY_ID)
     assert not (path / "snapshots" / str(_SECOND_SET)).exists()

@@ -1,6 +1,6 @@
 # 8472backup — Snapshots, Commit, and Retention
 
-Specification version: 0.63 — Register backup sets in an existing repository, 2026-11-24
+Specification version: 0.64 — Model repositories, backup sets, and snapshots, 2026-11-24
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 
@@ -10,7 +10,7 @@ requirements and agreed architectural direction; early design phase. No producti
 
 Each completed snapshot MUST have its own stable identity and an encrypted root object describing how to reach its complete recoverable file selection. The server generates the snapshot UUID with `uuid4()` for every new snapshot.
 
-The immutable `Snapshot` dataclass in `server/snapshot.py` contains `snapshot_id` as a `UUID`, `root_id` as `ObjectId`, `committed_at` and `protected_until` as UTC `datetime` values, an `object_catalog` reference, and `version`, initially 1. `ObjectCatalogue` contains a `frozenset` of object IDs. The `Repository` supplies the client and backup-set IDs when the snapshot record is saved or loaded. Section 11 defines the persistent representation.
+The immutable `Snapshot` dataclass in `server/snapshot.py` contains `snapshot_id` and `backup_set_id` as UUIDs, `root_id` as `ObjectId`, `committed_at` and `protected_until` as UTC `datetime` values, an `object_catalog` reference, and `version`, initially 1. `ObjectCatalogue` contains a `frozenset` of object IDs. `SnapshotService` uses the repository client ID and the selected backup-set ID when saving or loading a record. Section 11 defines the persistent representation.
 
 Snapshot annotations use the shared `ObjectId` alias from `archive/objects.py` for the root ID and catalogue members.
 
@@ -138,21 +138,23 @@ The façade derives the repository path as `<storage_root>/<client_id>` from the
   data/index/<key-id>
 ```
 
-The repository object carries the host's backup `mode`, which defaults to `pull`. `Repository.set_mode()` changes it in memory. `RepositoryService.set_mode(path, mode)` persists the selected mode for the entire repository under its lock. It writes and syncs a temporary file, atomically replaces the metadata file, and syncs the repository directory. Section 13.1 defines how host mode changes are communicated for scheduling.
+The repository object carries the host's backup `mode`, which defaults to `pull`. `Repository.set_mode()` changes it in memory. `RepositoryAdminService.set_mode(repository, mode, lock)` persists the mode for the entire repository. It takes the verified `Repository` and held lock from `locked_repository()`. It writes and syncs a temporary file, atomically replaces the metadata file, and syncs the repository directory. Section 13.1 defines how host mode changes are communicated for scheduling.
 
 The client initiates repository setup in both modes. The server requires at least one valid backup set and registers all accepted sets as one initialization. Reserve the new path exclusively, prepare storage for the accepted sets and their key domains, and initialize an empty snapshot register. Publish `repository.json` after these dependencies are durable. If the repository directory already exists and `repository.json` is missing, report that initialization may have been interrupted. Propagate initialization errors to the caller and preserve any existing or partially created repository files. The backup server administrator handles inspection and cleanup before retrying.
 
 `repository.json` in the repository root is UTF-8 JSON and contains both repository and backup-set metadata. Repository metadata includes the client UUID and mode. Set metadata is keyed by set UUID and includes its registered key-domain ID and the operational fields needed by the server. The façade must check the stored client UUID against the verified identity and resolve the key domain from the registered set. The exact schema for the pull SSH target, set names, scheduling, and retention remains OPEN.
 
-`ServerService.init_repository()` takes the verified client UUID, the initial set-to-key-domain mapping, and the mode. After registering all supplied sets, it returns a `Repository` scoped to the first supplied set. The repository code uses the layout above. The development implementation stores the direct UUID mapping in `repository.json` version 1 and initializes `snapshot-registry.json` with `version` set to `1` and an empty `snapshots` object. The final metadata schemas remain OPEN.
+`Repository` represents the whole client repository. It holds the path, client UUID, mode, and all registered `BackupSet` records by set UUID. Each `BackupSet` holds its set UUID and key-domain UUID. `Repository.snapshots` is the immutable set of published `Snapshot` objects as of the lookup. `RepositoryAdminService` reads and writes the repository and backup-set metadata using this model. It obtains the snapshots through `SnapshotService`.
 
-`ServerService.add_backup_set()` takes the verified client UUID, backup-set UUID, and key-domain UUID. The façade looks up the repository by client UUID and checks the stored identity under the repository lock. The lookup returns a `Repository` scoped to the first registered set. The repository service takes that object and the two IDs for the new set. Under the repository lock it rechecks the client identity, rejects an already registered set, creates the set's snapshot directory, and prepares an empty index and pack directory for a new key domain. A registered key domain reuses its existing index and packs. After the new storage is durable, the server registers the set in `repository.json`. Existing unregistered storage is reported as an inconsistent state for the backup server administrator to inspect. The repository mode and snapshot register remain unchanged.
+`ServerService.init_repository()` takes the verified client UUID, the initial set-to-key-domain mapping, and the mode. It returns the repository with all its initial sets and an empty snapshot collection. The development implementation stores the direct UUID mapping in `repository.json` version 1 and initializes `snapshot-registry.json` with `version` set to `1` and an empty `snapshots` object. The final metadata schemas remain OPEN.
+
+`ServerService.add_backup_set()` opens the repository through `RepositoryAdminService.locked_repository()` using the verified client UUID. This context acquires the repository lock, reads the current metadata, and checks the stored client identity. The façade passes the resulting `Repository` and the held lock to `RepositoryAdminService.add_backup_set()` along with the new set and key-domain UUIDs. The service rejects an already registered set, creates the set's snapshot directory, and prepares an empty index and pack directory for a new key domain. A registered key domain reuses its existing index and packs. After the new storage is durable, the service updates the repo's set mapping in `repository.json`. Existing unregistered storage is reported as an inconsistent state for the backup server administrator to inspect.
 
 ### Local snapshot record and commit
 
-`server.snapshot_service.SnapshotService` accepts an initialized `Repository` for the authorized scope. It uses the repository's paths for the index, packs, and snapshot records.
+`server.snapshot_service.SnapshotService` is stateless. Its create and read operations accept a `Repository` and an explicit backup-set UUID. The service uses the selected set's key domain for index and pack access. It owns snapshot reads, writes, and listing.
 
-The current development implementation of `create_snapshot()` acquires the exclusive repository lock before reading the input and validates the first record as the root. The switch to final-root ordering and removal of the optional `snapshot_id` parameter are pending. The service stores missing objects and saves the index, assigns the UTC commit time, and calculates the protection deadline using the configured minimum duration, which defaults to seven days. `get_snapshot(snapshot_id)` loads the committed record under the repository lock and verifies its identity and scope.
+The current development implementation of `create_snapshot()` acquires the exclusive repository lock before reading the input and validates the first record as the root. The switch to final-root ordering and removal of the optional `snapshot_id` parameter are pending. The service stores missing objects and saves the index, assigns the UTC commit time, and calculates the protection deadline using the configured minimum duration, which defaults to seven days. `get_snapshot()` loads the committed record under the repository lock and verifies its identity and scope.
 
 The agreed format stores two server-owned files in the backup set's snapshot directory. Both are stored without compression or encryption.
 
@@ -165,7 +167,7 @@ On restore, decode the JSON root ID back into its original 32 bytes. IDs read fr
 
 `snapshot-registry.json` lives at the repository root and records the published snapshot IDs and their backup sets. Initialize it explicitly for a new repository. Update it atomically and durably under the repository lock as the last step of commit. During prune, check retention and protection, then durably remove the eligible entry from the register before removing its files. A crash between the durable writes can leave unregistered files for later recovery or cleanup. Treat a missing or invalid register in an initialized repository as an error.
 
-The current `Snapshot.save_to()` and `Snapshot.load_from()` use a single `.snapshot` development file with a 106-byte binary header followed by the membership IDs. The JSON, binary catalogue, and register described above are the agreed next design.
+The current `SnapshotService` uses a single `.snapshot` development file with a 106-byte binary header followed by the membership IDs. Its listing reads the published `.snapshot` records from all registered set directories under the repository lock. The JSON, binary catalogue, and authoritative register described above are the agreed next design.
 
 OPEN: exact JSON schemas, catalogue checksum encoding, registry integrity and recovery, handling existing development records, transport and authenticated admission, retry acknowledgement, data integrity checks for opaque ciphertext, and corruption recovery.
 
@@ -233,7 +235,7 @@ The server MUST enforce protection at every application-level deletion path, not
 
 `remove_backup_set` marks the backup set as `removed`. `remove_repository` marks the repository as `removed`, which applies to all its sets. Marking a scope stops new backups within it and preserves access to retained snapshots.
 
-The asynchronous cleanup job checks retired scopes during idle periods. It calls the internal `RepositoryService.delete_backup_set()` or `RepositoryService.delete()` for final deletion. Under the affected repository's lock, verify the `removed` state, snapshot retention and effective protection, and that active operations no longer require the scope. Delete a set's records and files once all of its snapshots are eligible. The repository's compaction rules govern reclamation of its objects in packs, including objects shared with retained snapshots. Delete the entire repository once all its snapshots are eligible and its data is no longer in use.
+The asynchronous cleanup job checks retired scopes during idle periods. It calls the internal `RepositoryAdminService.delete_backup_set()` or `RepositoryAdminService.delete()` for final deletion. Under the affected repository's lock, verify the `removed` state, snapshot retention and effective protection, and that active operations no longer require the scope. Delete a set's records and files once all of its snapshots are eligible. The repository's compaction rules govern reclamation of its objects in packs, including objects shared with retained snapshots. Delete the entire repository once all its snapshots are eligible and its data is no longer in use.
 
 OPEN: resolve how calendar retention expires after retirement, when no new snapshots can fill newer periods. Handling active jobs during retirement, removal permissions, recovery after an interrupted deletion, and any explicit administrator override remain open.
 
