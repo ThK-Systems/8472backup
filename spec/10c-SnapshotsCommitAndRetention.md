@@ -1,6 +1,6 @@
 # 8472backup — Snapshots, Commit, and Retention
 
-Specification version: 0.65 — Retire backup sets and preserve protected snapshots, 2026-11-24
+Specification version: 0.66 — Pass verified backup sets and repository locks to services, 2026-11-24
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 
@@ -154,7 +154,7 @@ The client initiates repository setup in both modes. The server requires at leas
 
 `server.snapshot_service.SnapshotService` is stateless. Its create and read operations accept a `Repository` and an explicit backup-set UUID. The service uses the selected set's key domain for index and pack access. It owns snapshot reads, writes, and listing.
 
-The current development implementation of `create_snapshot()` acquires the exclusive repository lock, checks the current state of the set in the repository metadata, and rejects a deleted set before reading the input. It validates the first record as the root. The switch to final-root ordering and removal of the optional `snapshot_id` parameter are pending. The service stores missing objects and saves the index, assigns the UTC commit time, and calculates the protection deadline using the configured minimum duration, which defaults to seven days. `get_snapshot()` loads the committed record under the repository lock and verifies its identity and scope.
+The caller passes `create_snapshot()` the repository and exclusive lock from `RepositoryAdminService.locked_repository()`. The service uses that repository's set state to reject deleted sets before reading the input. It validates the first record as the root. The switch to final-root ordering and removal of the optional `snapshot_id` parameter are pending. The service stores missing objects and saves the index, assigns the UTC commit time, and calculates the protection deadline using the configured minimum duration, which defaults to seven days. `get_snapshot()` loads the committed record under the repository lock and verifies its identity and scope.
 
 The agreed format stores two server-owned files in the backup set's snapshot directory. Both are stored without compression or encryption.
 
@@ -233,7 +233,7 @@ Prune removes only the eligible snapshot's register entry, JSON, and catalogue i
 
 The server MUST enforce protection at every application-level deletion path, not merely during a scheduled prune job. No ordinary client or maintenance API may bypass it. A host administrator with direct filesystem control remains outside this guarantee.
 
-`ServerService.remove_backup_set()` opens the verified client's repository under its exclusive lock. `RepositoryAdminService` durably sets `deleted` to true, blocking new backups in that set. Under the same lock, `SnapshotService` validates the set's snapshot records and removes those strictly beyond their effective protection deadline. Calendar retention applies to normal prune. Set removal applies the protection rule to every snapshot in the set. Protected snapshots remain available for recovery.
+`ServerService.remove_backup_set()` opens the verified client's repository under its exclusive lock and resolves the requested `BackupSet`. `RepositoryAdminService` durably sets `deleted` to true, blocking new backups in that set. Under the same lock, `SnapshotService` validates the deleted set's snapshot records and removes those strictly beyond their effective protection deadline. Calendar retention applies to normal prune. Set removal applies the protection rule to every snapshot in the set. Protected snapshots remain available for recovery.
 
 The local implementation uses the server-side protection duration supplied at façade construction, with a seven-day default. It deletes the eligible published `.snapshot` files and syncs the set directory. Repeating the operation on a deleted set can remove snapshots whose protection has since expired. If removal fails after persisting the flag, the set stays deleted and the caller can retry. The index and packs remain available for restore and subsequent compaction.
 

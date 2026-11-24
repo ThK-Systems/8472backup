@@ -1,6 +1,6 @@
 # 8472backup — Future Work and References
 
-Specification version: 0.65 — Retire backup sets and preserve protected snapshots, 2026-11-24
+Specification version: 0.66 — Pass verified backup sets and repository locks to services, 2026-11-24
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 

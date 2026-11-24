@@ -1,6 +1,6 @@
 # 8472backup — Project Specification for Codex
 
-Version: 0.65 — Retire backup sets and preserve protected snapshots, 2026-11-24
+Version: 0.66 — Pass verified backup sets and repository locks to services, 2026-11-24
 
 Status: requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 
