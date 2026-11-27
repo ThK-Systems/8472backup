@@ -1,4 +1,5 @@
 import gc
+import json
 import os
 import signal
 from collections.abc import Iterator
@@ -18,6 +19,7 @@ from p8472backup.archive.datacontent import COMPRESSION_NONE, DataContent
 from p8472backup.archive.metacontent import MetaContent
 from p8472backup.archive.objects import OBJECT_ID_SIZE, TYPE_DATA, TYPE_METADATA, TYPE_SNAPSHOT, Object, ObjectId
 from p8472backup.archive.snapshotrootcontent import SnapshotRootContent
+from p8472backup.common.error import InconsistentStateError
 from p8472backup.server import trusted_time
 from p8472backup.server.repository import Repository
 from p8472backup.server.repository_admin_service import RepositoryAdminService
@@ -160,6 +162,8 @@ def test_restore_keeps_the_selected_index_and_repository_lock_for_the_context(ba
 
     gc.collect()
     assert index_ref() is None
+    with pytest.raises(RuntimeError, match="Snapshot reader is closed"):
+        reader.contains_object(_ROOT.object_id)
     with RepositoryLock(repository.path) as lock:
         lock.require_held()
 
@@ -191,6 +195,92 @@ def test_restore_releases_the_repository_lock_after_an_error(backup_repository: 
 
     with RepositoryLock(repository.path) as lock:
         lock.require_held()
+
+
+@pytest.mark.parametrize("separate_sets", (False, True), ids=("same-set", "shared-key-domain"))
+def test_restore_marks_only_the_opened_snapshots_objects(backup_repository: tuple[ServerFacade, Repository], separate_sets: bool) -> None:
+    facade, _ = backup_repository
+    second_set = _SET_ID
+    if separate_sets:
+        second_set = _OTHER_SET_ID
+        facade.add_backup_set(_CLIENT_ID, second_set, _KEY_ID)
+
+    first_records = [_record(TYPE_DATA, bytes((number,))) for number in range(17)]
+    first_records.append(_record(TYPE_SNAPSHOT, b"first snapshot"))
+    first = facade.backup(_CLIENT_ID, _SET_ID, iter(first_records), prune="")
+
+    second_records = [_record(TYPE_DATA, bytes((number,))) for number in (0, 7, 8, 15, 16, 17, 18)]
+    second_records.append(_record(TYPE_SNAPSHOT, b"second snapshot"))
+    second = facade.backup(_CLIENT_ID, second_set, iter(second_records), prune="")
+
+    first_ids = {obj.object_id for obj, _ in first_records}
+    second_ids = {obj.object_id for obj, _ in second_records}
+    indexed_ids = first_ids | second_ids
+    for snapshot, expected_ids in ((first, first_ids), (second, second_ids)):
+        with facade.restore(_CLIENT_ID, snapshot.backup_set_id, snapshot.snapshot_id) as reader:
+            assert reader.contains_object(reader.root_id)
+            assert {object_id for object_id in indexed_ids if reader.contains_object(object_id)} == expected_ids
+            assert not reader.contains_object(bytes(OBJECT_ID_SIZE))
+
+
+@pytest.mark.parametrize("length", (OBJECT_ID_SIZE - 1, OBJECT_ID_SIZE + 1), ids=("short", "long"))
+def test_restore_rejects_malformed_object_ids(backup_repository: tuple[ServerFacade, Repository], length: int) -> None:
+    facade, _ = backup_repository
+    snapshot = facade.backup(_CLIENT_ID, _SET_ID, iter(((_ROOT, BytesIO(_ROOT_BODY)),)), prune="")
+
+    with facade.restore(_CLIENT_ID, _SET_ID, snapshot.snapshot_id) as reader:
+        with pytest.raises(ValueError, match="Object ID must contain exactly 32 bytes"):
+            reader.contains_object(bytes(length))
+
+
+@pytest.mark.parametrize(
+    ("catalogue", "message"),
+    (
+        pytest.param(_ROOT.object_id + _DATA.object_id[:-1], "truncated object ID", id="partial-id"),
+        pytest.param(b"", "snapshot root is missing", id="empty"),
+        pytest.param(_DATA.object_id, "snapshot root is missing", id="missing-root"),
+        pytest.param(_ROOT.object_id * 2 + _DATA.object_id, "duplicate entries: 1", id="duplicate-root"),
+        pytest.param(_ROOT.object_id + _DATA.object_id * 2, "duplicate entries: 1", id="duplicate-data"),
+        pytest.param(_ROOT.object_id + bytes(OBJECT_ID_SIZE), "missing index references: 1", id="unindexed-id"),
+        pytest.param(_ROOT.object_id * 2 + bytes(OBJECT_ID_SIZE), "missing index references: 1, duplicate entries: 1", id="multiple-errors"),
+    ),
+)
+def test_restore_rejects_an_invalid_catalogue_with_a_matching_checksum(backup_repository: tuple[ServerFacade, Repository], catalogue: bytes, message: str) -> None:
+    facade, repository = backup_repository
+    snapshot = facade.backup(_CLIENT_ID, _SET_ID, iter(((_DATA, BytesIO(b"d")), (_ROOT, BytesIO(_ROOT_BODY)))), prune="")
+    path = repository.snapshot_file(_SET_ID, snapshot.snapshot_id)
+    catalogue_path = path.with_suffix(".catalog")
+    catalogue_path.write_bytes(catalogue)
+    metadata: dict[str, object] = json.loads(path.read_text(encoding="utf-8"))
+    metadata["catalogue_sha256"] = sha256(catalogue).hexdigest()
+    path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    with pytest.raises(InconsistentStateError, match=message) as failure, facade.restore(_CLIENT_ID, _SET_ID, snapshot.snapshot_id):
+        pytest.fail("Restore opened an invalid catalogue")
+    assert str(failure.value).startswith(f"{catalogue_path.relative_to(repository.path)}:")
+    with RepositoryLock(repository.path) as lock:
+        lock.require_held()
+
+
+@pytest.mark.parametrize("missing", (False, True), ids=("checksum-mismatch", "missing-file"))
+def test_restore_validates_the_selected_catalogue(backup_repository: tuple[ServerFacade, Repository], missing: bool) -> None:
+    facade, repository = backup_repository
+    damaged = facade.backup(_CLIENT_ID, _SET_ID, iter(((_DATA, BytesIO(b"d")), (_ROOT, BytesIO(_ROOT_BODY)))), prune="")
+    intact = facade.backup(_CLIENT_ID, _SET_ID, iter(((_ROOT, BytesIO(_ROOT_BODY)),)), prune="")
+    path = repository.snapshot_file(_SET_ID, damaged.snapshot_id).with_suffix(".catalog")
+    if missing:
+        path.unlink()
+        message = r"\.catalog:"
+    else:
+        catalogue = path.read_bytes()
+        path.write_bytes(catalogue[OBJECT_ID_SIZE:] + catalogue[:OBJECT_ID_SIZE])
+        message = "checksum mismatch"
+
+    with pytest.raises(InconsistentStateError, match=message), facade.restore(_CLIENT_ID, _SET_ID, damaged.snapshot_id):
+        pytest.fail("Restore opened a missing or modified catalogue")
+    with facade.restore(_CLIENT_ID, _SET_ID, intact.snapshot_id) as reader:
+        assert reader.contains_object(_ROOT.object_id)
+        assert not reader.contains_object(_DATA.object_id)
 
 
 @pytest.mark.parametrize("root_is_indexed", (False, True))

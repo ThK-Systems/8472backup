@@ -55,19 +55,31 @@ class _SnapshotRegistry:
 
 @dataclass
 class SnapshotReader:
-    """Hold the metadata and location index for an opened snapshot."""
+    """Hold the metadata, location index, and catalogue for an opened snapshot."""
 
     _metadata: _SnapshotMetadata
     _index: LocationIndex | None
+    _catalogue_bits: bytearray
 
     @property
     def root_id(self) -> ObjectId:
         """Return the object ID where restoration starts."""
         return self._metadata.root_id
 
+    def contains_object(self, object_id: ObjectId) -> bool:
+        """Return whether the object belongs to the opened snapshot."""
+        if self._index is None:
+            raise RuntimeError("Snapshot reader is closed")
+        number = self._index.record_number(object_id)
+        if number is None:
+            return False
+        byte, bit = divmod(number, 8)
+        return bool(self._catalogue_bits[byte] & (1 << bit))
+
     def close(self) -> None:
-        """Release the in-memory index at the end of the restore."""
+        """Release the in-memory index and catalogue at the end of the restore."""
         self._index = None
+        self._catalogue_bits.clear()
 
 
 class SnapshotService:
@@ -244,12 +256,17 @@ class SnapshotService:
             return self._load_snapshot(repository, backup_set_id, snapshot_id, lock)
 
     def open_snapshot(self, repository: Repository, backup_set: BackupSet, snapshot_id: UUID, lock: RepositoryLock) -> SnapshotReader:
-        """Open a published snapshot and its index under the caller's repository lock."""
+        """Validate a published snapshot and load its catalogue under the caller's lock."""
         backup_set_id = backup_set.backup_set_id
         self._require_published_snapshot(repository, backup_set_id, snapshot_id, lock)
         metadata = self._read_snapshot_metadata(repository, backup_set_id, snapshot_id, lock)
         index = LocationIndex.load_from(repository.index_directory / str(backup_set.key_id), lock)
-        return SnapshotReader(metadata, index)
+        path = repository.snapshot_file(backup_set_id, snapshot_id)
+        try:
+            catalogue_bits = self._check_catalogue(path, lock, metadata, index)
+        except (OSError, ValueError) as error:
+            raise InconsistentStateError(self._check_file_error(repository, path.with_suffix(".catalog"), error)) from error
+        return SnapshotReader(metadata, index, catalogue_bits)
 
     def _require_published_snapshot(self, repository: Repository, backup_set_id: UUID, snapshot_id: UUID, lock: RepositoryLock) -> None:
         if self._read_registry(repository, lock).snapshots.get(snapshot_id) != backup_set_id:
@@ -340,7 +357,7 @@ class SnapshotService:
         detail = error.strerror if isinstance(error, OSError) and error.strerror else str(error)
         return f"{path.relative_to(repository.path)}: {detail}"
 
-    def _check_catalogue(self, path: Path, lock: RepositoryLock, metadata: _SnapshotMetadata, index: LocationIndex | None) -> None:
+    def _check_catalogue(self, path: Path, lock: RepositoryLock, metadata: _SnapshotMetadata, index: LocationIndex | None) -> bytearray:
         seen = bytearray((len(index) + 7) // 8) if index is not None else bytearray()
         missing = duplicates = 0
         for object_id in self._iter_catalogue_ids(path, lock, metadata):
@@ -357,6 +374,7 @@ class SnapshotService:
             seen[byte] |= mask
         if missing or duplicates:
             raise ValueError(f"Invalid snapshot object catalogue (missing index references: {missing}, duplicate entries: {duplicates})")
+        return seen
 
     def prune(self, repository: Repository, backup_set: BackupSet, lock: RepositoryLock, *, prune_rule: str, protection_duration: timedelta) -> tuple[UUID, ...]:
         """Apply the calendar policy to the published snapshots of one active set."""
