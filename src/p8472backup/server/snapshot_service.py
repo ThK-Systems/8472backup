@@ -46,6 +46,8 @@ class SnapshotService:
         if target_size <= 0:
             raise ValueError("Pack target size must be positive")
 
+        if repository.deleted:
+            raise ValueError(f"Repository is deleted: {repository.client_id}")
         backup_set = repository.get_backup_set(backup_set_id)
         if backup_set.deleted:
             raise ValueError(f"Backup set is deleted: {backup_set_id}")

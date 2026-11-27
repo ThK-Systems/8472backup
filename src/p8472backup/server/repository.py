@@ -30,6 +30,7 @@ class Repository:
     backup_sets: Mapping[UUID, BackupSet] = field(hash=False)
     mode: BackupMode = field(default="pull", compare=False)
     snapshots: frozenset[Snapshot] = field(default_factory=frozenset[Snapshot], hash=False)
+    deleted: bool = False
 
     def __post_init__(self) -> None:
         self.set_mode(self.mode)

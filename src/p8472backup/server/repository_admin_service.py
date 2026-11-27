@@ -19,7 +19,7 @@ from p8472backup.storage.file.lock import RepositoryLock
 
 
 _METADATA_NAME = "repository.json"
-_METADATA_VERSION = 2
+_METADATA_VERSION = 1
 _SNAPSHOT_REGISTRY_NAME = "snapshot-registry.json"
 _SNAPSHOT_REGISTRY_VERSION = 1
 _INTERRUPTED_BACKUP_SET_REGISTRATION = "A previous registration may have been interrupted."
@@ -91,6 +91,8 @@ class RepositoryAdminService:
             raise ValueError("Backup set and key domain IDs must be UUIDs")
 
         lock.require_held_for(repository.path / _METADATA_NAME)
+        if repository.deleted:
+            raise ValueError(f"Repository is deleted: {repository.client_id}")
         if backup_set_id in repository.backup_sets:
             raise FileExistsError("Backup set already exists.")
 
@@ -126,6 +128,20 @@ class RepositoryAdminService:
             self._write_metadata(repository, lock)
 
         SnapshotService().remove_unprotected_snapshots(repository, backup_set, lock, protection_duration=protection_duration)
+
+    def remove_repository(self, repository: Repository, lock: RepositoryLock, *, protection_duration: timedelta) -> None:
+        """Retire the repository and remove its unprotected snapshots."""
+        metadata_path = lock.require_held_for(repository.path / _METADATA_NAME)
+        if repository.deleted:
+            self._sync_directory(metadata_path.parent)
+        else:
+            backup_sets = {set_id: replace(backup_set, deleted=True) for set_id, backup_set in repository.backup_sets.items()}
+            repository = replace(repository, backup_sets=backup_sets, deleted=True)
+            self._write_metadata(repository, lock)
+
+        snapshots = SnapshotService()
+        for backup_set in repository.backup_sets.values():
+            snapshots.remove_unprotected_snapshots(repository, backup_set, lock, protection_duration=protection_duration)
 
     @staticmethod
     def _raise_missing_repository_metadata(error: FileNotFoundError) -> NoReturn:
@@ -173,7 +189,7 @@ class RepositoryAdminService:
         if not _is_json_object(metadata):
             raise ValueError("Unsupported repository metadata format")
         version = metadata.get("version")
-        if type(version) is not int or version not in (1, _METADATA_VERSION):
+        if type(version) is not int or version != _METADATA_VERSION:
             raise ValueError("Unsupported repository metadata format")
 
         stored_id = metadata.get("client_id")
@@ -186,26 +202,28 @@ class RepositoryAdminService:
         if not Repository.is_backup_mode(mode):
             raise ValueError(f"Unsupported backup mode: {mode!r}")
 
+        repository_deleted = metadata.get("deleted")
+        if not isinstance(repository_deleted, bool):
+            raise ValueError("Invalid repository deletion state")
+
         sets: dict[UUID, BackupSet] = {}
         for set_id, entry in backup_sets.items():
-            deleted: object
-            if version == 1:
-                key_id, deleted = entry, False
-            elif _is_json_object(entry):
-                key_id, deleted = entry.get("key_id"), entry.get("deleted")
-            else:
+            if not isinstance(set_id, str) or not _is_json_object(entry):
                 raise ValueError("Invalid repository backup set metadata")
-            if not isinstance(set_id, str) or not isinstance(key_id, str) or not isinstance(deleted, bool):
+            key_id, deleted = entry.get("key_id"), entry.get("deleted")
+            if not isinstance(key_id, str) or not isinstance(deleted, bool):
                 raise ValueError("Invalid repository backup set metadata")
             backup_set_id = UUID(set_id)
             if backup_set_id in sets:
                 raise ValueError(f"Duplicate backup set ID: {backup_set_id}")
             sets[backup_set_id] = BackupSet(backup_set_id, UUID(key_id), deleted=deleted)
-        return Repository(path, client_id, sets, mode=mode)
+        if repository_deleted and any(not backup_set.deleted for backup_set in sets.values()):
+            raise InconsistentStateError("Deleted repository contains active backup sets.")
+        return Repository(path, client_id, sets, mode=mode, deleted=repository_deleted)
 
     def _write_metadata(self, repository: Repository, lock: RepositoryLock) -> None:
         sets: dict[str, dict[str, str | bool]] = {str(backup_set.backup_set_id): {"key_id": str(backup_set.key_id), "deleted": backup_set.deleted} for backup_set in repository.backup_sets.values()}
-        self._write_json(repository.path / _METADATA_NAME, lock, {"version": _METADATA_VERSION, "client_id": str(repository.client_id), "mode": repository.mode, "backup_sets": sets})
+        self._write_json(repository.path / _METADATA_NAME, lock, {"version": _METADATA_VERSION, "client_id": str(repository.client_id), "mode": repository.mode, "deleted": repository.deleted, "backup_sets": sets})
 
     def _write_json(self, path: Path, lock: RepositoryLock, data: dict[str, object]) -> None:
         path = lock.require_held_for(path)
