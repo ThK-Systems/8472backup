@@ -1,6 +1,6 @@
 # 8472backup — Snapshots, Commit, and Retention
 
-Specification version: 0.68 — Retire client repositories, 2026-11-27
+Specification version: 0.69 — Set the backup mode per client, 2026-11-27
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 
@@ -138,7 +138,7 @@ The façade derives the repository path as `<storage_root>/<client_id>` from the
   data/index/<key-id>
 ```
 
-The repository object carries the host's backup `mode`, which defaults to `pull`. `Repository.set_mode()` changes it in memory. `RepositoryAdminService.set_mode(repository, mode, lock)` persists the mode for the entire repository. It takes the verified `Repository` and held lock from `locked_repository()`. It writes and syncs a temporary file, atomically replaces the metadata file, and syncs the repository directory. Section 13.1 defines how host mode changes are communicated for scheduling.
+The repository object carries the host's backup `mode`, which defaults to `pull`. `Repository.set_mode()` changes it in memory. `ServerService.set_mode(client_id, mode)` opens the verified client's repository under its lock and passes the repository and held lock to `RepositoryAdminService.set_mode()`. The admin service rejects mode changes for retired repositories. A change applies to all sets of the client. To persist a changed mode, the service writes and syncs a temporary file, atomically replaces the metadata file, and syncs the repository directory. If the requested mode is already set, the operation returns successfully without rewriting metadata. Section 13.1 defines how host mode changes will be communicated for scheduling.
 
 The client initiates repository setup in both modes. The server requires at least one valid backup set and registers all accepted sets as one initialization. Reserve the new path exclusively, prepare storage for the accepted sets and their key domains, and initialize an empty snapshot register. Publish `repository.json` after these dependencies are durable. If the repository directory already exists and `repository.json` is missing, report that initialization may have been interrupted. Propagate initialization errors to the caller and preserve any existing or partially created repository files. The backup server administrator handles inspection and cleanup before retrying.
 

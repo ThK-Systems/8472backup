@@ -15,7 +15,7 @@ Define the inputs, results, errors, and permissions for `init_repository`, `add_
 
 ## 2. Push, pull, and scheduling
 
-Route incoming push jobs and scheduled pull jobs through the same backup operation. The mode is already stored per client and defaults to pull. Implement pull scheduling and define how to record the SSH endpoint, retry failed jobs, and apply mode changes to queued and active jobs.
+Route incoming push jobs and scheduled pull jobs through the same backup operation. Local `set_mode()` persists the mode per client, with pull as the registration default. Connect mode changes to the pull scheduler. Define how to record the SSH endpoint, retry failed jobs, and apply mode changes to queued and active jobs.
 
 Enforce the configurable server-wide limit for concurrent backup sets, default 3. Queue pull jobs when full and return a wait response to push clients. Define queue ordering and cancellation.
 

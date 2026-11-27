@@ -1,6 +1,6 @@
 # 8472backup — Project Specification for Codex
 
-Version: 0.68 — Retire client repositories, 2026-11-27
+Version: 0.69 — Set the backup mode per client, 2026-11-27
 
 Status: requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 

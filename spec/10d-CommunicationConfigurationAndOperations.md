@@ -1,6 +1,6 @@
 # 8472backup — Communication, Configuration, and Operations
 
-Specification version: 0.68 — Retire client repositories, 2026-11-27
+Specification version: 0.69 — Set the backup mode per client, 2026-11-27
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 
@@ -16,7 +16,7 @@ In pull mode the server schedules the host's backup sets. When a scheduled pull 
 
 The server does not periodically pull or probe that host merely to discover a switch back. To return to pull, the operator changes the client configuration to `mode = "pull"` and proactively invokes a dedicated client command that informs the server over an authenticated connection. The server then adds the host back to its pull scheduling list. The exact command name and protocol are OPEN. Repeated requests should be safe, and failed requests must be reported so the operator can retry. Missing, invalid, or unreadable configuration must not silently be interpreted as a request to change mode. Mode is scheduling configuration, not an authorization boundary.
 
-The server service façade handles mode changes for a client. After persisting the new mode, it triggers reevaluation of that client's pull jobs. Admission checks the current mode before starting a new pull job.
+The local server service façade persists the requested mode for the whole client under the repository lock. When pull scheduling is connected, the façade will trigger reevaluation of that client's pull jobs after persistence and lock release. Admission checks the current mode before starting a new pull job.
 
 Section 11 defines the local server record for the backup mode. OPEN: mode acknowledgement, retry and reconciliation behaviour, and handling of already-running or overlapping operations. Detailed mode-switching workflows and commands will be designed later; switching always applies to the whole client.
 
