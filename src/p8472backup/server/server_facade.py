@@ -89,4 +89,5 @@ class ServerFacade:
     def version() -> str:
         """Return the running server's version string."""
         from p8472backup.server.main import VERSION
+
         return VERSION
