@@ -16,8 +16,8 @@ from p8472backup.storage.file.lock import RepositoryLock
 def measure(directory: Path, entries: int, repeats: int) -> dict[str, object]:
     expected = [entry_for(number) for number in (0, entries // 2, entries - 1)]
     missing, _ = entry_for(entries)
-    save_seconds = []
-    load_seconds = []
+    save_seconds: list[float] = []
+    load_seconds: list[float] = []
 
     with TemporaryDirectory(prefix="index-checkpoint-", dir=directory) as temporary:
         repository = Path(temporary)

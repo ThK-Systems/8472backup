@@ -10,6 +10,7 @@ from p8472backup.archive.datacontent import COMPRESSION_NONE, DataContent
 from p8472backup.archive.metacontent import MetaContent
 from p8472backup.archive.objects import HEADER_SIZE as OBJECT_HEADER_SIZE, TYPE_DATA, TYPE_METADATA, TYPE_SNAPSHOT, Object, ObjectId
 from p8472backup.archive.snapshotrootcontent import SnapshotRootContent
+from p8472backup.common.error import InconsistentStateError
 from p8472backup.server import trusted_time
 from p8472backup.server.repository import Repository
 from p8472backup.server.repository_admin_service import RepositoryAdminService
@@ -224,6 +225,33 @@ def test_snapshot_filter_needs_no_pack_when_all_objects_are_known(repository: Re
         snapshot = snapshot_service.create_snapshot(current, _BACKUP_SET_ID, iter(((obj, BytesIO(b"a")),)), obj.object_id, lock=lock)
     assert snapshot.object_catalog.object_ids == {obj.object_id}
     assert {path.name for path in (repository.packs_root / str(_KEY_DOMAIN_ID)).iterdir()} == {"1.pack"}
+
+
+def test_snapshot_rejects_a_root_indexed_as_a_data_object(repository: Repository, snapshot_service: SnapshotService) -> None:
+    root = Object(TYPE_SNAPSHOT, b"r" * 32, 1)
+    data = Object(TYPE_DATA, b"d" * 32, 1)
+    with RepositoryAdminService().locked_repository(repository.path.parent, _CLIENT_ID) as (current, lock):
+        committed = snapshot_service.create_snapshot(current, _BACKUP_SET_ID, iter(((root, BytesIO(b"r")), (data, BytesIO(b"d")))), root.object_id, lock=lock)
+        reused = Object(TYPE_SNAPSHOT, data.object_id, 1)
+        with pytest.raises(InconsistentStateError, match="Indexed snapshot root"):
+            snapshot_service.create_snapshot(current, _BACKUP_SET_ID, iter(((reused, BytesIO(b"d")),)), reused.object_id, lock=lock)
+        assert snapshot_service.list_snapshots(current, lock) == {committed}
+
+
+def test_snapshot_rejects_a_missing_indexed_pack_before_writing_new_packs(repository: Repository, snapshot_service: SnapshotService) -> None:
+    root = Object(TYPE_SNAPSHOT, b"r" * 32, 1)
+    data = Object(TYPE_DATA, b"d" * 32, 1)
+    with RepositoryAdminService().locked_repository(repository.path.parent, _CLIENT_ID) as (current, lock):
+        committed = snapshot_service.create_snapshot(current, _BACKUP_SET_ID, iter(((root, BytesIO(b"r")), (data, BytesIO(b"d")))), root.object_id, lock=lock)
+        pack = repository.packs_root / str(_KEY_DOMAIN_ID) / "1.pack"
+        pack.unlink()
+
+        new_root = Object(TYPE_SNAPSHOT, b"s" * 32, 1)
+        records = iter(((new_root, BytesIO(b"s")), (data, BytesIO(b"d"))))
+        with pytest.raises(InconsistentStateError, match=r"Indexed pack is missing: 1\.pack"):
+            snapshot_service.create_snapshot(current, _BACKUP_SET_ID, records, new_root.object_id, lock=lock, target_size=1)
+        assert snapshot_service.list_snapshots(current, lock) == {committed}
+        assert list(pack.parent.iterdir()) == []
 
 
 def test_incomplete_pack_adds_no_index_entries(repository: Repository, snapshot_service: SnapshotService) -> None:

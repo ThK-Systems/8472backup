@@ -12,6 +12,16 @@ _VALID_HEADER = bytes.fromhex("0100020000005800000008000000")
 
 
 class TestPack:
+    def test_rejects_a_body_stream_that_exceeds_the_requested_size(self, tmp_path: Path) -> None:
+        class OversizedRead(BytesIO):
+            def read(self, _size: int | None = -1, /) -> bytes:
+                return super().read()
+
+        obj = Object(TYPE_DATA, b"d" * 32, 1)
+        with pytest.raises(ValueError, match="Object body exceeds its declared length"):
+            Pack.write_to(tmp_path / "1.pack", iter(((obj, OversizedRead(b"ab")),)))
+        assert list(tmp_path.iterdir()) == []
+
     def test_header_matches_wire_format(self) -> None:
         pack = Pack(object_count=2, body_length=2 * (44 + 16 * 1024**3))
         assert pack.to_header() == _VALID_HEADER

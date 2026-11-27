@@ -10,6 +10,22 @@ from typing import TypeGuard
 from p8472backup.storage.file.lock import RepositoryLock
 
 
+def read_json(path: Path, lock: RepositoryLock) -> object:
+    """Read repository JSON, rejecting duplicate keys at any depth."""
+    with lock.require_held_for(path).open("r", encoding="utf-8") as source:
+        data: object = json.load(source, object_pairs_hook=_unique_members)
+    return data
+
+
+def _unique_members(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    members: dict[str, object] = {}
+    for key, value in pairs:
+        if key in members:
+            raise ValueError(f"Duplicate JSON key: {key!r}")
+        members[key] = value
+    return members
+
+
 def is_json_object(value: object) -> TypeGuard[Mapping[object, object]]:
     return isinstance(value, dict)
 

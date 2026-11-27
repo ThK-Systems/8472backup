@@ -156,6 +156,8 @@ The client initiates repository setup in both modes. The server requires at leas
 
 The caller passes `create_snapshot()` the repository and exclusive lock from `RepositoryAdminService.locked_repository()`. The service uses that repository's set state to reject deleted sets before reading the input. It validates the first record as the root. The switch to final-root ordering and removal of the optional `snapshot_id` parameter are pending. The service stores missing objects and saves the index, assigns the UTC commit time, and calculates the protection deadline using the configured minimum duration, which defaults to seven days. `get_snapshot()` loads the committed record under the repository lock and verifies its identity and scope.
 
+Before writing packs, the service checks that the key domain contains every pack named by the location index. For a reused snapshot root it validates the stored header, ID, and type. Before publication, the service syncs the index directory even when it reuses the existing checkpoint.
+
 `list_snapshots()` reads the published snapshot metadata and defers catalogue reads. The first access to `Snapshot.object_catalog` loads and verifies the catalogue under the same repository lock and caches it for the lifetime of the instance. Snapshot equality and hashing use its metadata fields. `find_by_client_id()` returns after releasing its lock. Use the returned metadata to select a snapshot and call `get_snapshot()` to load its catalogue under a new lock.
 
 The agreed format stores two server-owned files in the backup set's snapshot directory. Both are stored without compression or encryption.
@@ -233,7 +235,7 @@ Once a snapshot's protection period expires, client-specified retention may remo
 
 Use the hierarchical calendar selection from [retentions](https://github.com/tkn777/retentions/blob/master/retentions.py#L795-L919). The rule contains adjacent positive counts followed by case-sensitive unit codes. Each unit can occur once. Evaluate enabled units in the order `h` (hours), `d` (days), `w` (ISO weeks), `M` (months), `q` (calendar quarters), `W` (13-week blocks within the ISO week-year), and `y` (years). Use the server-assigned `committed_at` and UTC calendar boundaries. For each rule, keep the newest snapshot in each of the requested number of occupied periods, starting with the most recent eligible period. Break ties by snapshot UUID in descending order. A coarser rule considers only periods strictly before the period containing the oldest snapshot selected so far. Empty periods consume no slots. An empty rule keeps every published snapshot. Include protected snapshots in the calendar selection and apply the server protection override before removing any snapshot.
 
-Prune removes only the eligible snapshot's register entry, JSON, and catalogue in the order defined in chapter 11. Physical object reclamation remains the responsibility of asynchronous compaction.
+Before unpublishing an eligible snapshot, verify that each snapshot being retained in its set still has a catalogue file. A missing catalogue stops the deletion. Prune removes the eligible snapshot's register entry, JSON, and catalogue in the order defined in chapter 11. Physical object reclamation remains the responsibility of asynchronous compaction.
 
 The server MUST enforce protection at every application-level deletion path, not merely during a scheduled prune job. No ordinary client or maintenance API may bypass it. A host administrator with direct filesystem control remains outside this guarantee.
 

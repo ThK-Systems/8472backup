@@ -218,7 +218,17 @@ def test_cleanup_keeps_registered_catalogues_when_unlinking_temporary_names(init
     assert {path: path.read_bytes() for path in files} == files
 
 
-@pytest.mark.parametrize("contents", (None, b"{", b'{"version":2,"snapshots":{}}', b'{"version":1,"snapshots":[]}', b'{"version":1,"snapshots":{},"pending_deletions":42}'))
+@pytest.mark.parametrize(
+    "contents",
+    (
+        None,
+        b"{",
+        b'{"version":2,"snapshots":{}}',
+        b'{"version":1,"snapshots":[]}',
+        b'{"version":1,"snapshots":{},"pending_deletions":42}',
+        f'{{"version":1,"snapshots":{{"{_INTERRUPTED_ID}":"{_SET_ID}"}},"snapshots":{{}}}}'.encode(),
+    ),
+)
 def test_cleanup_refuses_to_delete_files_with_an_unusable_register(initialized_repository: tuple[ServerFacade, Repository], contents: bytes | None) -> None:
     facade, repository = initialized_repository
     register = repository.path / SNAPSHOT_REGISTRY_NAME
@@ -235,6 +245,24 @@ def test_cleanup_refuses_to_delete_files_with_an_unusable_register(initialized_r
     with pytest.raises(InconsistentStateError, match="snapshot register|Snapshot register"):
         facade.cleanup(_CLIENT_ID, _SET_ID)
     assert all(path.is_file() for path in (marker, snapshot_file, temporary))
+
+
+def test_backup_syncs_a_reused_index_before_publishing(initialized_repository: tuple[ServerFacade, Repository]) -> None:
+    facade, repository = initialized_repository
+    fsync = os.fsync
+
+    def reject_index_directory_sync(fd: int) -> None:
+        if Path(os.readlink(f"/proc/self/fd/{fd}")) == repository.index_directory:
+            raise OSError("Index directory sync failed")
+        fsync(fd)
+
+    with patch.object(os, "fsync", reject_index_directory_sync):
+        for set_id in (_SET_ID, _OTHER_SET_ID):
+            with pytest.raises(OSError, match="Index directory sync failed"):
+                _backup(facade, set_id)
+
+    assert json.loads((repository.path / SNAPSHOT_REGISTRY_NAME).read_bytes())["snapshots"] == {}
+    assert list((repository.packs_root / str(_KEY_ID)).glob("*.pack")) == [repository.packs_root / str(_KEY_ID) / "1.pack"]
 
 
 def test_cleanup_rejects_a_marker_for_a_snapshot_registered_to_another_set(initialized_repository: tuple[ServerFacade, Repository]) -> None:

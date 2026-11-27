@@ -148,7 +148,7 @@ class LocationIndexComparison:
 
     def queries_for(self, client: int, generator: random.Random, count: int) -> list[tuple[bytes, bytes | None]]:
         """Generate one bounded batch outside the timed lookup section."""
-        requests = []
+        requests: list[tuple[bytes, bytes | None]] = []
         for number in range(count):
             missing = number % 10 == 0
             index = generator.randrange(self.entries) + (self.entries if missing else 0)
@@ -256,24 +256,25 @@ class LocationIndexComparison:
             for client in range(self.clients, self.clients + self.mounts):
                 opened.append(open_index(client))
             # Load before starting workers so push clients really overlap.
-            active = [open_index(client) for client in range(self.clients if mode == "push" else 1)]
             if mode == "push":
-                opened.extend(active)
+                opened.extend(open_index(client) for client in range(self.clients))
             with ThreadPoolExecutor(max_workers=self.mounts + (self.clients if mode == "push" else 1)) as pool:
-                readers = [pool.submit(self.exercise, backend, client, opened[number], True, start) for number, client in enumerate(range(self.clients, self.clients + self.mounts))]
                 try:
+                    readers = [pool.submit(self.exercise, backend, client, opened[number], True, start) for number, client in enumerate(range(self.clients, self.clients + self.mounts))]
                     if mode == "push":
-                        backups = [pool.submit(self.exercise, backend, client, handle, False, start) for client, handle in enumerate(active)]
+                        backups = [pool.submit(self.exercise, backend, client, handle, False, start) for client, handle in enumerate(opened[self.mounts :])]
                         start.set()
                         results.extend(future.result() for future in backups)
                     else:
                         for client in range(self.clients):
-                            handle = active.pop() if client == 0 else open_index(client)
-                            future = pool.submit(self.exercise, backend, client, handle, False, start)
-                            start.set()
-                            results.append(future.result())
-                            if backend in ("lmdb", "plyvel", "sqlite3"):
-                                handle.close()
+                            handle = open_index(client)
+                            try:
+                                future = pool.submit(self.exercise, backend, client, handle, False, start)
+                                start.set()
+                                results.append(future.result())
+                            finally:
+                                if backend in ("lmdb", "plyvel", "sqlite3"):
+                                    handle.close()
                             del future, handle
                             gc.collect()
                 finally:
@@ -335,16 +336,20 @@ class LocationIndexComparison:
         context = multiprocessing.get_context("spawn")
         receive, send = context.Pipe(duplex=False)
         process = context.Process(target=self.child, args=(send, backend, mode, cache))
-        process.start()
-        send.close()
-        try:
-            result: dict[str, object] = receive.recv()
-        finally:
-            receive.close()
-            process.join()
-        if process.exitcode != 0 or "error" in result:
-            raise RuntimeError(result)
-        return result
+        with receive, send:
+            process.start()
+            send.close()
+            try:
+                result: dict[str, object] = receive.recv()
+                process.join()
+                if process.exitcode != 0 or "error" in result:
+                    raise RuntimeError(result)
+                return result
+            finally:
+                if process.is_alive():
+                    process.kill()
+                    process.join()
+                process.close()
 
 
 def main() -> None:

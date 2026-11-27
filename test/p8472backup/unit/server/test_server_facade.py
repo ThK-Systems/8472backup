@@ -407,6 +407,19 @@ def test_set_mode_persists_client_mode_under_repository_lock(tmp_path: Path) -> 
     assert RepositoryAdminService.find_by_client_id(tmp_path, _CLIENT_ID).mode == "pull"
 
 
+def test_set_mode_retries_sync_for_a_visible_replacement(tmp_path: Path) -> None:
+    service = ServerFacade(tmp_path, server_fqdn=_SERVER_FQDN)
+    repository = service.init_repository(_CLIENT_ID, {_FIRST_SET: _KEY_ID})
+    with patch("p8472backup.storage.file.json_file.sync_directory", side_effect=OSError("Metadata directory sync failed")):
+        with pytest.raises(OSError, match="Metadata directory sync failed"):
+            service.set_mode(_CLIENT_ID, "push")
+
+    assert RepositoryAdminService.find_by_client_id(tmp_path, _CLIENT_ID).mode == "push"
+    with patch("p8472backup.server.repository_admin_service.sync_directory") as sync:
+        service.set_mode(_CLIENT_ID, "push")
+    sync.assert_called_once_with(repository.path)
+
+
 def test_list_groups_published_snapshots_and_formats_protection(tmp_path: Path) -> None:
     service = ServerFacade(tmp_path, server_fqdn=_SERVER_FQDN, protection_duration=timedelta(days=10))
     service.init_repository(_CLIENT_ID, {_FIRST_SET: _KEY_ID}, backup_set_names={_FIRST_SET: "documents"})

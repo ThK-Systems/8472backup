@@ -97,6 +97,8 @@ class Pack:
                                 block = body.read(min(remaining, _COPY_BUFFER_SIZE))
                                 if not block:
                                     raise ValueError("Truncated object body")
+                                if len(block) > remaining:
+                                    raise ValueError("Object body exceeds its declared length")
                                 output.write(block)
                                 remaining -= len(block)
 
@@ -161,19 +163,28 @@ class Pack:
                 raise ValueError("Object records do not fill the declared pack body")
 
     @classmethod
+    def read_object_header(cls, path: Path, offset: int, length: int) -> Object:
+        """Read and validate the object header at a known location."""
+        with path.open("rb") as source:
+            return cls._read_object_header(source, offset, length)
+
+    @classmethod
+    def _read_object_header(cls, source: BinaryIO, offset: int, length: int) -> Object:
+        pack = cls._load_header(source)
+        if offset < HEADER_SIZE or length < OBJECT_HEADER_SIZE or offset + length > HEADER_SIZE + pack.body_length:
+            raise ValueError("Object location lies outside the pack body")
+
+        source.seek(offset)
+        obj = Object.from_header(source.read(OBJECT_HEADER_SIZE))
+        if OBJECT_HEADER_SIZE + obj.length != length:
+            raise ValueError("Object record length does not match its location")
+        return obj
+
+    @classmethod
     def read_object(cls, path: Path, offset: int, length: int, output: BinaryIO) -> Object:
         """Read a record at a known location and copy its body to output."""
         with path.open("rb") as source:
-            pack = cls._load_header(source)
-            pack_end = HEADER_SIZE + pack.body_length
-            if offset < HEADER_SIZE or length < OBJECT_HEADER_SIZE or offset + length > pack_end:
-                raise ValueError("Object location lies outside the pack body")
-
-            source.seek(offset)
-            obj = Object.from_header(source.read(OBJECT_HEADER_SIZE))
-            if OBJECT_HEADER_SIZE + obj.length != length:
-                raise ValueError("Object record length does not match its location")
-
+            obj = cls._read_object_header(source, offset, length)
             remaining = obj.length
             while remaining:
                 block = source.read(min(remaining, _COPY_BUFFER_SIZE))

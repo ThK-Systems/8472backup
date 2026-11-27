@@ -85,7 +85,7 @@ def exercise(
     lookup_seconds = 0.0
     start.wait()
     for first in range(0, _QUERY_COUNT, _BATCH):
-        queries = []
+        queries: list[tuple[ObjectId, ObjectLocation | None]] = []
         for number in range(first, min(first + _BATCH, _QUERY_COUNT)):
             hit = number % 10 != 0
             object_id, location = entry_for(rng.randrange(entries) if hit else entries + number)
@@ -122,18 +122,21 @@ def measure(backend: str, path: Path, entries: int, mode: str) -> dict[str, obje
     start = Event()
     mounts = [build_index(backend, path, entries) for _ in range(0 if mode == "single" else 2)]
     builds = [duration for _, _, duration in mounts]
+    results: list[tuple[float, float]]
     if mode in ("single", "push"):
         backups = [build_index(backend, path, entries) for _ in range(3 if mode == "push" else 1)]
         builds.extend(duration for _, _, duration in backups)
         with ThreadPoolExecutor(max_workers=len(mounts) + len(backups)) as pool:
-            work = [pool.submit(exercise, get, None, entries, worker, start) for worker, (get, _, _) in enumerate(mounts)]
-            work.extend(pool.submit(exercise, get, put, entries, worker + len(mounts), start) for worker, (get, put, _) in enumerate(backups))
-            start.set()
+            try:
+                work = [pool.submit(exercise, get, None, entries, worker, start) for worker, (get, _, _) in enumerate(mounts)]
+                work.extend(pool.submit(exercise, get, put, entries, worker + len(mounts), start) for worker, (get, put, _) in enumerate(backups))
+            finally:
+                start.set()
             results = [job.result() for job in work]
     else:
         with ThreadPoolExecutor(max_workers=3) as pool:
-            work = [pool.submit(exercise, get, None, entries, worker, start) for worker, (get, _, _) in enumerate(mounts)]
             try:
+                work = [pool.submit(exercise, get, None, entries, worker, start) for worker, (get, _, _) in enumerate(mounts)]
                 results = []
                 for worker in range(3):
                     get, put, duration = build_index(backend, path, entries)

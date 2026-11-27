@@ -1,6 +1,5 @@
 """Create and retrieve snapshots for an authorized backup set."""
 
-import json
 import os
 from collections.abc import Generator, Iterator
 from contextlib import contextmanager
@@ -22,7 +21,7 @@ from p8472backup.server.retention.policy import parse_prune_rule, retained_snaps
 from p8472backup.server.snapshot import SNAPSHOT_VERSION, ObjectCatalogue, Snapshot
 from p8472backup.server.snapshot_listing import BackupSetListing, SnapshotListEntry
 from p8472backup.storage.file.index import LocationIndex, ObjectLocation
-from p8472backup.storage.file.json_file import is_json_object, sync_directory, write_json
+from p8472backup.storage.file.json_file import is_json_object, read_json, sync_directory, write_json
 from p8472backup.storage.file.lock import RepositoryLock
 from p8472backup.storage.file.packs import DEFAULT_TARGET_SIZE, Pack
 
@@ -95,8 +94,6 @@ class SnapshotService:
 
     def cleanup(self, repository: Repository, backup_set: BackupSet, lock: RepositoryLock) -> int:
         """Remove files belonging to stopped runs and return their count."""
-        if (repository.path / SNAPSHOT_REGISTRY_NAME).is_symlink():
-            raise InconsistentStateError("Unexpected snapshot register path")
         try:
             registry = self._read_registry(repository, lock)
         except (OSError, ValueError) as error:
@@ -190,14 +187,23 @@ class SnapshotService:
             raise FileExistsError(f"Snapshot already exists: {path}")
 
         index_path = repository.index_directory / str(backup_set.key_id)
+        pack_directory = lock.require_held_for(repository.packs_root / str(backup_set.key_id))
         index = LocationIndex.load_from(index_path, lock)
         first = next(records, None)
         if first is None or first[0].object_type != TYPE_SNAPSHOT or first[0].object_id != root_id:
             raise ValueError("The first record must be the declared type 3 snapshot root")
 
+        if (location := index.get(root_id)) is not None:
+            pack = lock.require_held_for(pack_directory / f"{location.pack_id}.pack")
+            root = Pack.read_object_header(pack, location.offset, location.length)
+            if root.object_type != TYPE_SNAPSHOT or root.object_id != root_id:
+                raise InconsistentStateError("Indexed snapshot root does not match the stored object")
+
         temporary_prefix = backup_temporary_prefix(snapshot_id)
-        catalogue = self._store_snapshot_objects(chain((first,), records), index, lock, repository.packs_root / str(backup_set.key_id), target_size, temporary_prefix=temporary_prefix)
-        index.save_to(index_path, lock, temporary_prefix=temporary_prefix)
+        catalogue = self._store_snapshot_objects(chain((first,), records), index, lock, pack_directory, target_size, temporary_prefix=temporary_prefix)
+        if not index.save_to(index_path, lock, temporary_prefix=temporary_prefix):
+            # An interrupted save can leave a visible checkpoint with an unsynced name.
+            sync_directory(index_path.parent)
 
         committed_at = trusted_time.server_clock.now()
         snapshot = Snapshot(
@@ -364,6 +370,12 @@ class SnapshotService:
         directory = lock.require_held_for(repository.snapshots_root / str(backup_set_id))
         now = trusted_time.server_clock.now()
         expired = [snapshot_id for snapshot_id, metadata in candidates.items() if not self._is_protected(metadata, now, protection_duration)]
+        if expired:
+            for snapshot_id in registry.snapshots.keys() - expired:
+                if registry.snapshots[snapshot_id] == backup_set_id:
+                    catalogue = repository.snapshot_file(backup_set_id, snapshot_id).with_suffix(".catalog")
+                    if not lock.require_held_for(catalogue).is_file():
+                        raise InconsistentStateError(f"Retained snapshot catalogue is missing: {snapshot_id}")
         for snapshot_id in expired:
             registry.pending_deletions[snapshot_id] = registry.snapshots.pop(snapshot_id)
 
@@ -387,10 +399,11 @@ class SnapshotService:
         return pending
 
     def _read_registry(self, repository: Repository, lock: RepositoryLock) -> _SnapshotRegistry:
-        path = lock.require_held_for(repository.path / SNAPSHOT_REGISTRY_NAME)
+        path = repository.path / SNAPSHOT_REGISTRY_NAME
+        if path.is_symlink():
+            raise InconsistentStateError("Unexpected snapshot register path")
         try:
-            with path.open("r", encoding="utf-8") as source:
-                registry: object = json.load(source)
+            registry = read_json(path, lock)
         except FileNotFoundError as error:
             raise InconsistentStateError("Snapshot register is missing") from error
         if not is_json_object(registry):
@@ -479,9 +492,7 @@ class SnapshotService:
         write_json(path, lock, metadata, temporary_prefix=temporary_prefix)
 
     def _read_snapshot_metadata(self, repository: Repository, backup_set_id: UUID, snapshot_id: UUID, lock: RepositoryLock) -> _SnapshotMetadata:
-        path = lock.require_held_for(repository.snapshot_file(backup_set_id, snapshot_id))
-        with path.open("r", encoding="utf-8") as source:
-            metadata: object = json.load(source)
+        metadata = read_json(repository.snapshot_file(backup_set_id, snapshot_id), lock)
         if not is_json_object(metadata):
             raise ValueError("Invalid snapshot metadata")
         version = metadata.get("version")
@@ -570,7 +581,7 @@ class SnapshotService:
                     yield obj, body
 
         missing = iter_missing_objects()
-        destinations = self._pack_destinations(lock.require_held_for(pack_directory))
+        destinations = self._pack_destinations(pack_directory, index)
         while (first := next(missing, None)) is not None:
             pack_id, path = next(destinations)
             if pack_id >= 2**64:
@@ -585,13 +596,18 @@ class SnapshotService:
         return ObjectCatalogue(frozenset(object_ids))
 
     @staticmethod
-    def _pack_destinations(directory: Path) -> Iterator[tuple[int, Path]]:
+    def _pack_destinations(directory: Path, index: LocationIndex) -> Iterator[tuple[int, Path]]:
+        indexed_packs = index.pack_entry_counts()
         highest_id = 0
         with os.scandir(directory) as entries:
             for entry in entries:
                 stem = entry.name.removesuffix(".pack")
                 if stem != entry.name and stem.isascii() and stem.isdecimal():
-                    highest_id = max(highest_id, int(stem))
+                    pack_id = int(stem)
+                    highest_id = max(highest_id, pack_id)
+                    if pack_id in indexed_packs and stem == str(pack_id) and entry.is_file(follow_symlinks=False):
+                        del indexed_packs[pack_id]
+        if indexed_packs:
+            raise InconsistentStateError(f"Indexed pack is missing: {min(indexed_packs)}.pack")
 
-        for pack_id in count(highest_id + 1):
-            yield pack_id, directory / f"{pack_id}.pack"
+        return ((pack_id, directory / f"{pack_id}.pack") for pack_id in count(highest_id + 1))

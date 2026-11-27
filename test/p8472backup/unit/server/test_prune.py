@@ -13,6 +13,7 @@ from uuid import UUID
 import pytest
 
 from p8472backup.archive.objects import TYPE_SNAPSHOT, Object
+from p8472backup.common.error import InconsistentStateError
 from p8472backup.server import trusted_time
 from p8472backup.server.repository_admin_service import RepositoryAdminService
 from p8472backup.server.server_facade import ServerFacade
@@ -73,6 +74,28 @@ def test_invalid_backup_arguments_preserve_the_saved_prune_rule(tmp_path: Path, 
 
     assert json.loads(repository.backup_set_file(_BACKUP_SET_ID).read_bytes()) == {"prune": "7d"}
     assert RepositoryAdminService.find_by_client_id(tmp_path, _CLIENT_ID).snapshots == {snapshot}
+
+
+def test_prune_preserves_an_older_snapshot_if_the_retained_catalogue_is_missing(tmp_path: Path) -> None:
+    facade = ServerFacade(tmp_path, server_fqdn=_SERVER_FQDN)
+    repository = facade.init_repository(_CLIENT_ID, {_BACKUP_SET_ID: _KEY_ID})
+    with patch.object(trusted_time, "server_clock", create=True) as clock:
+        clock.now.return_value = _START
+        old = facade.backup(_CLIENT_ID, _BACKUP_SET_ID, iter(((_ROOT, BytesIO(b"r")),)), _ROOT.object_id, prune="")
+        clock.now.return_value = _START + timedelta(days=1)
+        newest = facade.backup(_CLIENT_ID, _BACKUP_SET_ID, iter(((_ROOT, BytesIO(b"r")),)), _ROOT.object_id, prune="1d")
+        old_metadata = repository.snapshot_file(_BACKUP_SET_ID, old.snapshot_id)
+        repository.snapshot_file(_BACKUP_SET_ID, newest.snapshot_id).with_suffix(".catalog").unlink()
+        register = repository.path / "snapshot-registry.json"
+        original = register.read_bytes()
+
+        clock.now.return_value = _START + timedelta(days=9)
+        with pytest.raises(InconsistentStateError, match="Retained snapshot catalogue is missing"):
+            facade.prune(_CLIENT_ID, _BACKUP_SET_ID)
+
+    assert register.read_bytes() == original
+    assert old_metadata.is_file()
+    assert old_metadata.with_suffix(".catalog").is_file()
 
 
 def test_prune_uses_the_latest_valid_rule_and_honors_protection_at_the_deadline(tmp_path: Path) -> None:

@@ -1,6 +1,5 @@
 """Initialize server-side repositories and their storage scopes."""
 
-import json
 import os
 from collections.abc import Collection, Generator, Iterable, Mapping
 from contextlib import contextmanager
@@ -12,10 +11,9 @@ from uuid import UUID
 
 from p8472backup.common.error import InconsistentStateError
 from p8472backup.server.repository import BackupMode, BackupSet, Repository
-from p8472backup.server.retention.policy import parse_prune_rule
 from p8472backup.server.snapshot_service import SNAPSHOT_REGISTRY_NAME, SNAPSHOT_REGISTRY_VERSION, SnapshotService
 from p8472backup.storage.file.index import LocationIndex
-from p8472backup.storage.file.json_file import is_json_object, sync_directory, write_json
+from p8472backup.storage.file.json_file import is_json_object, read_json, sync_directory, write_json
 from p8472backup.storage.file.lock import RepositoryLock
 
 
@@ -111,8 +109,7 @@ class RepositoryAdminService:
         self._write_metadata(replace(repository, backup_sets={**repository.backup_sets, backup_set_id: new_set}), lock)
 
     def save_prune_rule(self, repository: Repository, backup_set: BackupSet, lock: RepositoryLock, prune_rule: str, *, temporary_prefix: str | None = None) -> None:
-        """Validate and durably save the rule accepted with a backup."""
-        parse_prune_rule(prune_rule)
+        """Durably save the rule validated at backup admission."""
         path = lock.require_held_for(repository.backup_set_file(backup_set.backup_set_id))
         path.parent.mkdir(mode=0o700, exist_ok=True)
         write_json(path, lock, {"prune": prune_rule}, temporary_prefix=temporary_prefix)
@@ -120,10 +117,8 @@ class RepositoryAdminService:
 
     def read_prune_rule(self, repository: Repository, backup_set: BackupSet, lock: RepositoryLock) -> str:
         """Read the prune rule most recently saved for a set."""
-        path = lock.require_held_for(repository.backup_set_file(backup_set.backup_set_id))
         try:
-            with path.open("r", encoding="utf-8") as source:
-                data: object = json.load(source)
+            data = read_json(repository.backup_set_file(backup_set.backup_set_id), lock)
         except FileNotFoundError as error:
             raise ValueError(f"No prune rule has been stored for backup set {backup_set.backup_set_id}") from error
 
@@ -183,20 +178,21 @@ class RepositoryAdminService:
 
     def set_mode(self, repository: Repository, mode: BackupMode, lock: RepositoryLock) -> None:
         """Persist the mode using the repository and lock from locked_repository()."""
-        lock.require_held_for(repository.path / _METADATA_NAME)
+        metadata_path = lock.require_held_for(repository.path / _METADATA_NAME)
         if repository.deleted:
             raise ValueError(f"Repository is deleted: {repository.client_id}")
         if not Repository.is_backup_mode(mode):
             raise ValueError(f"Unsupported backup mode: {mode!r}")
-        if repository.mode != mode:
+        if repository.mode == mode:
+            # A prior replacement can be visible after a failed directory sync.
+            sync_directory(metadata_path.parent)
+        else:
             self._write_metadata(replace(repository, mode=mode), lock)
 
     def _read_metadata(self, path: Path, lock: RepositoryLock, *, client_id: UUID) -> Repository:
         """Load the verified repository metadata under its lock."""
-        metadata_path = lock.require_held_for(path / _METADATA_NAME)
         try:
-            with metadata_path.open("r", encoding="utf-8") as source:
-                metadata: object = json.load(source)
+            metadata = read_json(path / _METADATA_NAME, lock)
         except FileNotFoundError as error:
             self._raise_missing_repository_metadata(error)
         if not is_json_object(metadata):

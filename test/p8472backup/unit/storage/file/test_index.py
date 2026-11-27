@@ -50,17 +50,17 @@ class TestLocationIndex:
 
     def test_growth_preserves_existing_locations(self) -> None:
         index = LocationIndex()
-        assert len(index._buckets) == 8_192
+        assert len(index._buckets) == 8_192  # pyright: ignore[reportPrivateUsage]
         locations = {(number * 7).to_bytes(4, "big") + bytes(28): ObjectLocation(1, 14 + number * 44, 44) for number in range(4_096)}
         for object_id, location in locations.items():
             index.put(object_id, location)
-        assert len(index._buckets) == 8_192
+        assert len(index._buckets) == 8_192  # pyright: ignore[reportPrivateUsage]
 
         next_id = (4_096 * 7).to_bytes(4, "big") + bytes(28)
         next_location = ObjectLocation(1, 14 + 4_096 * 44, 44)
         index.put(next_id, next_location)
 
-        assert len(index._buckets) == 16_384
+        assert len(index._buckets) == 16_384  # pyright: ignore[reportPrivateUsage]
         assert index.get(next_id) == next_location
         assert all(index.get(object_id) == location for object_id, location in locations.items())
 
