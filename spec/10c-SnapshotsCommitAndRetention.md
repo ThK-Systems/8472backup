@@ -265,6 +265,10 @@ For initial compaction, use the register to enumerate the expected retained snap
 
 Read the retained catalogues in bounded blocks under the repository lock. For each key domain, use a temporary bitmap with one bit per occupied location-index record, initially clear. Resolve each binary object ID to its record number in the loaded index and set the corresponding bit. Repeated references leave the same bit set. The marks are valid only for that loaded index during the compaction run. A persistent reference index is a future option if measurements show that scanning the catalogues is too costly.
 
+The read-only compaction analysis validates the published catalogues and scans finalized pack headers under the repository lock. It reports total, live, and reclaimable bytes per pack. A referenced object contributes live bytes at its indexed location. An unindexed copy contributes reclaimable bytes. The pack header counts as live if the pack holds any live records.
+
+Set `P8472BACKUP_STORAGE_ROOT` to enable analysis in the existing daily compaction window. The scheduler processes registered repositories serially, one key domain at a time. It logs repository totals and skips busy or invalid repositories until a later scheduled run.
+
 DEFERRED implementation of physical compaction as an asynchronous server job during idle periods, using the same scheduling approach as retired-scope cleanup. The compaction job holds the exclusive repository lock, determines liveness from the catalogues, and uses a percentage threshold to decide whether to reclaim space. Define idle admission and job frequency later.
 
 OPEN compaction criterion. Define the metric, denominator, threshold value and default, and whether the criterion applies per repository, per pack, or at both levels. One candidate metric is reclaimable pack bytes, including space left by earlier runs, relative to total pack bytes. Measuring actual reclaimable bytes requires determining liveness.

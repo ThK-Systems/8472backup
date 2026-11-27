@@ -26,6 +26,24 @@ _INTERRUPTED_BACKUP_SET_REGISTRATION = "A previous registration may have been in
 class RepositoryService:
     """Manage storage for one client repository."""
 
+    def list_client_ids(self, storage_root: Path) -> tuple[UUID, ...]:
+        """Find registered repository directories for scheduled work."""
+        client_ids: list[UUID] = []
+        with os.scandir(storage_root) as entries:
+            for entry in entries:
+                try:
+                    client_id = UUID(entry.name)
+                except ValueError:
+                    continue
+                if entry.name != str(client_id):
+                    continue
+                try:
+                    if entry.is_dir(follow_symlinks=False) and (Path(entry.path) / _METADATA_NAME).is_file():
+                        client_ids.append(client_id)
+                except OSError as error:
+                    Log.warning("Repository discovery failed client_id=%s reason=%s", client_id, type(error).__name__)
+        return tuple(sorted(client_ids))
+
     @classmethod
     def find_by_client_id(cls, storage_root: Path, client_id: UUID) -> Repository:
         """Load repository and published snapshot metadata for a verified client."""
