@@ -8,7 +8,7 @@ Load server settings from TOML and pass them to the façade and scheduler. Add t
 
 ## 2. Scheduling and resource limits
 
-Connect pull job discovery and execution to the scheduler, including mode changes, retired sets, and retries. Apply shared admission limits and the memory budget to server and [maintenance operations](10c-SnapshotsCommitAndRetention.md#12-retention-minimum-protection-and-garbage-collection). Define pull queueing and push wait responses. See the [configuration roadmap](70-ConfigurationRoadmap.md).
+Connect pull job discovery and execution to the scheduler, including mode changes, retired sets, and retries. Add the shared memory budget to operation admission. Translate capacity exhaustion into a push wait response in the client protocol. See the [configuration roadmap](70-ConfigurationRoadmap.md).
 
 ## 3. Client transport
 

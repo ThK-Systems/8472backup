@@ -40,9 +40,9 @@ A client SSH key is separately authorized on the server through a restricted ent
 
 Pull uses server-side scheduling and execution; push uses client-side scheduling and initiation. Both require server admission and the same protection rules. Whether a user can manually request backups in pull mode remains OPEN.
 
-The server limits the number of concurrently running backup-set operations across push and pull. The limit is configurable and defaults to 3. Scheduled pull jobs that cannot start because the limit is reached wait in a server-side queue. A push request that cannot start because the limit is reached receives a wait response; the client reports that it is waiting and retries after its configured interval, which defaults to 60 seconds. Repeated wait responses result in further retries. The server also limits concurrently active repository operations across all clients, with a configurable default of 10. Both limits are enforced at operation admission by accounting for active operations. The per-repository and per-backup-set locks protect access to their respective scopes.
+The server admits up to ten concurrent repository operations and up to three concurrent backups per server process. Each backup uses one slot from both limits. Repository operations reserve their capacity before acquiring the exclusive repository lock. The operation releases capacity after closing the reader or finishing its storage work, including on failure. Maintenance uses the same repository capacity and starts while no backups hold slots. The limits use code defaults until server configuration is available.
 
-Queue ordering, retry limits, cancellation, and the wire format of the wait response remain OPEN.
+The local façade reports capacity exhaustion as `ServerBusyError`. The scheduler waits for capacity before dispatching a pull job and retries on this error if a competing operation claimed a slot first. On the wire, an unavailable push slot produces a wait response. The client reports the wait and retries after its configured interval, which defaults to 60 seconds. Queue ordering across remote jobs, retry limits, cancellation, and the wire format of the wait response remain open.
 
 ### 13.3 Client SSH access to the server service
 

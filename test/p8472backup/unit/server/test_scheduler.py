@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from contextlib import suppress
+from contextlib import ExitStack, suppress
 from datetime import UTC, datetime, time, timedelta
 from io import BytesIO
 from pathlib import Path
@@ -11,8 +11,10 @@ from uuid import UUID
 import pytest
 
 from p8472backup.archive.objects import OBJECT_ID_SIZE, TYPE_SNAPSHOT, Object
+from p8472backup.common.error import ServerBusyError
 from p8472backup.common.log import Log
 from p8472backup.server import main, trusted_time
+from p8472backup.server.admission import reserve_operation
 from p8472backup.server.repository_service import RepositoryService
 from p8472backup.server.scheduler.scheduler import DEFAULT_COMPACT_PAUSE_SECONDS, Scheduler
 from p8472backup.server.server_facade import ServerFacade
@@ -40,47 +42,79 @@ def test_scheduler_rejects_an_invalid_explicit_threshold(value: int) -> None:
         Scheduler(compact_threshold_percent=value)
 
 
-def test_pull_waits_until_one_of_three_push_jobs_finishes(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(("kind", "limit"), (("backup", 3), ("repository", 10)))
+def test_queued_pull_uses_one_slot_when_capacity_returns(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: Literal["backup", "repository"], limit: int) -> None:
     clock = Mock(spec=TrustedTime)
     clock.now.return_value = datetime(2026, 1, 1, 2, tzinfo=UTC)
     monkeypatch.setattr(trusted_time, "server_clock", clock, raising=False)
-    client_id, backup_set_id = UUID(int=1), UUID(int=2)
+    client_id, backup_set_id, key_id = UUID(int=1), UUID(int=2), UUID(int=3)
+    facade = ServerFacade(tmp_path, server_fqdn="backup.example.net")
+    facade.init_repository(client_id, {backup_set_id: key_id})
+    root = Object(TYPE_SNAPSHOT, b"r" * OBJECT_ID_SIZE, 1)
 
     async def check() -> None:
-        jobs_loaded = asyncio.Event()
-        pull_started = asyncio.Event()
-        finish_pull = asyncio.Event()
+        waiting = asyncio.Event()
+        retry = asyncio.Event()
+        pulled = asyncio.Event()
 
-        def pull_jobs() -> tuple[tuple[UUID, UUID], ...]:
-            jobs_loaded.set()
-            return ((client_id, backup_set_id),)
+        async def wait_for_retry(_delay: float) -> None:
+            waiting.set()
+            await retry.wait()
+            retry.clear()
 
         async def pull(client: UUID, backup_set: UUID) -> None:
             assert (client, backup_set) == (client_id, backup_set_id)
-            pull_started.set()
-            await finish_pull.wait()
+            facade.backup(client, backup_set, iter(((root, BytesIO(b"r")),)), prune="")
+            pulled.set()
 
         scheduler = Scheduler()
-        monkeypatch.setattr(scheduler, "_pull_jobs", pull_jobs)
+        monkeypatch.setattr(scheduler, "_pull_jobs", lambda: ((client_id, backup_set_id),))
         monkeypatch.setattr(scheduler, "_pull", pull)
-        for _ in range(3):
-            assert await scheduler.try_start_push()
-        assert not await scheduler.try_start_push()
-
-        task = asyncio.create_task(scheduler.run())
-        try:
-            async with asyncio.timeout(2):
-                await jobs_loaded.wait()
-                assert not pull_started.is_set()
-                scheduler.finish_push()
-                await pull_started.wait()
-                assert not await scheduler.try_start_push()
-        finally:
-            task.cancel()
-            with suppress(asyncio.CancelledError):
-                await task
+        monkeypatch.setattr(asyncio, "sleep", wait_for_retry)
+        with ExitStack() as operations, ExitStack() as last_operation:
+            for _ in range(limit - 1):
+                operations.enter_context(reserve_operation(kind))
+            last_operation.enter_context(reserve_operation(kind))
+            task = asyncio.create_task(scheduler.run())
+            try:
+                async with asyncio.timeout(2):
+                    await waiting.wait()
+                    assert not pulled.is_set()
+                    last_operation.close()
+                    retry.set()
+                    await pulled.wait()
+            finally:
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
 
     asyncio.run(check())
+    assert len(facade.list(client_id).backup_sets[0].snapshots) == 1
+
+
+def test_pull_retries_when_capacity_changes_during_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = Mock(spec=TrustedTime)
+    clock.now.return_value = datetime(2026, 1, 1, 2, tzinfo=UTC)
+    monkeypatch.setattr(trusted_time, "server_clock", clock, raising=False)
+    scheduler = Scheduler()
+    calls = 0
+
+    async def pull(_client: UUID, _backup_set: UUID) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ServerBusyError("Capacity was taken during dispatch")
+
+    async def retry_once(_delay: float) -> None:
+        if calls == 2:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(scheduler, "_pull_jobs", lambda: ((UUID(int=1), UUID(int=2)),))
+    monkeypatch.setattr(scheduler, "_pull", pull)
+    monkeypatch.setattr(asyncio, "sleep", retry_once)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(scheduler.run())
+    assert calls == 2
 
 
 @pytest.fixture
@@ -185,28 +219,25 @@ def test_scheduled_compaction_has_no_work_without_a_storage_root(caplog: pytest.
 
 
 @pytest.mark.usefixtures("maintenance_tick")
-def test_scheduled_compaction_stops_admitting_repositories_when_a_push_arrives(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+def test_scheduled_compaction_stops_admitting_repositories_when_a_backup_arrives(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
     facade = ServerFacade(tmp_path, server_fqdn="backup.example.net")
     facade.init_repository(UUID(int=1), {UUID(int=2): UUID(int=3)})
     caplog.set_level(logging.INFO, logger="p8472backup")
     caplog.clear()
 
-    async def check() -> None:
-        scheduler = Scheduler(storage_root=tmp_path, compact_start=time(2, 30))
-        loop = asyncio.get_running_loop()
-        list_client_ids = RepositoryService.list_client_ids
+    list_client_ids = RepositoryService.list_client_ids
 
-        def discover_and_start_push(service: RepositoryService, storage_root: Path, *, deleting: bool = False) -> tuple[UUID, ...]:
+    with ExitStack() as operations:
+
+        def discover_and_start_backup(service: RepositoryService, storage_root: Path, *, deleting: bool = False) -> tuple[UUID, ...]:
             client_ids = list_client_ids(service, storage_root, deleting=deleting)
             if not deleting:
-                assert asyncio.run_coroutine_threadsafe(scheduler.try_start_push(), loop).result(timeout=2)
+                operations.enter_context(reserve_operation("backup"))
             return client_ids
 
-        monkeypatch.setattr(RepositoryService, "list_client_ids", discover_and_start_push)
-        await scheduler.run()
-
-    with pytest.raises(asyncio.CancelledError):
-        asyncio.run(check())
+        monkeypatch.setattr(RepositoryService, "list_client_ids", discover_and_start_backup)
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(Scheduler(storage_root=tmp_path, compact_start=time(2, 30)).run())
 
     assert caplog.messages == ["Dispatching daily pull batch", "Dispatching scheduled repository maintenance"]
 

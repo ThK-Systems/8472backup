@@ -13,6 +13,7 @@ from uuid import UUID
 from p8472backup.common.error import InconsistentStateError
 from p8472backup.common.log import Log
 from p8472backup.server import trusted_time
+from p8472backup.server.admission import OperationKind, reserve_operation
 from p8472backup.server.repository import BackupMode, BackupSet, Repository
 from p8472backup.server.snapshot_service import SNAPSHOT_REGISTRY_NAME, SNAPSHOT_REGISTRY_VERSION, SnapshotService
 from p8472backup.storage.file.index import LocationIndex
@@ -57,19 +58,29 @@ class RepositoryService:
             return replace(repository, snapshots=SnapshotService().list_snapshots(repository, lock))
 
     @contextmanager
-    def locked_repository(self, storage_root: Path, client_id: UUID, *, operation: str | None = None, backup_set_id: UUID | None = None, snapshot_id: UUID | None = None) -> Generator[tuple[Repository, RepositoryLock], None, None]:
-        """Load verified metadata and hold the lock through one repository operation."""
+    def locked_repository(
+        self,
+        storage_root: Path,
+        client_id: UUID,
+        *,
+        operation: str | None = None,
+        backup_set_id: UUID | None = None,
+        snapshot_id: UUID | None = None,
+        kind: OperationKind = "repository",
+    ) -> Generator[tuple[Repository, RepositoryLock], None, None]:
+        """Admit the operation, load verified metadata, and hold the repository lock."""
         path = storage_root / str(client_id)
         try:
-            if path.is_symlink():
-                raise InconsistentStateError("Unexpected repository path")
-            try:
-                lock = RepositoryLock(path)
-            except FileNotFoundError as error:
-                raise FileNotFoundError(f"Backup repository not found for client {client_id}") from error
-            with lock:
-                repository = self._read_metadata(path, lock, client_id=client_id)
-                yield repository, lock
+            with reserve_operation(kind):
+                if path.is_symlink():
+                    raise InconsistentStateError("Unexpected repository path")
+                try:
+                    lock = RepositoryLock(path)
+                except FileNotFoundError as error:
+                    raise FileNotFoundError(f"Backup repository not found for client {client_id}") from error
+                with lock:
+                    repository = self._read_metadata(path, lock, client_id=client_id)
+                    yield repository, lock
         except (OSError, ValueError, InconsistentStateError) as error:
             if operation is not None:
                 scope = f"client_id={client_id}"
@@ -95,27 +106,28 @@ class RepositoryService:
         if not names.keys() <= sets.keys():
             raise ValueError("Backup set names must refer to registered sets")
         repository = Repository(path, client_id, sets, mode=mode)
-        try:
-            path.mkdir(mode=0o700)
-        except FileExistsError as error:
-            if not path.is_dir():
-                raise
+        with reserve_operation():
             try:
-                (path / _METADATA_NAME).stat()
-            except FileNotFoundError as missing_metadata:
-                self._raise_missing_repository_metadata(missing_metadata)
-            raise FileExistsError("Backup repository already exists.") from error
-        with RepositoryLock(repository.path) as lock:
-            directories = (repository.data_directory, repository.index_directory, repository.packs_root, repository.snapshots_root)
-            for directory in directories:
-                lock.require_held_for(directory).mkdir(mode=0o700)
+                path.mkdir(mode=0o700)
+            except FileExistsError as error:
+                if not path.is_dir():
+                    raise
+                try:
+                    (path / _METADATA_NAME).stat()
+                except FileNotFoundError as missing_metadata:
+                    self._raise_missing_repository_metadata(missing_metadata)
+                raise FileExistsError("Backup repository already exists.") from error
+            with RepositoryLock(repository.path) as lock:
+                directories = (repository.data_directory, repository.index_directory, repository.packs_root, repository.snapshots_root)
+                for directory in directories:
+                    lock.require_held_for(directory).mkdir(mode=0o700)
 
-            self._create_backup_set_storage(repository, sets.values(), lock)
-            for directory in (repository.data_directory, repository.path, repository.path.parent):
-                sync_directory(directory)
+                self._create_backup_set_storage(repository, sets.values(), lock)
+                for directory in (repository.data_directory, repository.path, repository.path.parent):
+                    sync_directory(directory)
 
-            write_json(repository.path / SNAPSHOT_REGISTRY_NAME, lock, {"version": SNAPSHOT_REGISTRY_VERSION, "snapshots": {}})
-            self._write_metadata(repository, lock)
+                write_json(repository.path / SNAPSHOT_REGISTRY_NAME, lock, {"version": SNAPSHOT_REGISTRY_VERSION, "snapshots": {}})
+                self._write_metadata(repository, lock)
         Log.info("Repository initialized client_id=%s mode=%s backup_sets=%d", client_id, mode, len(sets))
         return repository
 
@@ -200,7 +212,7 @@ class RepositoryService:
         """Finish due deletions and compact the remaining repository under its lock."""
         detached = False
         try:
-            with self.locked_repository(storage_root, client_id, operation="maintenance") as (repository, lock):
+            with self.locked_repository(storage_root, client_id, operation="maintenance", kind="maintenance") as (repository, lock):
                 if repository.deleted:
                     detached = self.delete(repository, lock, protection_duration=protection_duration)
                 else:
@@ -273,15 +285,16 @@ class RepositoryService:
     def finish_deletion(self, storage_root: Path, client_id: UUID) -> None:
         """Remove a detached repository or log a recoverable failure for retry."""
         try:
-            directory = storage_root.resolve(strict=True) / f"{_DELETION_PREFIX}{client_id}"
-            if directory.is_symlink():
-                raise InconsistentStateError("Unexpected detached repository path")
-            with RepositoryLock(directory):
-                trusted_time.server_clock.now()
-                # A rename can be visible after a failed parent directory sync.
-                sync_directory(directory.parent)
-                shutil.rmtree(directory)
-                sync_directory(directory.parent)
+            with reserve_operation("maintenance"):
+                directory = storage_root.resolve(strict=True) / f"{_DELETION_PREFIX}{client_id}"
+                if directory.is_symlink():
+                    raise InconsistentStateError("Unexpected detached repository path")
+                with RepositoryLock(directory):
+                    trusted_time.server_clock.now()
+                    # A rename can be visible after a failed parent directory sync.
+                    sync_directory(directory.parent)
+                    shutil.rmtree(directory)
+                    sync_directory(directory.parent)
         except (OSError, ValueError, InconsistentStateError) as error:
             Log.warning("Final repository deletion failed client_id=%s reason=%s", client_id, type(error).__name__)
         else:

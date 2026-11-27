@@ -67,7 +67,7 @@ class ServerFacade:
         snapshots = SnapshotService()
         snapshot_id: UUID | None = None
         try:
-            with repository_service.locked_repository(self._storage_root, client_id) as (repository, lock):
+            with repository_service.locked_repository(self._storage_root, client_id, kind="backup") as (repository, lock):
                 backup_set = repository.get_active_backup_set(backup_set_id)
                 snapshots.validate_comment(comment)
                 # Reject invalid rules before reserving a run marker.

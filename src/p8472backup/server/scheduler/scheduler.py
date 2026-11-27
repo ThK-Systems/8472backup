@@ -7,8 +7,10 @@ from pathlib import Path
 from typing import Literal
 from uuid import UUID
 
+from p8472backup.common.error import ServerBusyError
 from p8472backup.common.log import Log
 from p8472backup.server import trusted_time
+from p8472backup.server.admission import has_capacity
 from p8472backup.server.repository_service import RepositoryService
 from p8472backup.server.snapshot_service import configured_protection_duration
 
@@ -16,7 +18,6 @@ from p8472backup.server.snapshot_service import configured_protection_duration
 DEFAULT_PULL_START = time(2)
 DEFAULT_PULL_PAUSE_SECONDS = 5 * 60
 DEFAULT_COMPACT_PAUSE_SECONDS = 30 * 60
-DEFAULT_MAX_BACKUP_JOBS = 3
 DEFAULT_COMPACT_START: Literal[0] = 0
 DEFAULT_COMPACT_THRESHOLD_PERCENT = 25
 _CHECK_INTERVAL_SECONDS = 30
@@ -29,21 +30,16 @@ class Scheduler:
         self,
         *,
         compact_start: Literal[0] | time = DEFAULT_COMPACT_START,
-        max_backup_jobs: int = DEFAULT_MAX_BACKUP_JOBS,
         storage_root: Path | None = None,
         compact_threshold_percent: int = DEFAULT_COMPACT_THRESHOLD_PERCENT,
         protection_duration: timedelta | None = None,
     ) -> None:
-        if max_backup_jobs < 1:
-            raise ValueError("The backup job limit must be positive")
         if not 0 <= compact_threshold_percent <= 100:
             raise ValueError("Compaction threshold must be between 0 and 100 percent")
         self._storage_root = storage_root
         self._compact_start = compact_start
         self._compact_threshold_percent = compact_threshold_percent
         self._protection_duration = configured_protection_duration(protection_duration)
-        self._backup_slots = asyncio.BoundedSemaphore(max_backup_jobs)
-        self._active_push_jobs = 0
 
     async def run(self) -> None:
         """Run today's batch once it is due, then wait for the next day."""
@@ -70,36 +66,27 @@ class Scheduler:
                     compact_due = today
 
             compact_is_due = compact_due is not None and (last_compact is None or compact_due > last_compact)
-            if compact_is_due and self._active_push_jobs == 0:
+            if compact_is_due and has_capacity("maintenance"):
                 last_compact = compact_due
                 await self._compact()
 
             await asyncio.sleep(_CHECK_INTERVAL_SECONDS)
 
-    async def try_start_push(self) -> bool:
-        """Reserve a push slot if available, without waiting for one."""
-        if self._backup_slots.locked():
-            Log.warning("Push deferred because all backup slots are in use")
-            return False
-        trusted_time.server_clock.now()
-        await self._backup_slots.acquire()
-        self._active_push_jobs += 1
-        return True
-
-    def finish_push(self) -> None:
-        """Release the slot held by a completed or failed push job."""
-        if self._active_push_jobs == 0:
-            raise RuntimeError("No push job holds a backup slot")
-        self._active_push_jobs -= 1
-        self._backup_slots.release()
-
     async def _run_pull_batch(self) -> None:
         for index, (client_id, backup_set_id) in enumerate(self._pull_jobs()):
             if index:
                 await asyncio.sleep(DEFAULT_PULL_PAUSE_SECONDS)
-            async with self._backup_slots:
+            while True:
                 trusted_time.server_clock.now()
-                await self._pull(client_id, backup_set_id)
+                if has_capacity("backup"):
+                    try:
+                        await self._pull(client_id, backup_set_id)
+                    except ServerBusyError:
+                        # The facade can lose the slot to a concurrent operation.
+                        pass
+                    else:
+                        break
+                await asyncio.sleep(_CHECK_INTERVAL_SECONDS)
 
     def _pull_jobs(self) -> Iterable[tuple[UUID, UUID]]:
         """Return the client and set IDs for registered pull jobs."""
@@ -124,11 +111,11 @@ class Scheduler:
             return
 
         for client_id in deleting:
-            if self._active_push_jobs:
+            if not has_capacity("maintenance"):
                 return
             await asyncio.to_thread(repositories.finish_deletion, storage_root, client_id)
         for client_id in client_ids:
-            if self._active_push_jobs:
+            if not has_capacity("maintenance"):
                 break
             await asyncio.to_thread(
                 repositories.maintain_repository,
