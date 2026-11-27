@@ -25,7 +25,7 @@ Implement the systemd service and Unix-socket handler as a caller of the façade
 
 ## 4. Backup completion and snapshot commit
 
-Use the complete final snapshot root object as the upload completion signal. `SnapshotService.create_snapshot()` currently expects the root first and requires its ID up front. Remove its optional `snapshot_id` parameter and always generate the snapshot UUID on the server. The local snapshot service saves the JSON and binary catalogue and durably publishes them through the server-owned register after saving the packs and index. Connect backup acknowledgement to that commit point.
+The local backup operation reserves a server-generated snapshot UUID and uses the complete final snapshot root as its input completion signal. The local snapshot service saves the JSON and binary catalogue and durably publishes them through the server-owned register after saving the packs and index. Make the reserved snapshot UUID mandatory in the internal `create_snapshot()` method. Connect backup acknowledgement to durable publication.
 
 ## 5. Snapshot listing
 
@@ -65,7 +65,7 @@ The local `backup()` persists the prune rule and applies it after commit. The lo
 
 ## 14. End-to-end verification
 
-Extend the existing local write-path coverage with two encrypted backups that reuse objects and a direct single-file restore. Test interruption immediately before the final root byte and after durable commit but before acknowledgement. Verify the outcome after reopening the repository.
+Local tests send objects prepared by a test client, run initial and incremental backups through the façade, and verify byte-exact reconstruction of both file versions after reopening the repository. They exercise interruption immediately before the final root byte, including for a reused root. Extend the coverage with two encrypted backups, direct single-file restore through the shared read path, and acknowledgement lost after durable commit.
 
 ## 15. Object encryption session keys
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from struct import Struct
+from typing import IO, BinaryIO
 
 
 type ObjectId = bytes
@@ -11,6 +12,7 @@ type ObjectId = bytes
 OBJECT_ID_SIZE = 32
 
 _HEADER = Struct(f"<HH{OBJECT_ID_SIZE}sQ")
+_COPY_BUFFER_SIZE = 64 * 1024
 
 HEADER_SIZE = _HEADER.size
 FORMAT_VERSION = 1
@@ -27,7 +29,7 @@ ENCRYPTION_AES256_OCB = 2
 
 @dataclass(frozen=True)
 class Object:
-    """Immutable object header state; payload handling is not implemented yet."""
+    """Immutable object header and operations on its body stream."""
 
     object_type: int
     object_id: ObjectId
@@ -55,6 +57,19 @@ class Object:
     def to_header(self) -> bytes:
         """Serialize the object's validated state as a 44-byte header."""
         return _HEADER.pack(self.object_type, self.version, self.object_id, self.length)
+
+    def read_body(self, source: BinaryIO, output: IO[bytes] | None = None) -> None:
+        """Consume exactly the declared body length and optionally copy it."""
+        remaining = self.length
+        while remaining:
+            block = source.read(min(remaining, _COPY_BUFFER_SIZE))
+            if not block:
+                raise ValueError("Truncated object body")
+            if len(block) > remaining:
+                raise ValueError("Object body exceeds its declared length")
+            if output is not None and output.write(block) != len(block):
+                raise OSError("Short write while copying object body")
+            remaining -= len(block)
 
     @classmethod
     def from_header(cls, header: bytes) -> Object:

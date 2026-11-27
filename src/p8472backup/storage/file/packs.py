@@ -19,7 +19,6 @@ _LOCATION_RECORD = Struct(f"<{OBJECT_ID_SIZE}sQQ")
 HEADER_SIZE = _HEADER.size
 FORMAT_VERSION = 1
 DEFAULT_TARGET_SIZE = 50_000_000
-_COPY_BUFFER_SIZE = 64 * 1024
 _LOCATION_BUFFER_SIZE = 256 * 1024
 
 
@@ -92,15 +91,7 @@ class Pack:
                         body_length = 0
                         for obj, body in records:
                             output.write(obj.to_header())
-                            remaining = obj.length
-                            while remaining:
-                                block = body.read(min(remaining, _COPY_BUFFER_SIZE))
-                                if not block:
-                                    raise ValueError("Truncated object body")
-                                if len(block) > remaining:
-                                    raise ValueError("Object body exceeds its declared length")
-                                output.write(block)
-                                remaining -= len(block)
+                            obj.read_body(body, output.file)
 
                             length = OBJECT_HEADER_SIZE + obj.length
                             if on_stored is not None:
@@ -185,12 +176,5 @@ class Pack:
         """Read a record at a known location and copy its body to output."""
         with path.open("rb") as source:
             obj = cls._read_object_header(source, offset, length)
-            remaining = obj.length
-            while remaining:
-                block = source.read(min(remaining, _COPY_BUFFER_SIZE))
-                if not block:
-                    raise ValueError("Truncated object body")
-                if output.write(block) != len(block):
-                    raise OSError("Short write while copying object body")
-                remaining -= len(block)
+            obj.read_body(source, output)
         return obj

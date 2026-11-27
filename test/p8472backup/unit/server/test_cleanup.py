@@ -40,7 +40,7 @@ def initialized_repository(tmp_path: Path) -> tuple[ServerFacade, Repository]:
 def _backup(facade: ServerFacade, set_id: UUID = _SET_ID, *, auto_cleanup: bool = False, prune: str = "") -> Snapshot:
     with patch.object(trusted_time, "server_clock", create=True) as clock:
         clock.now.return_value = _NOW
-        return facade.backup(_CLIENT_ID, set_id, iter(((_ROOT, BytesIO(b"r")),)), _ROOT.object_id, prune=prune, auto_cleanup=auto_cleanup)
+        return facade.backup(_CLIENT_ID, set_id, iter(((_ROOT, BytesIO(b"r")),)), prune=prune, auto_cleanup=auto_cleanup)
 
 
 def _marker(repository: Repository, set_id: UUID = _SET_ID, snapshot_id: UUID = _INTERRUPTED_ID) -> Path:

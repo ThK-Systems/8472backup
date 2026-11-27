@@ -12,7 +12,7 @@ from uuid import UUID
 
 import pytest
 
-from p8472backup.archive.objects import TYPE_SNAPSHOT, Object
+from p8472backup.archive.objects import TYPE_DATA, TYPE_SNAPSHOT, Object
 from p8472backup.common.error import InconsistentStateError
 from p8472backup.server import trusted_time
 from p8472backup.server.repository_admin_service import RepositoryAdminService
@@ -35,14 +35,14 @@ def test_backup_prunes_its_set_after_commit_and_keeps_shared_objects(tmp_path: P
     repository = facade.init_repository(_CLIENT_ID, {_BACKUP_SET_ID: _KEY_ID, _OTHER_SET_ID: _KEY_ID})
     with patch.object(trusted_time, "server_clock", create=True) as clock:
         clock.now.return_value = _START
-        old = facade.backup(_CLIENT_ID, _BACKUP_SET_ID, iter(((_ROOT, BytesIO(b"r")),)), _ROOT.object_id, prune="")
-        other = facade.backup(_CLIENT_ID, _OTHER_SET_ID, iter(((_ROOT, BytesIO(b"r")),)), _ROOT.object_id, prune="")
+        old = facade.backup(_CLIENT_ID, _BACKUP_SET_ID, iter(((_ROOT, BytesIO(b"r")),)), prune="")
+        other = facade.backup(_CLIENT_ID, _OTHER_SET_ID, iter(((_ROOT, BytesIO(b"r")),)), prune="")
         index_file = repository.index_directory / str(_KEY_ID)
         pack_file = repository.packs_root / str(_KEY_ID) / "1.pack"
         index_contents, pack_contents = index_file.read_bytes(), pack_file.read_bytes()
 
         clock.now.return_value = _START + timedelta(days=8)
-        newest = facade.backup(_CLIENT_ID, _BACKUP_SET_ID, iter(((_ROOT, BytesIO(b"r")),)), _ROOT.object_id, prune="1d")
+        newest = facade.backup(_CLIENT_ID, _BACKUP_SET_ID, iter(((_ROOT, BytesIO(b"r")),)), prune="1d")
 
     old_metadata = repository.snapshot_file(_BACKUP_SET_ID, old.snapshot_id)
     assert not old_metadata.exists()
@@ -55,22 +55,15 @@ def test_backup_prunes_its_set_after_commit_and_keeps_shared_objects(tmp_path: P
     assert list(pack_file.parent.iterdir()) == [pack_file]
 
 
-@pytest.mark.parametrize(
-    ("root_id", "comment", "error"),
-    (
-        (_ROOT.object_id, "x" * 41, "Snapshot comment must be at most 40 characters"),
-        (b"short", None, "Object ID must contain exactly 32 bytes"),
-    ),
-)
-def test_invalid_backup_arguments_preserve_the_saved_prune_rule(tmp_path: Path, root_id: bytes, comment: str | None, error: str) -> None:
+def test_invalid_backup_comment_preserves_the_saved_prune_rule(tmp_path: Path) -> None:
     facade = ServerFacade(tmp_path, server_fqdn=_SERVER_FQDN)
     repository = facade.init_repository(_CLIENT_ID, {_BACKUP_SET_ID: _KEY_ID})
     with patch.object(trusted_time, "server_clock", create=True) as clock:
         clock.now.return_value = _START
-        snapshot = facade.backup(_CLIENT_ID, _BACKUP_SET_ID, iter(((_ROOT, BytesIO(b"r")),)), _ROOT.object_id, prune="7d")
+        snapshot = facade.backup(_CLIENT_ID, _BACKUP_SET_ID, iter(((_ROOT, BytesIO(b"r")),)), prune="7d")
 
-    with pytest.raises(ValueError, match=error):
-        facade.backup(_CLIENT_ID, _BACKUP_SET_ID, iter(()), root_id, prune="1d", comment=comment)
+    with pytest.raises(ValueError, match="Snapshot comment must be at most 40 characters"):
+        facade.backup(_CLIENT_ID, _BACKUP_SET_ID, iter(()), prune="1d", comment="x" * 41)
 
     assert json.loads(repository.backup_set_file(_BACKUP_SET_ID).read_bytes()) == {"prune": "7d"}
     assert RepositoryAdminService.find_by_client_id(tmp_path, _CLIENT_ID).snapshots == {snapshot}
@@ -81,9 +74,9 @@ def test_prune_preserves_an_older_snapshot_if_the_retained_catalogue_is_missing(
     repository = facade.init_repository(_CLIENT_ID, {_BACKUP_SET_ID: _KEY_ID})
     with patch.object(trusted_time, "server_clock", create=True) as clock:
         clock.now.return_value = _START
-        old = facade.backup(_CLIENT_ID, _BACKUP_SET_ID, iter(((_ROOT, BytesIO(b"r")),)), _ROOT.object_id, prune="")
+        old = facade.backup(_CLIENT_ID, _BACKUP_SET_ID, iter(((_ROOT, BytesIO(b"r")),)), prune="")
         clock.now.return_value = _START + timedelta(days=1)
-        newest = facade.backup(_CLIENT_ID, _BACKUP_SET_ID, iter(((_ROOT, BytesIO(b"r")),)), _ROOT.object_id, prune="1d")
+        newest = facade.backup(_CLIENT_ID, _BACKUP_SET_ID, iter(((_ROOT, BytesIO(b"r")),)), prune="1d")
         old_metadata = repository.snapshot_file(_BACKUP_SET_ID, old.snapshot_id)
         repository.snapshot_file(_BACKUP_SET_ID, newest.snapshot_id).with_suffix(".catalog").unlink()
         register = repository.path / "snapshot-registry.json"
@@ -105,19 +98,19 @@ def test_prune_uses_the_latest_valid_rule_and_honors_protection_at_the_deadline(
         facade.prune(_CLIENT_ID, _BACKUP_SET_ID)
 
     def interrupted_upload() -> Iterator[tuple[Object, BinaryIO]]:
-        yield _ROOT, BytesIO(b"r")
+        yield Object(TYPE_DATA, b"d" * 32, 1), BytesIO(b"d")
         raise OSError("Upload interrupted")
 
     with patch.object(trusted_time, "server_clock", create=True) as clock:
         clock.now.return_value = _START
-        old = facade.backup(_CLIENT_ID, _BACKUP_SET_ID, iter(((_ROOT, BytesIO(b"r")),)), _ROOT.object_id, prune="")
+        old = facade.backup(_CLIENT_ID, _BACKUP_SET_ID, iter(((_ROOT, BytesIO(b"r")),)), prune="")
         clock.now.return_value = _START + timedelta(days=1)
-        newest = facade.backup(_CLIENT_ID, _BACKUP_SET_ID, iter(((_ROOT, BytesIO(b"r")),)), _ROOT.object_id, prune="")
+        newest = facade.backup(_CLIENT_ID, _BACKUP_SET_ID, iter(((_ROOT, BytesIO(b"r")),)), prune="")
         clock.now.return_value = _START + timedelta(days=10)
         with pytest.raises(OSError, match="Upload interrupted"):
-            facade.backup(_CLIENT_ID, _BACKUP_SET_ID, interrupted_upload(), _ROOT.object_id, prune="1d")
+            facade.backup(_CLIENT_ID, _BACKUP_SET_ID, interrupted_upload(), prune="1d")
         with pytest.raises(ValueError, match="Prune rule requires one positive count"):
-            facade.backup(_CLIENT_ID, _BACKUP_SET_ID, interrupted_upload(), _ROOT.object_id, prune="1d2d")
+            facade.backup(_CLIENT_ID, _BACKUP_SET_ID, interrupted_upload(), prune="1d2d")
 
         assert json.loads(repository.backup_set_file(_BACKUP_SET_ID).read_bytes()) == {"prune": "1d"}
         assert RepositoryAdminService.find_by_client_id(tmp_path, _CLIENT_ID).snapshots == {old, newest}
@@ -145,9 +138,9 @@ def test_prune_rejects_an_invalid_stored_rule_before_changing_snapshots(tmp_path
     repository = facade.init_repository(_CLIENT_ID, {_BACKUP_SET_ID: _KEY_ID})
     with patch.object(trusted_time, "server_clock", create=True) as clock:
         clock.now.return_value = _START
-        old = facade.backup(_CLIENT_ID, _BACKUP_SET_ID, iter(((_ROOT, BytesIO(b"r")),)), _ROOT.object_id, prune="")
+        old = facade.backup(_CLIENT_ID, _BACKUP_SET_ID, iter(((_ROOT, BytesIO(b"r")),)), prune="")
         clock.now.return_value = _START + timedelta(days=1)
-        newest = facade.backup(_CLIENT_ID, _BACKUP_SET_ID, iter(((_ROOT, BytesIO(b"r")),)), _ROOT.object_id, prune="1d")
+        newest = facade.backup(_CLIENT_ID, _BACKUP_SET_ID, iter(((_ROOT, BytesIO(b"r")),)), prune="1d")
 
         old_metadata = repository.snapshot_file(_BACKUP_SET_ID, old.snapshot_id)
         new_metadata = repository.snapshot_file(_BACKUP_SET_ID, newest.snapshot_id)
@@ -169,7 +162,7 @@ def test_prune_resumes_a_partial_deletion_after_the_next_backup(tmp_path: Path) 
 
     with patch.object(trusted_time, "server_clock", create=True) as clock:
         clock.now.return_value = _START
-        old = facade.backup(_CLIENT_ID, _BACKUP_SET_ID, iter(((_ROOT, BytesIO(b"r")),)), _ROOT.object_id, prune="")
+        old = facade.backup(_CLIENT_ID, _BACKUP_SET_ID, iter(((_ROOT, BytesIO(b"r")),)), prune="")
         metadata = repository.snapshot_file(_BACKUP_SET_ID, old.snapshot_id)
         catalogue = metadata.with_suffix(".catalog")
 
@@ -180,14 +173,14 @@ def test_prune_resumes_a_partial_deletion_after_the_next_backup(tmp_path: Path) 
 
         clock.now.return_value = _START + timedelta(days=1)
         with patch.object(Path, "unlink", fail_catalogue_unlink), pytest.raises(PermissionError, match="Catalogue unlink failed") as failure:
-            facade.backup(_CLIENT_ID, _BACKUP_SET_ID, iter(((_ROOT, BytesIO(b"r")),)), _ROOT.object_id, prune="1d")
+            facade.backup(_CLIENT_ID, _BACKUP_SET_ID, iter(((_ROOT, BytesIO(b"r")),)), prune="1d")
 
         (newest,) = RepositoryAdminService.find_by_client_id(tmp_path, _CLIENT_ID).snapshots
         assert failure.value.__notes__ == [f"Snapshot {newest.snapshot_id} committed before prune failed."]
         assert not metadata.exists()
         assert catalogue.is_file()
 
-        other = facade.backup(_CLIENT_ID, _OTHER_SET_ID, iter(((_ROOT, BytesIO(b"r")),)), _ROOT.object_id, prune="")
+        other = facade.backup(_CLIENT_ID, _OTHER_SET_ID, iter(((_ROOT, BytesIO(b"r")),)), prune="")
         assert catalogue.is_file()
         assert facade.prune(_CLIENT_ID, _BACKUP_SET_ID) == (old.snapshot_id,)
 
@@ -233,9 +226,9 @@ def test_prune_recovers_after_a_process_is_killed(tmp_path: Path, replace_number
     register = repository.path / "snapshot-registry.json"
     with patch.object(trusted_time, "server_clock", create=True) as clock:
         clock.now.return_value = _START
-        old = facade.backup(_CLIENT_ID, _BACKUP_SET_ID, iter(((_ROOT, BytesIO(b"r")),)), _ROOT.object_id, prune="")
+        old = facade.backup(_CLIENT_ID, _BACKUP_SET_ID, iter(((_ROOT, BytesIO(b"r")),)), prune="")
         clock.now.return_value = _START + timedelta(days=1)
-        newest = facade.backup(_CLIENT_ID, _BACKUP_SET_ID, iter(((_ROOT, BytesIO(b"r")),)), _ROOT.object_id, prune="1d")
+        newest = facade.backup(_CLIENT_ID, _BACKUP_SET_ID, iter(((_ROOT, BytesIO(b"r")),)), prune="1d")
         now = _START + timedelta(days=8)
         clock.now.return_value = now
         metadata = repository.snapshot_file(_BACKUP_SET_ID, old.snapshot_id)

@@ -30,10 +30,10 @@ _STARTED_AT = datetime(2026, 1, 1, tzinfo=UTC)
 
 
 def _backup(facade: ServerFacade, set_id: UUID = _SET_ID, *, root_id: ObjectId = _ROOT_ID) -> Snapshot:
-    records = ((Object(TYPE_SNAPSHOT, root_id, 1), BytesIO(b"r")), (Object(TYPE_DATA, _DATA_ID, 3), BytesIO(b"abc")))
+    records = ((Object(TYPE_DATA, _DATA_ID, 3), BytesIO(b"abc")), (Object(TYPE_SNAPSHOT, root_id, 1), BytesIO(b"r")))
     with patch.object(trusted_time, "server_clock", create=True) as clock:
         clock.now.return_value = _STARTED_AT
-        return facade.backup(_CLIENT_ID, set_id, iter(records), root_id, prune="")
+        return facade.backup(_CLIENT_ID, set_id, iter(records), prune="")
 
 
 @pytest.fixture
@@ -154,12 +154,13 @@ def test_check_reports_missing_or_invalid_snapshot_files(saved_backup: tuple[Ser
     ("field", "value", "message"),
     (
         ("backup_set_id", str(_OTHER_SET_ID), "Snapshot identity or scope does not match"),
+        ("comment", 42, "Invalid snapshot comment"),
         ("committed_at", "2026-01-01T00:00:00", "Snapshot timestamps must include a time zone"),
         ("committed_at", "0001-01-01T00:00:00+01:00", "date value out of range"),
         ("protected_until", "2025-12-31T23:59:59+00:00", "Snapshot protection deadline precedes commit time"),
     ),
 )
-def test_check_validates_snapshot_metadata(saved_backup: tuple[ServerFacade, Repository, Path], field: str, value: str, message: str) -> None:
+def test_check_validates_snapshot_metadata(saved_backup: tuple[ServerFacade, Repository, Path], field: str, value: str | int, message: str) -> None:
     facade, _, path = saved_backup
     metadata: dict[str, object] = json.loads(path.read_text(encoding="utf-8"))
     metadata[field] = value
@@ -279,7 +280,7 @@ def test_check_validates_pack_object_headers(saved_backup: tuple[ServerFacade, R
     facade, repository, _ = saved_backup
     path = repository.packs_root / str(_KEY_ID) / "1.pack"
     with path.open("r+b") as source:
-        source.seek(PACK_HEADER_SIZE)
+        source.seek(PACK_HEADER_SIZE + OBJECT_HEADER_SIZE + len(b"abc"))
         source.write(obj.to_header())
 
     with pytest.raises(InconsistentStateError, match=message):

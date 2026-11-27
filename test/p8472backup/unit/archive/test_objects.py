@@ -1,5 +1,7 @@
 from dataclasses import FrozenInstanceError
+from io import BytesIO
 from typing import cast
+from unittest.mock import patch
 
 import pytest
 
@@ -12,6 +14,12 @@ _VALID_HEADER = bytes.fromhex("01000100000102030405060708090a0b0c0d0e0f101112131
 
 
 class TestObject:
+    def test_read_body_rejects_a_short_write(self) -> None:
+        obj = Object(1, _OBJECT_ID, 3)
+        output = BytesIO()
+        with patch.object(output, "write", return_value=2), pytest.raises(OSError, match="Short write while copying object body"):
+            obj.read_body(BytesIO(b"abc"), output)
+
     def test_to_header_matches_wire_format(self) -> None:
         assert Object(1, _OBJECT_ID, _BODY_LENGTH).to_header() == _VALID_HEADER
 

@@ -34,8 +34,8 @@ def test_init_repository_rejects_second_init_and_preserves_backup(tmp_path: Path
     snapshots = SnapshotService()
     with patch.object(trusted_time, "server_clock", create=True) as clock, admin_service.locked_repository(tmp_path, _CLIENT_ID) as (current, lock):
         clock.now.return_value = datetime(2026, 1, 1, tzinfo=UTC)
-        snapshot = snapshots.create_snapshot(current, _BACKUP_SET_ID, iter(((root, BytesIO(body)),)), root.object_id, lock=lock)
-        other_snapshot = snapshots.create_snapshot(current, other_set_id, iter(((root, BytesIO(body)),)), root.object_id, lock=lock)
+        snapshot = snapshots.create_snapshot(current, _BACKUP_SET_ID, iter(((root, BytesIO(body)),)), lock=lock)
+        other_snapshot = snapshots.create_snapshot(current, other_set_id, iter(((root, BytesIO(body)),)), lock=lock)
     (repository.snapshots_root / str(_BACKUP_SET_ID) / ".snapshot-interrupted").write_bytes(b"incomplete")
     files = (path / "repository.json", repository.index_directory / str(_KEY_ID), repository.packs_root / str(_KEY_ID) / "1.pack", repository.snapshot_file(_BACKUP_SET_ID, snapshot.snapshot_id))
     contents = tuple(file.read_bytes() for file in files)

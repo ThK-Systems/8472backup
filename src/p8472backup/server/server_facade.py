@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import BinaryIO
 from uuid import UUID
 
-from p8472backup.archive.objects import Object, ObjectId
+from p8472backup.archive.objects import Object
 from p8472backup.common.error import InconsistentStateError
 from p8472backup.common.log import Log
 from p8472backup.server.repository import BackupMode, Repository
@@ -62,20 +62,20 @@ class ServerFacade:
         with service.locked_repository(self._storage_root, client_id, operation="set_mode") as (repository, lock):
             service.set_mode(repository, mode, lock)
 
-    def backup(self, client_id: UUID, backup_set_id: UUID, records: Iterator[tuple[Object, BinaryIO]], root_id: ObjectId, *, prune: str, comment: str | None = None, auto_cleanup: bool = False) -> Snapshot:
-        """Accept a prune rule, commit a local backup, and apply the rule."""
+    def backup(self, client_id: UUID, backup_set_id: UUID, records: Iterator[tuple[Object, BinaryIO]], *, prune: str, comment: str | None = None, auto_cleanup: bool = False) -> Snapshot:
+        """Commit client-supplied records through the final snapshot root and prune."""
         repo_admin_service = RepositoryAdminService()
         snapshots = SnapshotService()
         snapshot_id: UUID | None = None
         try:
             with repo_admin_service.locked_repository(self._storage_root, client_id) as (repository, lock):
                 backup_set = repository.get_active_backup_set(backup_set_id)
-                snapshots.validate_snapshot_input(root_id, comment)
+                snapshots.validate_comment(comment)
                 # Reject invalid rules before reserving a run marker.
                 parse_prune_rule(prune)
                 with snapshots.backup_run(repository, backup_set, lock, auto_cleanup=auto_cleanup) as snapshot_id:
                     repo_admin_service.save_prune_rule(repository, backup_set, lock, prune, temporary_prefix=backup_temporary_prefix(snapshot_id))
-                    snapshot = snapshots.create_snapshot(repository, backup_set_id, records, root_id, lock=lock, snapshot_id=snapshot_id, protection_duration=self._protection_duration, comment=comment)
+                    snapshot = snapshots.create_snapshot(repository, backup_set_id, records, lock=lock, snapshot_id=snapshot_id, protection_duration=self._protection_duration, comment=comment)
                 try:
                     snapshots.prune(repository, backup_set, lock, prune_rule=prune, protection_duration=self._protection_duration)
                 except Exception as error:

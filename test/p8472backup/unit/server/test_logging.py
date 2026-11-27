@@ -103,10 +103,10 @@ def test_server_reports_shutdown_once(error: BaseException | None, exit_code: in
 def test_backup_logging_records_admission_commit_and_retention(facade: ServerFacade, caplog: pytest.LogCaptureFixture) -> None:
     with patch.object(trusted_time, "server_clock", create=True) as clock:
         clock.now.return_value = _NOW
-        facade.backup(_CLIENT_ID, _SET_ID, iter(((_ROOT, BytesIO(b"r")),)), _ROOT.object_id, prune="1d")
+        facade.backup(_CLIENT_ID, _SET_ID, iter(((_ROOT, BytesIO(b"r")),)), prune="1d")
         caplog.clear()
         clock.now.return_value = _NOW + timedelta(days=8)
-        snapshot = facade.backup(_CLIENT_ID, _SET_ID, iter(((_ROOT, BytesIO(b"r")),)), _ROOT.object_id, prune="1d", comment="private backup comment")
+        snapshot = facade.backup(_CLIENT_ID, _SET_ID, iter(((_ROOT, BytesIO(b"r")),)), prune="1d", comment="private backup comment")
 
     scope = f"client_id={_CLIENT_ID} backup_set_id={_SET_ID}"
     assert caplog.record_tuples == [
@@ -119,7 +119,7 @@ def test_backup_logging_records_admission_commit_and_retention(facade: ServerFac
 def test_failed_backup_emits_one_warning_and_logs_automatic_cleanup(facade: ServerFacade, caplog: pytest.LogCaptureFixture) -> None:
     body = BytesIO()
     with pytest.raises(ValueError, match="Truncated object body"):
-        facade.backup(_CLIENT_ID, _SET_ID, iter(((_ROOT, body),)), _ROOT.object_id, prune="", auto_cleanup=True)
+        facade.backup(_CLIENT_ID, _SET_ID, iter(((_ROOT, body),)), prune="", auto_cleanup=True)
 
     scope = f"client_id={_CLIENT_ID} backup_set_id={_SET_ID}"
     records = caplog.record_tuples

@@ -56,10 +56,15 @@ class _SnapshotRegistry:
 class SnapshotService:
     """Use one repository, backup set, and key domain for snapshot operations."""
 
-    def validate_snapshot_input(self, root_id: ObjectId, comment: str | None) -> None:
-        """Validate snapshot arguments available before reading the object stream."""
-        self._validate_comment(comment)
-        Object.validate_object_id(root_id)
+    def validate_comment(self, comment: object) -> str | None:
+        """Validate a server-readable snapshot comment."""
+        if comment is None:
+            return None
+        if not isinstance(comment, str):
+            raise ValueError("Invalid snapshot comment")
+        if len(comment) > 40:
+            raise ValueError("Snapshot comment must be at most 40 characters")
+        return comment
 
     @contextmanager
     def backup_run(self, repository: Repository, backup_set: BackupSet, lock: RepositoryLock, *, auto_cleanup: bool) -> Generator[UUID, None, None]:
@@ -162,7 +167,6 @@ class SnapshotService:
         repository: Repository,
         backup_set_id: UUID,
         records: Iterator[tuple[Object, BinaryIO]],
-        root_id: ObjectId,
         *,
         lock: RepositoryLock,
         snapshot_id: UUID | None = None,
@@ -175,7 +179,7 @@ class SnapshotService:
             raise ValueError("Snapshot protection duration must be nonnegative")
         if target_size <= 0:
             raise ValueError("Pack target size must be positive")
-        self.validate_snapshot_input(root_id, comment)
+        self.validate_comment(comment)
 
         backup_set = repository.get_active_backup_set(backup_set_id)
         if snapshot_id is None:
@@ -193,18 +197,8 @@ class SnapshotService:
         index_path = repository.index_directory / str(backup_set.key_id)
         pack_directory = lock.require_held_for(repository.packs_root / str(backup_set.key_id))
         index = LocationIndex.load_from(index_path, lock)
-        first = next(records, None)
-        if first is None or first[0].object_type != TYPE_SNAPSHOT or first[0].object_id != root_id:
-            raise ValueError("The first record must be the declared type 3 snapshot root")
-
-        if (location := index.get(root_id)) is not None:
-            pack = lock.require_held_for(pack_directory / f"{location.pack_id}.pack")
-            root = Pack.read_object_header(pack, location.offset, location.length)
-            if root.object_type != TYPE_SNAPSHOT or root.object_id != root_id:
-                raise InconsistentStateError("Indexed snapshot root does not match the stored object")
-
         temporary_prefix = backup_temporary_prefix(snapshot_id)
-        catalogue = self._store_snapshot_objects(chain((first,), records), index, lock, pack_directory, target_size, temporary_prefix=temporary_prefix)
+        root_id, catalogue = self._store_snapshot_objects(records, index, lock, pack_directory, target_size, temporary_prefix=temporary_prefix)
         if not index.save_to(index_path, lock, temporary_prefix=temporary_prefix):
             # An interrupted save can leave a visible checkpoint with an unsynced name.
             sync_directory(index_path.parent)
@@ -452,15 +446,6 @@ class SnapshotService:
     def _is_protected(self, metadata: _SnapshotMetadata, now: datetime, protection_duration: timedelta) -> bool:
         return now <= max(metadata.protected_until, metadata.committed_at + protection_duration)
 
-    def _validate_comment(self, comment: object) -> str | None:
-        if comment is None:
-            return None
-        if not isinstance(comment, str):
-            raise ValueError("Invalid snapshot comment")
-        if len(comment) > 40:
-            raise ValueError("Snapshot comment must be at most 40 characters")
-        return comment
-
     def _save_snapshot(self, snapshot: Snapshot, repository: Repository, path: Path, lock: RepositoryLock, *, temporary_prefix: str) -> None:
         """Write the durable snapshot files before publishing their register entry."""
         if snapshot.version != SNAPSHOT_VERSION:
@@ -512,7 +497,7 @@ class SnapshotService:
         committed, protected = metadata.get("committed_at"), metadata.get("protected_until")
         if not isinstance(stored_root, str) or not isinstance(stored_checksum, str) or not isinstance(committed, str) or not isinstance(protected, str):
             raise ValueError("Invalid snapshot metadata")
-        comment = self._validate_comment(metadata.get("comment"))
+        comment = self.validate_comment(metadata.get("comment"))
         root_id = bytes.fromhex(stored_root)
         Object.validate_object_id(root_id)
         checksum = bytes.fromhex(stored_checksum)
@@ -572,20 +557,35 @@ class SnapshotService:
         target_size: int,
         *,
         temporary_prefix: str,
-    ) -> ObjectCatalogue:
-        """Collect the catalogue and write new objects to packs.
+    ) -> tuple[ObjectId, ObjectCatalogue]:
+        """Store new objects and collect membership through the final root.
 
-        The input iterator must allow advancing past an unread body.
+        The input iterator must allow advancing past an unread non-root body.
         """
         object_ids: set[ObjectId] = set()
+        root_id: ObjectId | None = None
 
         def iter_missing_objects() -> Iterator[tuple[Object, BinaryIO]]:
+            nonlocal root_id
             for obj, body in records:
+                is_root = obj.object_type == TYPE_SNAPSHOT
                 if obj.object_id in object_ids:
+                    if is_root:
+                        raise ValueError("Snapshot root ID matches an earlier object in the backup")
                     continue
                 object_ids.add(obj.object_id)
-                if index.get(obj.object_id) is None:
+                location = index.get(obj.object_id)
+                if location is None:
                     yield obj, body
+                elif is_root:
+                    pack = lock.require_held_for(pack_directory / f"{location.pack_id}.pack")
+                    stored = Pack.read_object_header(pack, location.offset, location.length)
+                    if stored.object_type != TYPE_SNAPSHOT or stored.object_id != obj.object_id:
+                        raise InconsistentStateError("Indexed snapshot root does not match the stored object")
+                    obj.read_body(body)
+                if is_root:
+                    root_id = obj.object_id
+                    return
 
         missing = iter_missing_objects()
         destinations = self._pack_destinations(pack_directory, index)
@@ -600,7 +600,9 @@ class SnapshotService:
 
             Pack.write_to(path, chain((first,), missing), target_size, on_stored=record_location, temporary_prefix=temporary_prefix)
 
-        return ObjectCatalogue(frozenset(object_ids))
+        if root_id is None:
+            raise ValueError("Backup input ended before the final snapshot root")
+        return root_id, ObjectCatalogue(frozenset(object_ids))
 
     @staticmethod
     def _pack_destinations(directory: Path, index: LocationIndex) -> Iterator[tuple[int, Path]]:

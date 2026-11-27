@@ -247,7 +247,7 @@ def test_remove_backup_set_respects_effective_protection_and_shared_packs(tmp_pa
 
     def take_snapshot(set_id: UUID, days: int = 7) -> Snapshot:
         with RepositoryAdminService().locked_repository(tmp_path, _CLIENT_ID) as (current, lock):
-            return snapshots.create_snapshot(current, set_id, iter(((root, BytesIO(b"r")),)), root.object_id, lock=lock, protection_duration=timedelta(days=days))
+            return snapshots.create_snapshot(current, set_id, iter(((root, BytesIO(b"r")),)), lock=lock, protection_duration=timedelta(days=days))
 
     with patch.object(trusted_time, "server_clock", create=True) as clock:
         clock.now.return_value = started_at
@@ -289,7 +289,7 @@ def test_remove_backup_set_persists_state_and_can_retry_failed_register_write(tm
     with patch.object(trusted_time, "server_clock", create=True) as clock:
         clock.now.return_value = datetime(2026, 1, 1, tzinfo=UTC)
         with RepositoryAdminService().locked_repository(tmp_path, _CLIENT_ID) as (current, lock):
-            snapshot = SnapshotService().create_snapshot(current, _FIRST_SET, iter(((root, BytesIO(b"r")),)), root.object_id, lock=lock)
+            snapshot = SnapshotService().create_snapshot(current, _FIRST_SET, iter(((root, BytesIO(b"r")),)), lock=lock)
         path = repository.snapshot_file(_FIRST_SET, snapshot.snapshot_id)
 
         clock.now.return_value = snapshot.protected_until + timedelta(seconds=1)
@@ -316,10 +316,10 @@ def test_invalid_trusted_time_blocks_snapshot_publication_and_deletion(tmp_path:
     with patch.object(trusted_time, "server_clock", create=True) as clock:
         clock.now.return_value = datetime(2026, 1, 1, tzinfo=UTC)
         with admin.locked_repository(tmp_path, _CLIENT_ID) as (repository, lock):
-            committed = snapshots.create_snapshot(repository, _FIRST_SET, iter(((root, BytesIO(b"r")),)), root.object_id, lock=lock)
+            committed = snapshots.create_snapshot(repository, _FIRST_SET, iter(((root, BytesIO(b"r")),)), lock=lock)
             clock.now.side_effect = TrustedTimeError("Trusted time reference expired")
             with pytest.raises(TrustedTimeError, match="reference expired"):
-                snapshots.create_snapshot(repository, _FIRST_SET, iter(((root, BytesIO(b"r")),)), root.object_id, lock=lock)
+                snapshots.create_snapshot(repository, _FIRST_SET, iter(((root, BytesIO(b"r")),)), lock=lock)
 
         with pytest.raises(TrustedTimeError, match="reference expired"):
             service.remove_backup_set(_CLIENT_ID, _FIRST_SET)
@@ -354,9 +354,9 @@ def test_remove_repository_retires_all_sets_before_snapshot_cleanup_and_can_retr
     with patch.object(trusted_time, "server_clock", create=True) as clock:
         with admin.locked_repository(tmp_path, _CLIENT_ID) as (current, lock):
             clock.now.return_value = started_at
-            expired = snapshots.create_snapshot(current, _FIRST_SET, iter(((root, BytesIO(b"r")),)), root.object_id, lock=lock)
+            expired = snapshots.create_snapshot(current, _FIRST_SET, iter(((root, BytesIO(b"r")),)), lock=lock)
             clock.now.return_value = started_at + timedelta(days=1)
-            protected = snapshots.create_snapshot(current, _SECOND_SET, iter(((root, BytesIO(b"r")),)), root.object_id, lock=lock)
+            protected = snapshots.create_snapshot(current, _SECOND_SET, iter(((root, BytesIO(b"r")),)), lock=lock)
             with pytest.raises(BlockingIOError):
                 service.remove_repository(_CLIENT_ID)
 
@@ -383,7 +383,7 @@ def test_remove_repository_retires_all_sets_before_snapshot_cleanup_and_can_retr
         with pytest.raises(ValueError, match="Repository is deleted"):
             service.set_mode(_CLIENT_ID, "push")
         with admin.locked_repository(tmp_path, _CLIENT_ID) as (current, lock), pytest.raises(ValueError, match="Repository is deleted"):
-            snapshots.create_snapshot(current, _SECOND_SET, iter(((root, BytesIO(b"r")),)), root.object_id, lock=lock)
+            snapshots.create_snapshot(current, _SECOND_SET, iter(((root, BytesIO(b"r")),)), lock=lock)
 
 
 def test_set_mode_persists_client_mode_under_repository_lock(tmp_path: Path) -> None:
@@ -433,11 +433,11 @@ def test_list_groups_published_snapshots_and_formats_protection(tmp_path: Path) 
         with RepositoryAdminService().locked_repository(tmp_path, _CLIENT_ID) as (repository, lock):
             clock.now.return_value = started_at
             with pytest.raises(ValueError, match="at most 40 characters"):
-                snapshots.create_snapshot(repository, _FIRST_SET, iter(((root, BytesIO(b"r")),)), root.object_id, lock=lock, comment="x" * 41)
-            old = snapshots.create_snapshot(repository, _FIRST_SET, iter(((root, BytesIO(b"r")),)), root.object_id, lock=lock)
+                snapshots.create_snapshot(repository, _FIRST_SET, iter(((root, BytesIO(b"r")),)), lock=lock, comment="x" * 41)
+            old = snapshots.create_snapshot(repository, _FIRST_SET, iter(((root, BytesIO(b"r")),)), lock=lock)
             clock.now.return_value = started_at + timedelta(days=1)
-            latest = snapshots.create_snapshot(repository, _FIRST_SET, iter(((root, BytesIO(b"r")),)), root.object_id, lock=lock, comment="Before upgrade")
-            other = snapshots.create_snapshot(repository, _SECOND_SET, iter(((root, BytesIO(b"r")),)), root.object_id, lock=lock)
+            latest = snapshots.create_snapshot(repository, _FIRST_SET, iter(((root, BytesIO(b"r")),)), lock=lock, comment="Before upgrade")
+            other = snapshots.create_snapshot(repository, _SECOND_SET, iter(((root, BytesIO(b"r")),)), lock=lock)
         clock.now.return_value = started_at + timedelta(days=11)
         clock.now.reset_mock()
 
