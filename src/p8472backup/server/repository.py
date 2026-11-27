@@ -59,6 +59,19 @@ class Repository:
             raise ValueError(f"Backup set is not registered in this repository: {backup_set_id}")
         return backup_set
 
+    def get_active_backup_set(self, backup_set_id: UUID) -> BackupSet:
+        """Resolve a set that can accept backup or prune operations."""
+        if self.deleted:
+            raise ValueError(f"Repository is deleted: {self.client_id}")
+        backup_set = self.get_backup_set(backup_set_id)
+        if backup_set.deleted:
+            raise ValueError(f"Backup set is deleted: {backup_set_id}")
+        return backup_set
+
+    def backup_set_file(self, backup_set_id: UUID) -> Path:
+        """Return the operational metadata file for the selected set."""
+        return self.path / "backup-sets" / f"{backup_set_id}.json"
+
     @property
     def data_directory(self) -> Path:
         """Return the directory containing indexes and packs."""

@@ -372,6 +372,9 @@ def test_remove_repository_retires_all_sets_before_snapshot_cleanup_and_can_retr
         service.remove_repository(_CLIENT_ID)
         reopened = admin.find_by_client_id(tmp_path, _CLIENT_ID)
         assert reopened.snapshots == {protected}
+        expired_file = repository.snapshot_file(_FIRST_SET, expired.snapshot_id)
+        assert not expired_file.exists()
+        assert not expired_file.with_suffix(".catalog").exists()
         assert snapshots.get_snapshot(reopened, _SECOND_SET, protected.snapshot_id) == protected
         assert (repository.packs_root / str(_KEY_ID) / "1.pack").is_file()
 

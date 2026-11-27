@@ -17,6 +17,7 @@ from p8472backup.archive.objects import OBJECT_ID_SIZE, TYPE_SNAPSHOT, Object, O
 from p8472backup.common.error import InconsistentStateError
 from p8472backup.server import trusted_time
 from p8472backup.server.repository import BackupSet, Repository
+from p8472backup.server.retention.policy import parse_prune_rule, retained_snapshots
 from p8472backup.server.snapshot import SNAPSHOT_VERSION, ObjectCatalogue, Snapshot
 from p8472backup.server.snapshot_listing import BackupSetListing, SnapshotListEntry
 from p8472backup.storage.file.index import LocationIndex, ObjectLocation
@@ -39,8 +40,19 @@ class _SnapshotMetadata:
     comment: str | None
 
 
+@dataclass(frozen=True)
+class _SnapshotRegistry:
+    snapshots: dict[UUID, UUID]
+    pending_deletions: dict[UUID, UUID]
+
+
 class SnapshotService:
     """Use one repository, backup set, and key domain for snapshot operations."""
+
+    def validate_snapshot_input(self, root_id: ObjectId, comment: str | None) -> None:
+        """Validate snapshot arguments available before reading the object stream."""
+        self._validate_comment(comment)
+        Object.validate_object_id(root_id)
 
     def create_snapshot(
         self,
@@ -60,14 +72,9 @@ class SnapshotService:
             raise ValueError("Snapshot protection duration must be nonnegative")
         if target_size <= 0:
             raise ValueError("Pack target size must be positive")
-        self._validate_comment(comment)
+        self.validate_snapshot_input(root_id, comment)
 
-        if repository.deleted:
-            raise ValueError(f"Repository is deleted: {repository.client_id}")
-        backup_set = repository.get_backup_set(backup_set_id)
-        if backup_set.deleted:
-            raise ValueError(f"Backup set is deleted: {backup_set_id}")
-        Object.validate_object_id(root_id)
+        backup_set = repository.get_active_backup_set(backup_set_id)
         if snapshot_id is None:
             snapshot_id = uuid4()
 
@@ -77,7 +84,7 @@ class SnapshotService:
             raise NotADirectoryError(directory)
         path = directory / path.name
         registry = self._read_registry(repository, lock)
-        if snapshot_id in registry or os.path.lexists(path) or os.path.lexists(path.with_suffix(".catalog")):
+        if snapshot_id in registry.snapshots or snapshot_id in registry.pending_deletions or os.path.lexists(path) or os.path.lexists(path.with_suffix(".catalog")):
             raise FileExistsError(f"Snapshot already exists: {path}")
 
         index_path = repository.index_directory / str(backup_set.key_id)
@@ -100,7 +107,7 @@ class SnapshotService:
             comment=comment,
         )
         self._save_snapshot(snapshot, repository, path, lock)
-        registry[snapshot_id] = backup_set_id
+        registry.snapshots[snapshot_id] = backup_set_id
         self._write_registry(repository, lock, registry)
         return snapshot
 
@@ -108,14 +115,14 @@ class SnapshotService:
         """Load a committed snapshot in this service's client and backup set."""
         repository.get_backup_set(backup_set_id)
         with RepositoryLock(repository.path) as lock:
-            if self._read_registry(repository, lock).get(snapshot_id) != backup_set_id:
+            if self._read_registry(repository, lock).snapshots.get(snapshot_id) != backup_set_id:
                 raise FileNotFoundError(f"Snapshot is not published in this set: {snapshot_id}")
             return self._load_snapshot(repository, backup_set_id, snapshot_id, lock)
 
     def list_snapshots(self, repository: Repository, lock: RepositoryLock) -> frozenset[Snapshot]:
         """Load published metadata and defer catalogue reads under the given lock."""
         registry = self._read_registry(repository, lock)
-        return frozenset(self._load_snapshot(repository, set_id, snapshot_id, lock, defer_catalogue=True) for snapshot_id, set_id in registry.items())
+        return frozenset(self._load_snapshot(repository, set_id, snapshot_id, lock, defer_catalogue=True) for snapshot_id, set_id in registry.snapshots.items())
 
     def list_snapshot_entries(self, repository: Repository, lock: RepositoryLock, *, backup_set_id: UUID | None, protection_duration: timedelta) -> tuple[BackupSetListing, ...]:
         """Load the published metadata needed for the listing."""
@@ -123,7 +130,7 @@ class SnapshotService:
         rows_by_set: dict[UUID, list[SnapshotListEntry]] = {backup_set.backup_set_id: [] for backup_set in sets}
         registry = self._read_registry(repository, lock)
         now = trusted_time.server_clock.now()
-        for snapshot_id, set_id in registry.items():
+        for snapshot_id, set_id in registry.snapshots.items():
             if (rows := rows_by_set.get(set_id)) is not None:
                 metadata = self._read_snapshot_metadata(repository, set_id, snapshot_id, lock)
                 rows.append(SnapshotListEntry(snapshot_id, metadata.comment, metadata.committed_at, self._is_protected(metadata, now, protection_duration)))
@@ -136,33 +143,69 @@ class SnapshotService:
             groups.append(BackupSetListing(set_id, backup_set.name or str(set_id), tuple(rows)))
         return tuple(groups)
 
+    def prune(self, repository: Repository, backup_set: BackupSet, lock: RepositoryLock, *, prune_rule: str, protection_duration: timedelta) -> tuple[UUID, ...]:
+        """Apply the calendar policy to the published snapshots of one active set."""
+        backup_set_id = backup_set.backup_set_id
+        if repository.get_active_backup_set(backup_set_id) != backup_set:
+            raise ValueError(f"Backup set does not match the repository: {backup_set_id}")
+
+        counts = parse_prune_rule(prune_rule)
+        registry = self._read_registry(repository, lock)
+        snapshots = self._read_set_snapshot_metadata(repository, backup_set_id, lock, registry)
+        keep = retained_snapshots({snapshot_id: metadata.committed_at for snapshot_id, metadata in snapshots.items()}, counts)
+        candidates = {snapshot_id: metadata for snapshot_id, metadata in snapshots.items() if snapshot_id not in keep}
+        return self._delete_unprotected_snapshots(repository, backup_set_id, lock, registry, candidates, protection_duration=protection_duration)
+
     def remove_unprotected_snapshots(self, repository: Repository, backup_set: BackupSet, lock: RepositoryLock, *, protection_duration: timedelta) -> None:
         """Remove expired snapshot records from a deleted backup set."""
         backup_set_id = backup_set.backup_set_id
         if not backup_set.deleted or repository.backup_sets.get(backup_set_id) != backup_set:
             raise ValueError(f"Backup set is not deleted in this repository: {backup_set_id}")
+        registry = self._read_registry(repository, lock)
+        snapshots = self._read_set_snapshot_metadata(repository, backup_set_id, lock, registry)
+        for snapshot_id, metadata in snapshots.items():
+            self._read_catalogue(repository.snapshot_file(backup_set_id, snapshot_id), lock, metadata)
+        self._delete_unprotected_snapshots(repository, backup_set_id, lock, registry, snapshots, protection_duration=protection_duration)
+
+    def _read_set_snapshot_metadata(self, repository: Repository, backup_set_id: UUID, lock: RepositoryLock, registry: _SnapshotRegistry) -> dict[UUID, _SnapshotMetadata]:
+        return {snapshot_id: self._read_snapshot_metadata(repository, set_id, snapshot_id, lock) for snapshot_id, set_id in registry.snapshots.items() if set_id == backup_set_id}
+
+    def _delete_unprotected_snapshots(
+        self,
+        repository: Repository,
+        backup_set_id: UUID,
+        lock: RepositoryLock,
+        registry: _SnapshotRegistry,
+        candidates: dict[UUID, _SnapshotMetadata],
+        *,
+        protection_duration: timedelta,
+    ) -> tuple[UUID, ...]:
         directory = lock.require_held_for(repository.snapshots_root / str(backup_set_id))
         now = trusted_time.server_clock.now()
-        registry = self._read_registry(repository, lock)
-        expired: list[UUID] = []
-        for snapshot_id, set_id in registry.items():
-            if set_id != backup_set_id:
-                continue
-            metadata = self._read_snapshot_metadata(repository, set_id, snapshot_id, lock)
-            self._read_catalogue(repository.snapshot_file(set_id, snapshot_id), lock, metadata)
-            if not self._is_protected(metadata, now, protection_duration):
-                expired.append(snapshot_id)
-        if expired:
-            for snapshot_id in expired:
-                del registry[snapshot_id]
-            self._write_registry(repository, lock, registry)
-            for snapshot_id in expired:
-                path = directory / repository.snapshot_file(backup_set_id, snapshot_id).name
-                path.unlink()
-                path.with_suffix(".catalog").unlink()
-            sync_directory(directory)
+        expired = [snapshot_id for snapshot_id, metadata in candidates.items() if not self._is_protected(metadata, now, protection_duration)]
+        for snapshot_id in expired:
+            registry.pending_deletions[snapshot_id] = registry.snapshots.pop(snapshot_id)
 
-    def _read_registry(self, repository: Repository, lock: RepositoryLock) -> dict[UUID, UUID]:
+        pending = tuple(snapshot_id for snapshot_id, set_id in registry.pending_deletions.items() if set_id == backup_set_id)
+        if not pending:
+            return ()
+        if expired:
+            self._write_registry(repository, lock, registry)
+        else:
+            # An earlier attempt may have replaced the register before syncing its directory.
+            sync_directory(repository.path)
+
+        for snapshot_id in pending:
+            path = directory / repository.snapshot_file(backup_set_id, snapshot_id).name
+            path.unlink(missing_ok=True)
+            path.with_suffix(".catalog").unlink(missing_ok=True)
+        sync_directory(directory)
+        for snapshot_id in pending:
+            del registry.pending_deletions[snapshot_id]
+        self._write_registry(repository, lock, registry)
+        return pending
+
+    def _read_registry(self, repository: Repository, lock: RepositoryLock) -> _SnapshotRegistry:
         path = lock.require_held_for(repository.path / SNAPSHOT_REGISTRY_NAME)
         try:
             with path.open("r", encoding="utf-8") as source:
@@ -171,8 +214,22 @@ class SnapshotService:
             raise InconsistentStateError("Snapshot register is missing") from error
         if not is_json_object(registry):
             raise ValueError("Invalid snapshot register")
-        version, entries = registry.get("version"), registry.get("snapshots")
-        if type(version) is not int or version != SNAPSHOT_REGISTRY_VERSION or not is_json_object(entries):
+        version = registry.get("version")
+        if type(version) is not int or version != SNAPSHOT_REGISTRY_VERSION:
+            raise ValueError("Invalid snapshot register")
+        snapshots = self._read_registry_entries(repository, registry.get("snapshots"))
+        pending_deletions = self._read_registry_entries(repository, registry.get("pending_deletions", {}))
+        if snapshots.keys() & pending_deletions.keys():
+            raise ValueError("Snapshot register contains published entries pending deletion")
+        if not snapshots:
+            for set_id in repository.backup_sets:
+                directory = lock.require_held_for(repository.snapshots_root / str(set_id))
+                if any(entry.suffix == ".snapshot" for entry in directory.iterdir()):
+                    raise InconsistentStateError("Repository contains development snapshot records that require conversion")
+        return _SnapshotRegistry(snapshots, pending_deletions)
+
+    def _read_registry_entries(self, repository: Repository, entries: object) -> dict[UUID, UUID]:
+        if not is_json_object(entries):
             raise ValueError("Invalid snapshot register")
         snapshots: dict[UUID, UUID] = {}
         for stored_id, stored_set in entries.items():
@@ -182,23 +239,26 @@ class SnapshotService:
             if snapshot_id in snapshots or set_id not in repository.backup_sets:
                 raise ValueError("Invalid snapshot register entry")
             snapshots[snapshot_id] = set_id
-        if not snapshots:
-            for set_id in repository.backup_sets:
-                directory = lock.require_held_for(repository.snapshots_root / str(set_id))
-                if any(entry.suffix == ".snapshot" for entry in directory.iterdir()):
-                    raise InconsistentStateError("Repository contains development snapshot records that require conversion")
         return snapshots
 
-    def _write_registry(self, repository: Repository, lock: RepositoryLock, registry: dict[UUID, UUID]) -> None:
-        snapshots = {str(snapshot_id): str(set_id) for snapshot_id, set_id in registry.items()}
-        write_json(repository.path / SNAPSHOT_REGISTRY_NAME, lock, {"version": SNAPSHOT_REGISTRY_VERSION, "snapshots": snapshots})
+    def _write_registry(self, repository: Repository, lock: RepositoryLock, registry: _SnapshotRegistry) -> None:
+        data: dict[str, object] = {"version": SNAPSHOT_REGISTRY_VERSION}
+        for key, entries in (("snapshots", registry.snapshots), ("pending_deletions", registry.pending_deletions)):
+            if entries or key == "snapshots":
+                data[key] = {str(snapshot_id): str(set_id) for snapshot_id, set_id in entries.items()}
+        write_json(repository.path / SNAPSHOT_REGISTRY_NAME, lock, data)
 
     def _is_protected(self, metadata: _SnapshotMetadata, now: datetime, protection_duration: timedelta) -> bool:
         return now <= max(metadata.protected_until, metadata.committed_at + protection_duration)
 
-    def _validate_comment(self, comment: str | None) -> None:
-        if comment is not None and len(comment) > 40:
+    def _validate_comment(self, comment: object) -> str | None:
+        if comment is None:
+            return None
+        if not isinstance(comment, str):
+            raise ValueError("Invalid snapshot comment")
+        if len(comment) > 40:
             raise ValueError("Snapshot comment must be at most 40 characters")
+        return comment
 
     def _save_snapshot(self, snapshot: Snapshot, repository: Repository, path: Path, lock: RepositoryLock) -> None:
         """Write the durable snapshot files before publishing their register entry."""
@@ -251,12 +311,9 @@ class SnapshotService:
 
         stored_root, stored_checksum = metadata.get("root_id"), metadata.get("catalogue_sha256")
         committed, protected = metadata.get("committed_at"), metadata.get("protected_until")
-        comment = metadata.get("comment")
         if not isinstance(stored_root, str) or not isinstance(stored_checksum, str) or not isinstance(committed, str) or not isinstance(protected, str):
             raise ValueError("Invalid snapshot metadata")
-        if comment is not None and not isinstance(comment, str):
-            raise ValueError("Invalid snapshot comment")
-        self._validate_comment(comment)
+        comment = self._validate_comment(metadata.get("comment"))
         root_id = bytes.fromhex(stored_root)
         Object.validate_object_id(root_id)
         checksum = bytes.fromhex(stored_checksum)

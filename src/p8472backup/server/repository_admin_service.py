@@ -12,6 +12,7 @@ from uuid import UUID
 
 from p8472backup.common.error import InconsistentStateError
 from p8472backup.server.repository import BackupMode, BackupSet, Repository
+from p8472backup.server.retention.policy import parse_prune_rule
 from p8472backup.server.snapshot_service import SNAPSHOT_REGISTRY_NAME, SNAPSHOT_REGISTRY_VERSION, SnapshotService
 from p8472backup.storage.file.index import LocationIndex
 from p8472backup.storage.file.json_file import is_json_object, sync_directory, write_json
@@ -108,6 +109,27 @@ class RepositoryAdminService:
 
         self._create_backup_set_storage(repository, (new_set,), lock, existing_key_ids=existing_key_ids)
         self._write_metadata(replace(repository, backup_sets={**repository.backup_sets, backup_set_id: new_set}), lock)
+
+    def save_prune_rule(self, repository: Repository, backup_set: BackupSet, lock: RepositoryLock, prune_rule: str) -> None:
+        """Validate and durably save the rule accepted with a backup."""
+        parse_prune_rule(prune_rule)
+        path = lock.require_held_for(repository.backup_set_file(backup_set.backup_set_id))
+        path.parent.mkdir(mode=0o700, exist_ok=True)
+        write_json(path, lock, {"prune": prune_rule})
+        sync_directory(repository.path)
+
+    def read_prune_rule(self, repository: Repository, backup_set: BackupSet, lock: RepositoryLock) -> str:
+        """Read the prune rule most recently saved for a set."""
+        path = lock.require_held_for(repository.backup_set_file(backup_set.backup_set_id))
+        try:
+            with path.open("r", encoding="utf-8") as source:
+                data: object = json.load(source)
+        except FileNotFoundError as error:
+            raise ValueError(f"No prune rule has been stored for backup set {backup_set.backup_set_id}") from error
+
+        if not is_json_object(data) or not isinstance(prune_rule := data.get("prune"), str):
+            raise ValueError(f"Invalid prune rule for backup set {backup_set.backup_set_id}")
+        return prune_rule
 
     def remove_backup_set(self, repository: Repository, backup_set: BackupSet, lock: RepositoryLock, *, protection_duration: timedelta) -> None:
         """Persist the deleted state before removing unprotected snapshots."""

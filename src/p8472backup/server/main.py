@@ -4,6 +4,7 @@
 import asyncio
 
 from p8472backup.server import trusted_time
+from p8472backup.server.scheduler.scheduler import Scheduler
 from p8472backup.server.trusted_time import TrustedTime, TrustedTimeError
 
 
@@ -25,7 +26,17 @@ async def _run_server() -> None:
         trusted_time.server_clock = clock
         try:
             clock_task = asyncio.create_task(clock.run(), name="trusted-time")
-            await clock_task
+            scheduler_task = asyncio.create_task(Scheduler().run(), name="scheduler")
+            tasks = (clock_task, scheduler_task)
+            try:
+                await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                for task in tasks:
+                    if task.done():
+                        task.result()
+            finally:
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
         finally:
             del trusted_time.server_clock
     finally:

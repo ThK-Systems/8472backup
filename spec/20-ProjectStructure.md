@@ -42,7 +42,9 @@ src/
       repository_admin_service.py
       snapshot_service.py
       catalogue.py
-      retention.py
+      retention/
+        __init__.py
+        policy.py
     storage/
       file/
         packs.py
@@ -119,6 +121,7 @@ The agreed repository layout is:
 <repo-root>/
   repository.json
   snapshot-registry.json
+  backup-sets/<set-id>.json
   snapshots/<set-id>/<snapshot-id>.json
   snapshots/<set-id>/<snapshot-id>.catalog
   data/packs/<key-id>/<pack-id>.pack

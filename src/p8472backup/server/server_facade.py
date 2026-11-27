@@ -1,12 +1,15 @@
 """Server operations scoped to a verified backup client."""
 
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from datetime import timedelta
 from pathlib import Path
+from typing import BinaryIO
 from uuid import UUID
 
+from p8472backup.archive.objects import Object, ObjectId
 from p8472backup.server.repository import BackupMode, Repository
 from p8472backup.server.repository_admin_service import RepositoryAdminService
+from p8472backup.server.snapshot import Snapshot
 from p8472backup.server.snapshot_listing import SnapshotListing
 from p8472backup.server.snapshot_service import DEFAULT_PROTECTION_DURATION, SnapshotService
 
@@ -52,6 +55,30 @@ class ServerFacade:
         with service.locked_repository(self._storage_root, client_id) as (repository, lock):
             service.set_mode(repository, mode, lock)
 
+    def backup(self, client_id: UUID, backup_set_id: UUID, records: Iterator[tuple[Object, BinaryIO]], root_id: ObjectId, *, prune: str, comment: str | None = None) -> Snapshot:
+        """Accept a prune rule, commit a local backup, and apply the rule."""
+        repo_admin_service = RepositoryAdminService()
+        snapshots = SnapshotService()
+        with repo_admin_service.locked_repository(self._storage_root, client_id) as (repository, lock):
+            backup_set = repository.get_active_backup_set(backup_set_id)
+            snapshots.validate_snapshot_input(root_id, comment)
+            repo_admin_service.save_prune_rule(repository, backup_set, lock, prune)
+            snapshot = snapshots.create_snapshot(repository, backup_set_id, records, root_id, lock=lock, protection_duration=self._protection_duration, comment=comment)
+            try:
+                snapshots.prune(repository, backup_set, lock, prune_rule=prune, protection_duration=self._protection_duration)
+            except Exception as error:
+                error.add_note(f"Snapshot {snapshot.snapshot_id} committed before prune failed.")
+                raise
+            return snapshot
+
+    def prune(self, client_id: UUID, backup_set_id: UUID) -> tuple[UUID, ...]:
+        """Prune one backup set using its stored rule and return the removed snapshot IDs."""
+        repo_admin_service = RepositoryAdminService()
+        with repo_admin_service.locked_repository(self._storage_root, client_id) as (repository, lock):
+            backup_set = repository.get_active_backup_set(backup_set_id)
+            rule = repo_admin_service.read_prune_rule(repository, backup_set, lock)
+            return SnapshotService().prune(repository, backup_set, lock, prune_rule=rule, protection_duration=self._protection_duration)
+
     def list(self, client_id: UUID, *, backup_set_id: UUID | None = None) -> SnapshotListing:
         """List published snapshots for the verified client."""
         with RepositoryAdminService().locked_repository(self._storage_root, client_id) as (repository, lock):
@@ -62,5 +89,4 @@ class ServerFacade:
     def version() -> str:
         """Return the running server's version string."""
         from p8472backup.server.main import VERSION
-
         return VERSION
