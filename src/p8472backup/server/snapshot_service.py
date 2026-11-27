@@ -7,10 +7,11 @@ from itertools import chain, count
 from pathlib import Path
 from struct import Struct
 from tempfile import NamedTemporaryFile
-from typing import BinaryIO
+from typing import BinaryIO, cast
 from uuid import UUID, uuid4
 
 from p8472backup.archive.objects import OBJECT_ID_SIZE, TYPE_SNAPSHOT, Object, ObjectId
+from p8472backup.server import trusted_time
 from p8472backup.server.repository import BackupSet, Repository
 from p8472backup.server.snapshot import SNAPSHOT_VERSION, ObjectCatalogue, Snapshot
 from p8472backup.storage.file.index import LocationIndex, ObjectLocation
@@ -69,7 +70,7 @@ class SnapshotService:
         catalogue = self._store_snapshot_objects(chain((first,), records), index, lock, repository.packs_root / str(backup_set.key_id), target_size)
         index.save_to(index_path, lock)
 
-        committed_at = datetime.now(UTC)
+        committed_at = cast(trusted_time.TrustedTime, trusted_time.server_clock).now()
         snapshot = Snapshot(
             snapshot_id=snapshot_id,
             backup_set_id=backup_set_id,
@@ -102,7 +103,7 @@ class SnapshotService:
         if not backup_set.deleted or repository.backup_sets.get(backup_set_id) != backup_set:
             raise ValueError(f"Backup set is not deleted in this repository: {backup_set_id}")
         directory = lock.require_held_for(repository.snapshots_root / str(backup_set_id))
-        now = datetime.now(UTC)
+        now = cast(trusted_time.TrustedTime, trusted_time.server_clock).now()
         expired: list[Path] = []
         for path, snapshot in self._read_set_snapshots(repository, backup_set_id, directory, lock):
             effective_deadline = max(snapshot.protected_until, snapshot.committed_at + protection_duration)

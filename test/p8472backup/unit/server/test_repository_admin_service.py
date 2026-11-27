@@ -1,7 +1,9 @@
 from dataclasses import replace
+from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
 from typing import cast
+from unittest.mock import patch
 from uuid import UUID
 
 import pytest
@@ -9,9 +11,11 @@ import pytest
 from p8472backup.archive.objects import TYPE_SNAPSHOT, Object
 from p8472backup.archive.snapshotrootcontent import SnapshotRootContent
 from p8472backup.common.error import InconsistentStateError
+from p8472backup.server import trusted_time
 from p8472backup.server.repository import BackupMode
 from p8472backup.server.repository_admin_service import RepositoryAdminService
 from p8472backup.server.snapshot_service import SnapshotService
+from p8472backup.server.trusted_time import TrustedTime
 
 
 _CLIENT_ID = UUID(int=1)
@@ -29,7 +33,8 @@ def test_init_repository_rejects_second_init_and_preserves_backup(tmp_path: Path
     body = SnapshotRootContent(b"backup set configuration").to_plaintext()
     root = Object(TYPE_SNAPSHOT, b"r" * 32, len(body))
     snapshots = SnapshotService()
-    with admin_service.locked_repository(tmp_path, _CLIENT_ID) as (current, lock):
+    with patch.object(trusted_time, "server_clock", spec=TrustedTime) as clock, admin_service.locked_repository(tmp_path, _CLIENT_ID) as (current, lock):
+        clock.now.return_value = datetime(2026, 1, 1, tzinfo=UTC)
         snapshot = snapshots.create_snapshot(current, _BACKUP_SET_ID, iter(((root, BytesIO(body)),)), root.object_id, lock=lock)
         other_snapshot = snapshots.create_snapshot(current, other_set_id, iter(((root, BytesIO(body)),)), root.object_id, lock=lock)
     (repository.snapshots_root / str(_BACKUP_SET_ID) / ".snapshot-interrupted").write_bytes(b"incomplete")

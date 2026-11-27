@@ -3,6 +3,7 @@
 
 import asyncio
 
+from p8472backup.server import trusted_time
 from p8472backup.server.trusted_time import TrustedTime, TrustedTimeError
 
 
@@ -18,9 +19,11 @@ async def _run_server() -> None:
     clock = TrustedTime()
     try:
         await clock.synchronize()
+        trusted_time.server_clock = clock
         clock_task = asyncio.create_task(clock.run(), name="trusted-time")
         await clock_task
     finally:
+        trusted_time.server_clock = None
         clock.close()
 
 

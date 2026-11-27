@@ -1,6 +1,7 @@
-from datetime import UTC, timedelta
+from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from pathlib import Path
+from unittest.mock import Mock
 from uuid import UUID
 
 import pytest
@@ -9,9 +10,11 @@ from p8472backup.archive.datacontent import COMPRESSION_NONE, DataContent
 from p8472backup.archive.metacontent import MetaContent
 from p8472backup.archive.objects import HEADER_SIZE as OBJECT_HEADER_SIZE, TYPE_DATA, TYPE_METADATA, TYPE_SNAPSHOT, Object, ObjectId
 from p8472backup.archive.snapshotrootcontent import SnapshotRootContent
+from p8472backup.server import trusted_time
 from p8472backup.server.repository import Repository
 from p8472backup.server.repository_admin_service import RepositoryAdminService
 from p8472backup.server.snapshot_service import SnapshotService
+from p8472backup.server.trusted_time import TrustedTime
 from p8472backup.storage.file.index import LocationIndex, ObjectLocation
 from p8472backup.storage.file.lock import RepositoryLock
 from p8472backup.storage.file.packs import HEADER_SIZE as PACK_HEADER_SIZE, Pack
@@ -20,6 +23,7 @@ from p8472backup.storage.file.packs import HEADER_SIZE as PACK_HEADER_SIZE, Pack
 _CLIENT_ID = UUID(int=2)
 _BACKUP_SET_ID = UUID(int=3)
 _KEY_DOMAIN_ID = UUID(int=4)
+_COMMITTED_AT = datetime(2026, 1, 1, tzinfo=UTC)
 
 
 @pytest.fixture
@@ -28,7 +32,10 @@ def repository(tmp_path: Path) -> Repository:
 
 
 @pytest.fixture
-def snapshot_service() -> SnapshotService:
+def snapshot_service(monkeypatch: pytest.MonkeyPatch) -> SnapshotService:
+    clock = Mock(spec=TrustedTime)
+    clock.now.return_value = _COMMITTED_AT
+    monkeypatch.setattr(trusted_time, "server_clock", clock)
     return SnapshotService()
 
 
@@ -51,6 +58,7 @@ def test_snapshot_catalogue_resolves_objects_through_saved_index(tmp_path: Path,
     snapshot = snapshot_service.get_snapshot(repository, _BACKUP_SET_ID, committed.snapshot_id)
     assert snapshot == committed
     assert snapshot.root_id == root_id
+    assert snapshot.committed_at == _COMMITTED_AT
     assert snapshot.committed_at.tzinfo is UTC
     assert snapshot.protected_until - snapshot.committed_at == timedelta(days=7)
     assert snapshot.object_catalog.object_ids == {root_id, metadata_id, data_id}
@@ -112,7 +120,7 @@ def test_failed_index_save_does_not_publish_snapshot(repository: Repository, sna
 
 
 @pytest.mark.parametrize("target_size", (1, 1_000))
-def test_snapshot_filter_stores_missing_objects_and_indexes_locations(repository: Repository, target_size: int) -> None:
+def test_snapshot_filter_stores_missing_objects_and_indexes_locations(repository: Repository, snapshot_service: SnapshotService, target_size: int) -> None:
     known = Object(TYPE_DATA, b"a" * 32, 1)
     first = Object(TYPE_SNAPSHOT, b"b" * 32, 1)
     second = Object(TYPE_DATA, b"c" * 32, 1)
@@ -129,7 +137,7 @@ def test_snapshot_filter_stores_missing_objects_and_indexes_locations(repository
 
     records = iter(((first, BytesIO(b"b")), (known, known_body), (first, duplicate_body), (second, BytesIO(b"c"))))
     with RepositoryAdminService().locked_repository(repository.path.parent, _CLIENT_ID) as (current, lock):
-        snapshot = SnapshotService().create_snapshot(current, _BACKUP_SET_ID, records, first.object_id, lock=lock, target_size=target_size)
+        snapshot = snapshot_service.create_snapshot(current, _BACKUP_SET_ID, records, first.object_id, lock=lock, target_size=target_size)
 
     length = OBJECT_HEADER_SIZE + first.length
     first_location = ObjectLocation(2, PACK_HEADER_SIZE, length)

@@ -9,10 +9,12 @@ import pytest
 
 from p8472backup.archive.objects import TYPE_SNAPSHOT, Object
 from p8472backup.common.error import InconsistentStateError
+from p8472backup.server import trusted_time
 from p8472backup.server.repository_admin_service import RepositoryAdminService
 from p8472backup.server.server_service import ServerService
 from p8472backup.server.snapshot import Snapshot
 from p8472backup.server.snapshot_service import SnapshotService
+from p8472backup.server.trusted_time import TrustedTime, TrustedTimeError
 from p8472backup.storage.file.index import LocationIndex, ObjectLocation
 from p8472backup.storage.file.lock import RepositoryLock
 
@@ -234,7 +236,7 @@ def test_remove_backup_set_respects_effective_protection_and_shared_packs(tmp_pa
         with RepositoryAdminService().locked_repository(tmp_path, _CLIENT_ID) as (current, lock):
             return snapshots.create_snapshot(current, set_id, iter(((root, BytesIO(b"r")),)), root.object_id, lock=lock, protection_duration=timedelta(days=days))
 
-    with patch("p8472backup.server.snapshot_service.datetime") as clock:
+    with patch.object(trusted_time, "server_clock", spec=TrustedTime) as clock:
         clock.now.return_value = started_at
         expired = take_snapshot(_FIRST_SET)
         stored_protection = take_snapshot(_FIRST_SET, days=12)
@@ -271,11 +273,12 @@ def test_remove_backup_set_persists_state_and_can_retry_failed_unlink(tmp_path: 
     service = ServerService(tmp_path)
     repository = service.init_repository(_CLIENT_ID, {_FIRST_SET: _KEY_ID})
     root = Object(TYPE_SNAPSHOT, b"r" * 32, 1)
-    with RepositoryAdminService().locked_repository(tmp_path, _CLIENT_ID) as (current, lock):
-        snapshot = SnapshotService().create_snapshot(current, _FIRST_SET, iter(((root, BytesIO(b"r")),)), root.object_id, lock=lock)
-    path = repository.snapshot_file(_FIRST_SET, snapshot.snapshot_id)
+    with patch.object(trusted_time, "server_clock", spec=TrustedTime) as clock:
+        clock.now.return_value = datetime(2026, 1, 1, tzinfo=UTC)
+        with RepositoryAdminService().locked_repository(tmp_path, _CLIENT_ID) as (current, lock):
+            snapshot = SnapshotService().create_snapshot(current, _FIRST_SET, iter(((root, BytesIO(b"r")),)), root.object_id, lock=lock)
+        path = repository.snapshot_file(_FIRST_SET, snapshot.snapshot_id)
 
-    with patch("p8472backup.server.snapshot_service.datetime") as clock:
         clock.now.return_value = snapshot.protected_until + timedelta(seconds=1)
         with patch.object(Path, "unlink", side_effect=PermissionError("Unlink failed")), pytest.raises(PermissionError, match="Unlink failed"):
             service.remove_backup_set(_CLIENT_ID, _FIRST_SET)
@@ -290,6 +293,26 @@ def test_remove_backup_set_persists_state_and_can_retry_failed_unlink(tmp_path: 
     assert not reopened.get_backup_set(_SECOND_SET).deleted
 
 
+def test_invalid_trusted_time_blocks_snapshot_publication_and_deletion(tmp_path: Path) -> None:
+    service = ServerService(tmp_path)
+    service.init_repository(_CLIENT_ID, {_FIRST_SET: _KEY_ID})
+    admin = RepositoryAdminService()
+    snapshots = SnapshotService()
+    root = Object(TYPE_SNAPSHOT, b"r" * 32, 1)
+
+    with patch.object(trusted_time, "server_clock", spec=TrustedTime) as clock:
+        clock.now.return_value = datetime(2026, 1, 1, tzinfo=UTC)
+        with admin.locked_repository(tmp_path, _CLIENT_ID) as (repository, lock):
+            committed = snapshots.create_snapshot(repository, _FIRST_SET, iter(((root, BytesIO(b"r")),)), root.object_id, lock=lock)
+            clock.now.side_effect = TrustedTimeError("Trusted time reference expired")
+            with pytest.raises(TrustedTimeError, match="reference expired"):
+                snapshots.create_snapshot(repository, _FIRST_SET, iter(((root, BytesIO(b"r")),)), root.object_id, lock=lock)
+
+        with pytest.raises(TrustedTimeError, match="reference expired"):
+            service.remove_backup_set(_CLIENT_ID, _FIRST_SET)
+    assert admin.find_by_client_id(tmp_path, _CLIENT_ID).snapshots == {committed}
+
+
 def test_remove_backup_set_reads_metadata_version_one_and_requires_lock(tmp_path: Path) -> None:
     service = ServerService(tmp_path)
     repository = service.init_repository(_CLIENT_ID, {_FIRST_SET: _KEY_ID})
@@ -302,5 +325,7 @@ def test_remove_backup_set_reads_metadata_version_one_and_requires_lock(tmp_path
         service.remove_backup_set(_CLIENT_ID, _FIRST_SET)
     assert json.loads(metadata_file.read_text(encoding="utf-8")) == metadata_v1
 
-    service.remove_backup_set(_CLIENT_ID, _FIRST_SET)
+    with patch.object(trusted_time, "server_clock", spec=TrustedTime) as clock:
+        clock.now.return_value = datetime(2026, 1, 1, tzinfo=UTC)
+        service.remove_backup_set(_CLIENT_ID, _FIRST_SET)
     assert RepositoryAdminService.find_by_client_id(tmp_path, _CLIENT_ID).get_backup_set(_FIRST_SET).deleted
