@@ -15,10 +15,9 @@ from p8472backup.archive.objects import HEADER_SIZE as OBJECT_HEADER_SIZE, TYPE_
 from p8472backup.server import trusted_time
 from p8472backup.server.repository import Repository
 from p8472backup.server.repository_service import RepositoryService
-from p8472backup.server.scheduler.scheduler import Scheduler
 from p8472backup.server.server_facade import ServerFacade
 from p8472backup.server.snapshot import Snapshot
-from p8472backup.server.snapshot_service import SnapshotService
+from p8472backup.server.snapshot_service import SnapshotService, configured_protection_duration
 from p8472backup.server.trusted_time import TrustedTime, TrustedTimeError
 from p8472backup.storage.file.index import LocationIndex
 from p8472backup.storage.file.lock import RepositoryLock
@@ -42,7 +41,6 @@ _SHARED = Object(TYPE_DATA, b"s" * 32, len(_SHARED_BODY))
 @pytest.fixture
 def repository(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[ServerFacade, Repository, Mock]:
     monkeypatch.delenv("P8472BACKUP_PROTECTION_SECONDS", raising=False)
-    monkeypatch.delenv("P8472BACKUP_COMPACT_THRESHOLD_PERCENT", raising=False)
     clock = Mock(spec=TrustedTime)
     clock.now.return_value = _START
     monkeypatch.setattr(trusted_time, "server_clock", clock, raising=False)
@@ -60,9 +58,8 @@ def pruned(repository: tuple[ServerFacade, Repository, Mock]) -> tuple[ServerFac
     return facade, repo, clock, snapshot
 
 
-def _maintain(repo: Repository, *, threshold: int | None = None) -> None:
-    scheduler = Scheduler(storage_root=repo.path.parent, compact_threshold_percent=threshold)
-    scheduler._maintain_repository(repo.path.parent, repo.client_id)  # pyright: ignore[reportPrivateUsage]
+def _maintain(repo: Repository, *, threshold: int = 25) -> None:
+    RepositoryService().maintain_repository(repo.path.parent, repo.client_id, protection_duration=configured_protection_duration(None), compact_threshold_percent=threshold)
 
 
 def _assert_restore(facade: ServerFacade, snapshot: Snapshot, obj: Object, contents: bytes) -> None:
@@ -72,8 +69,8 @@ def _assert_restore(facade: ServerFacade, snapshot: Snapshot, obj: Object, conte
         assert output.getvalue() == contents
 
 
-@pytest.mark.parametrize(("threshold", "compacted"), ((0, True), (None, True), (26, False), (100, False)))
-def test_threshold_is_inclusive_per_pack_and_relocation_preserves_bytes(pruned: tuple[ServerFacade, Repository, Mock, Snapshot], threshold: int | None, compacted: bool) -> None:
+@pytest.mark.parametrize(("threshold", "compacted"), ((0, True), (25, True), (26, False), (100, False)))
+def test_threshold_is_inclusive_per_pack_and_relocation_preserves_bytes(pruned: tuple[ServerFacade, Repository, Mock, Snapshot], threshold: int, compacted: bool) -> None:
     facade, repo, _, snapshot = pruned
     directory = repo.packs_root / str(_KEY)
     first, second, replacement = (directory / f"{number}.pack" for number in (1, 2, 3))
@@ -101,23 +98,14 @@ def test_threshold_is_inclusive_per_pack_and_relocation_preserves_bytes(pruned: 
         _maintain(repo, threshold=threshold)
 
 
-def test_environment_threshold_reclaims_only_wholly_dead_packs(pruned: tuple[ServerFacade, Repository, Mock, Snapshot], monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_hundred_percent_threshold_reclaims_only_wholly_dead_packs(pruned: tuple[ServerFacade, Repository, Mock, Snapshot]) -> None:
     facade, repo, _, snapshot = pruned
     directory = repo.packs_root / str(_KEY)
     Pack.write_to(directory / "3.pack", iter(((_SHARED, BytesIO(_SHARED_BODY)),)))
-    monkeypatch.setenv("P8472BACKUP_COMPACT_THRESHOLD_PERCENT", "100")
-
-    _maintain(repo)
+    _maintain(repo, threshold=100)
 
     assert sorted(path.name for path in directory.iterdir()) == ["1.pack", "2.pack"]
     _assert_restore(facade, snapshot, _SHARED, _SHARED_BODY)
-
-
-@pytest.mark.parametrize("value", ("25.5", "-1", "101"))
-def test_scheduler_rejects_invalid_threshold(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
-    monkeypatch.setenv("P8472BACKUP_COMPACT_THRESHOLD_PERCENT", value)
-    with pytest.raises(ValueError, match="THRESHOLD|threshold"):
-        Scheduler()
 
 
 def test_successful_backup_does_not_schedule_an_unchanged_repository(repository: tuple[ServerFacade, Repository, Mock]) -> None:

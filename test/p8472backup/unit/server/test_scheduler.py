@@ -4,19 +4,54 @@ from contextlib import suppress
 from datetime import UTC, datetime, time, timedelta
 from io import BytesIO
 from pathlib import Path
+from typing import Literal
 from unittest.mock import Mock, patch
 from uuid import UUID
 
 import pytest
 
 from p8472backup.archive.objects import OBJECT_ID_SIZE, TYPE_SNAPSHOT, Object
-from p8472backup.server import trusted_time
+from p8472backup.common.log import Log
+from p8472backup.server import main, trusted_time
 from p8472backup.server.repository_service import RepositoryService
 from p8472backup.server.scheduler.scheduler import DEFAULT_COMPACT_PAUSE_SECONDS, Scheduler
 from p8472backup.server.server_facade import ServerFacade
 from p8472backup.server.trusted_time import TrustedTime
 from p8472backup.storage.file.json_file import sync_directory
 from p8472backup.storage.file.lock import RepositoryLock
+
+
+@pytest.mark.parametrize("configured", (False, True), ids=("defaults", "environment"))
+def test_server_start_passes_settings_to_scheduler(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, configured: bool) -> None:
+    settings = {"P8472BACKUP_STORAGE_ROOT": str(tmp_path), "P8472BACKUP_COMPACT_THRESHOLD_PERCENT": "60", "P8472BACKUP_PROTECTION_SECONDS": "7200"}
+    for name, value in settings.items():
+        if configured:
+            monkeypatch.setenv(name, value)
+        else:
+            monkeypatch.delenv(name, raising=False)
+
+    clock = Mock(spec=TrustedTime)
+    with patch.object(Log, "configure"), patch.object(main, "TrustedTime", return_value=clock), patch.object(main, "Scheduler", autospec=True) as scheduler:
+        main.main()
+
+    scheduler.assert_called_once_with(
+        storage_root=tmp_path if configured else None,
+        compact_threshold_percent=60 if configured else 25,
+        protection_duration=timedelta(hours=2) if configured else timedelta(days=7),
+    )
+    scheduler.return_value.run.assert_awaited_once_with()
+
+
+@pytest.mark.parametrize("value", ("25.5", "-1", "101"))
+def test_server_rejects_an_invalid_compaction_threshold_before_startup(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    monkeypatch.setenv("P8472BACKUP_COMPACT_THRESHOLD_PERCENT", value)
+    with patch.object(Log, "configure"), patch.object(main, "TrustedTime") as clock, pytest.raises(SystemExit) as error:
+        main.main()
+
+    assert error.value.code == 1
+    assert isinstance(error.value.__cause__, ValueError)
+    assert "threshold" in str(error.value.__cause__).lower()
+    clock.assert_not_called()
 
 
 def test_pull_waits_until_one_of_three_push_jobs_finishes(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -76,8 +111,8 @@ def maintenance_tick(monkeypatch: pytest.MonkeyPatch) -> Mock:
     return clock
 
 
-@pytest.mark.parametrize("from_environment", (False, True), ids=("explicit-root", "environment-and-default-time"))
-def test_scheduled_compaction_reclaims_a_pruned_pack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, maintenance_tick: Mock, from_environment: bool) -> None:
+@pytest.mark.parametrize("compact_start", (time(2, 30), 0), ids=("fixed-time", "after-pull"))
+def test_scheduled_compaction_reclaims_a_pruned_pack(tmp_path: Path, caplog: pytest.LogCaptureFixture, maintenance_tick: Mock, compact_start: time | Literal[0]) -> None:
     client_id, set_id, key_id = UUID(int=1), UUID(int=2), UUID(int=3)
     facade = ServerFacade(tmp_path, server_fqdn="backup.example.net")
     repo = facade.init_repository(client_id, {set_id: key_id})
@@ -89,12 +124,7 @@ def test_scheduled_compaction_reclaims_a_pruned_pack(tmp_path: Path, monkeypatch
     caplog.set_level(logging.INFO, logger="p8472backup")
     caplog.clear()
 
-    if from_environment:
-        monkeypatch.setenv("P8472BACKUP_STORAGE_ROOT", str(tmp_path))
-        scheduler = Scheduler()
-    else:
-        monkeypatch.setenv("P8472BACKUP_STORAGE_ROOT", str(tmp_path / "unused"))
-        scheduler = Scheduler(storage_root=tmp_path, compact_start=time(2, 30))
+    scheduler = Scheduler(storage_root=tmp_path, compact_start=compact_start)
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(scheduler.run())
 
@@ -159,8 +189,7 @@ def test_scheduled_compaction_warns_if_the_storage_root_is_unavailable(tmp_path:
 
 
 @pytest.mark.usefixtures("maintenance_tick")
-def test_scheduled_compaction_has_no_work_without_a_storage_root(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
-    monkeypatch.delenv("P8472BACKUP_STORAGE_ROOT", raising=False)
+def test_scheduled_compaction_has_no_work_without_a_storage_root(caplog: pytest.LogCaptureFixture) -> None:
     caplog.set_level(logging.INFO, logger="p8472backup")
 
     with pytest.raises(asyncio.CancelledError):

@@ -196,6 +196,27 @@ class RepositoryService:
 
         SnapshotService().remove_unprotected_snapshots(repository, repository.backup_sets.values(), lock, protection_duration=protection_duration)
 
+    def maintain_repository(self, storage_root: Path, client_id: UUID, *, protection_duration: timedelta, compact_threshold_percent: int) -> None:
+        """Finish due deletions and compact the remaining repository under its lock."""
+        detached = False
+        try:
+            with self.locked_repository(storage_root, client_id, operation="maintenance") as (repository, lock):
+                if repository.deleted:
+                    detached = self.delete(repository, lock, protection_duration=protection_duration)
+                else:
+                    for backup_set in repository.backup_sets.values():
+                        if backup_set.deleted:
+                            repository = self.delete_backup_set(repository, backup_set, lock, protection_duration=protection_duration)
+                if not detached:
+                    snapshots = SnapshotService()
+                    if snapshots.compaction_pending(repository, lock):
+                        snapshots.compact(repository, lock, threshold_percent=compact_threshold_percent)
+        except (OSError, ValueError, InconsistentStateError):
+            # The repository context logs the failure once.
+            return
+        if detached:
+            self.finish_deletion(storage_root, client_id)
+
     def delete_backup_set(self, repository: Repository, backup_set: BackupSet, lock: RepositoryLock, *, protection_duration: timedelta) -> Repository:
         """Finish deleting a retired set once all its snapshot records are gone."""
         snapshots = SnapshotService()
@@ -250,17 +271,21 @@ class RepositoryService:
         return True
 
     def finish_deletion(self, storage_root: Path, client_id: UUID) -> None:
-        """Remove a detached repository, including after an interrupted deletion."""
-        directory = storage_root.resolve(strict=True) / f"{_DELETION_PREFIX}{client_id}"
-        if directory.is_symlink():
-            raise InconsistentStateError("Unexpected detached repository path")
-        with RepositoryLock(directory):
-            trusted_time.server_clock.now()
-            # A rename can be visible after a failed parent directory sync.
-            sync_directory(directory.parent)
-            shutil.rmtree(directory)
-            sync_directory(directory.parent)
-        Log.info("Repository deleted client_id=%s", client_id)
+        """Remove a detached repository or log a recoverable failure for retry."""
+        try:
+            directory = storage_root.resolve(strict=True) / f"{_DELETION_PREFIX}{client_id}"
+            if directory.is_symlink():
+                raise InconsistentStateError("Unexpected detached repository path")
+            with RepositoryLock(directory):
+                trusted_time.server_clock.now()
+                # A rename can be visible after a failed parent directory sync.
+                sync_directory(directory.parent)
+                shutil.rmtree(directory)
+                sync_directory(directory.parent)
+        except (OSError, ValueError, InconsistentStateError) as error:
+            Log.warning("Final repository deletion failed client_id=%s reason=%s", client_id, type(error).__name__)
+        else:
+            Log.info("Repository deleted client_id=%s", client_id)
 
     @staticmethod
     def _raise_missing_repository_metadata(error: FileNotFoundError) -> NoReturn:
