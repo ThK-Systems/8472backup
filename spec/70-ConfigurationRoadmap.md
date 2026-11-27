@@ -37,6 +37,7 @@ Status: medium-term inventory, 2026-11-13. The [main specification](10-8472backu
 | Compaction threshold | Planned, implementation deferred | The background job reclaims space when the percentage threshold is reached. Value, default, metric, denominator, and scope remain open. One candidate metric is accumulated reclaimable pack bytes relative to total pack bytes. |
 | Maintenance scheduling | Planned, implementation deferred | Compaction and retired-scope cleanup run asynchronously during idle periods. Define what counts as idle, job frequency, and how background work competes for repository locks and server operation slots. |
 | Logging verbosity | Candidate | Service diagnostics suitable for systemd/journald. Report completion, failure, and maintenance outcomes accurately. |
+| Trusted time sources and clock parameters | Candidate | Configure the HTTPS time-source list and trusted-clock parameters, including timeout, quorum spread, refresh interval, correction limit, suspend tolerance, and protection uncertainty margin. Initial defaults are defined centrally in Python; TOML integration is deferred. Validate source availability, freshness, accuracy, and infrastructure independence before production acceptance. The proposed correction limit, suspend detection, and protection margin require architectural review. |
 
 ## Settings requiring a shared client/server decision
 

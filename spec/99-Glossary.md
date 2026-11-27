@@ -47,6 +47,12 @@ Use **chunk** when discussing file-content boundaries and chunking sizes. Use **
 | **Repository lock** | The server-owned exclusive lock for access to one backup client's repository. All of that client's backup sets share it. It covers the lifetime of a backup, mount, restore, or maintenance operation. |
 | **Key domain** | The scope in which objects use compatible identifier and encryption key material and may be deduplicated. There is no cross-host deduplication; independently keyed backup sets have separate domains. |
 
+## Trusted time
+
+| Term | Meaning |
+| --- | --- |
+| **Internal trusted clock** | The server's UTC time reference established from a quorum of configured HTTPS time sources and advanced using a monotonic clock. Security-relevant timestamps and protection decisions use this clock; the operating-system wall clock is not a fallback. |
+
 ## Terminology boundaries
 
 - **Archive** is used for the broader backup model or archive-processing code. It does not name an additional persistent container between snapshot and pack.
