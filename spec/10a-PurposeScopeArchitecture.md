@@ -1,6 +1,6 @@
 # 8472backup — Purpose, Scope, and Architecture
 
-Specification version: 0.70 — Publish and list snapshot metadata, 2026-11-27
+Specification version: 0.71 — Prefer portable Python over peak performance, 2026-11-27
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 
@@ -33,20 +33,19 @@ After setup, scheduled backup, protection enforcement, retention, and eligible s
 - Implementation language: Python.
 - Use object-oriented domain code with concrete classes that own their state and relevant methods. `Object` represents an archive object's current header state and provides `to_header()` and `from_header()`. Prefer simple concrete classes over speculative interfaces or inheritance hierarchies.
 - Project, distribution, and command name: `8472backup`. Python import-package name: `p8472backup`, where `p` stands for Project. Program names may begin with a digit; normal Python import identifiers may not.
-- Keep the dependency set small and use the Python standard library where practical.
+- Prefer the Python standard library and avoid additional runtime dependencies, especially dependencies with native code, when functionality remains adequate.
 - xxHash is excluded as a project algorithm. Do not add a direct dependency on `libxxhash` or Python xxHash bindings.
 - All external runtime dependencies MUST be available as Debian 13 (`trixie`) packages. Evaluate the APIs and versions actually packaged there. Build and development/test dependencies are exempt from this package-availability restriction. The existing no-pip instruction remains in force; this exception does not select an installation method for development tools.
-- Performance-critical runtime dependencies SHOULD expose established C or C++ implementations through Python bindings. Other native implementations require an explicit review against this preference.
+- Do not add an external native runtime dependency solely to improve throughput. An external native runtime dependency requires a demonstrated essential functional or security need and explicit review. The established AEAD implementation required by chapter 7 is a security exception, not a performance optimization. Standard-library modules that use native components supplied with Python are not additional project dependencies.
 - Server: Linux, running as a systemd service.
 - Version 1.0 reference client: Linux.
 - Minimum interpreter: Python 3.12. This minimum is agreed; implementations must also respect the APIs available in the Debian Trixie dependency versions.
 - Later clients: other operating systems where the required Python modules and operating-system facilities are available. Identical feature availability across platforms is not required.
 - Platform-specific paths, file metadata, process operations, and mounting SHOULD have clear boundaries without speculative abstraction frameworks.
-- Established Python modules may bind native libraries. The project does not require a pure-Python dependency stack. Do not introduce project-owned C, C++, Cython, Rust, or Go code without a demonstrated need and an explicit architectural decision.
-- A Go library may be considered only as a last resort when suitable packaged C/C++ options cannot meet the requirements. Establish the concrete need and review Debian availability, Python integration, and maintenance before adopting it.
+- Do not introduce project-owned C, C++, Cython, Rust, or Go code, platform-specific SIMD paths, or CPU-specific scan kernels. Keep performance-critical project logic in portable Python unless the project owner explicitly approves a change to this rule.
 - Full non-Linux support is outside version 1.0.
 
-Prioritize integrity, security, storage efficiency, and maintainability over peak backup speed. Evaluate performance and storage efficiency with representative benchmarks.
+Prioritize correctness, security, maintainability, portability, and operational simplicity over peak backup speed. Performance optimization requires a demonstrated operational need; matching Borg throughput is not a project goal. Use measurements to identify material bottlenecks and verify acceptable operation, not to justify native dependencies by speed alone.
 
 Design for HDD-backed backup storage and low available RAM on modest server hardware. The location-index design must not assume that complete indexes for all clients fit in physical memory; an individual index may also exceed available RAM. Evaluate bounded application buffers, batched lookups, and disk-access locality. Compare warm-cache and cold-HDD behavior and measure actual memory use before selecting the index engine. LMDB and the current Borg 2 in-memory hash-index approach are evaluation references, not adopted implementations or dependencies. Thomas explicitly excludes `borghash` as a production dependency because upstream declares its API unstable and provides no migration tools for its serialized tables. Its recorded measurements remain comparison evidence; a custom replacement is not authorized by this exclusion.
 

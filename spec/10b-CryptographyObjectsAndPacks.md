@@ -1,6 +1,6 @@
 # 8472backup — Cryptography, Objects, and Packs
 
-Specification version: 0.70 — Publish and list snapshot metadata, 2026-11-27
+Specification version: 0.71 — Prefer portable Python over peak performance, 2026-11-27
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 
@@ -98,7 +98,7 @@ source bytes -> content-defined chunks -> keyed plaintext identifiers
 
 The server can identify existing objects without knowing plaintext. Stable IDs do not require deterministic encryption.
 
-Type 1 supports LZ4 and Zstandard via the native Debian Trixie packages `python3-lz4` and `python3-zstandard`. The default algorithm, selectable levels, and handling of incompressible chunks remain OPEN.
+Compression algorithm and level remain OPEN. Prefer a suitable Python standard-library option. LZ4 and Zstandard are candidates only; they are not approved runtime dependencies and require explicit justification and review before adoption.
 
 ### 8.2 Small files and chunking
 
@@ -113,7 +113,7 @@ Adopt initial data-chunk defaults of 512 KiB minimum, approximately 2 MiB target
 
 Chunker-specific parameters, metadata chunk sizes, and container/pack layout remain OPEN. Delta chains between successive chunk versions are not required for version 1.0.
 
-Use established chunking implementations through Python modules. Chunker selection, parameters, and any optimizations must be evaluated rather than inferred from Borg compatibility. Performance targets require measurements.
+Implement chunking in portable Python without an additional native dependency, SIMD path, or platform-specific scan kernel. Chunker selection and parameters remain OPEN and must be reviewed for correctness and cross-platform consistency; Borg compatibility or throughput is not a requirement. Optimize only for a demonstrated operational bottleneck.
 
 ### 8.3 Physical packs and location indexes
 

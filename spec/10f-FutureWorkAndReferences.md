@@ -1,6 +1,6 @@
 # 8472backup — Future Work and References
 
-Specification version: 0.70 — Publish and list snapshot metadata, 2026-11-27
+Specification version: 0.71 — Prefer portable Python over peak performance, 2026-11-27
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 
