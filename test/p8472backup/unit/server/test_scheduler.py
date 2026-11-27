@@ -21,37 +21,23 @@ from p8472backup.storage.file.json_file import sync_directory
 from p8472backup.storage.file.lock import RepositoryLock
 
 
-@pytest.mark.parametrize("configured", (False, True), ids=("defaults", "environment"))
-def test_server_start_passes_settings_to_scheduler(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, configured: bool) -> None:
-    settings = {"P8472BACKUP_STORAGE_ROOT": str(tmp_path), "P8472BACKUP_COMPACT_THRESHOLD_PERCENT": "60", "P8472BACKUP_PROTECTION_SECONDS": "7200"}
-    for name, value in settings.items():
-        if configured:
-            monkeypatch.setenv(name, value)
-        else:
-            monkeypatch.delenv(name, raising=False)
+def test_server_starts_with_scheduler_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("P8472BACKUP_STORAGE_ROOT", str(tmp_path))
+    monkeypatch.setenv("P8472BACKUP_COMPACT_THRESHOLD_PERCENT", "invalid")
+    monkeypatch.setenv("P8472BACKUP_PROTECTION_SECONDS", "invalid")
 
     clock = Mock(spec=TrustedTime)
     with patch.object(Log, "configure"), patch.object(main, "TrustedTime", return_value=clock), patch.object(main, "Scheduler", autospec=True) as scheduler:
         main.main()
 
-    scheduler.assert_called_once_with(
-        storage_root=tmp_path if configured else None,
-        compact_threshold_percent=60 if configured else 25,
-        protection_duration=timedelta(hours=2) if configured else timedelta(days=7),
-    )
+    scheduler.assert_called_once_with()
     scheduler.return_value.run.assert_awaited_once_with()
 
 
-@pytest.mark.parametrize("value", ("25.5", "-1", "101"))
-def test_server_rejects_an_invalid_compaction_threshold_before_startup(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
-    monkeypatch.setenv("P8472BACKUP_COMPACT_THRESHOLD_PERCENT", value)
-    with patch.object(Log, "configure"), patch.object(main, "TrustedTime") as clock, pytest.raises(SystemExit) as error:
-        main.main()
-
-    assert error.value.code == 1
-    assert isinstance(error.value.__cause__, ValueError)
-    assert "threshold" in str(error.value.__cause__).lower()
-    clock.assert_not_called()
+@pytest.mark.parametrize("value", (-1, 101))
+def test_scheduler_rejects_an_invalid_explicit_threshold(value: int) -> None:
+    with pytest.raises(ValueError, match="Compaction threshold"):
+        Scheduler(compact_threshold_percent=value)
 
 
 def test_pull_waits_until_one_of_three_push_jobs_finishes(monkeypatch: pytest.MonkeyPatch) -> None:

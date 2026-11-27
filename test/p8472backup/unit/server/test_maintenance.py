@@ -17,7 +17,7 @@ from p8472backup.server.repository import Repository
 from p8472backup.server.repository_service import RepositoryService
 from p8472backup.server.server_facade import ServerFacade
 from p8472backup.server.snapshot import Snapshot
-from p8472backup.server.snapshot_service import SnapshotService, configured_protection_duration
+from p8472backup.server.snapshot_service import DEFAULT_PROTECTION_DURATION, SnapshotService
 from p8472backup.server.trusted_time import TrustedTime, TrustedTimeError
 from p8472backup.storage.file.index import LocationIndex
 from p8472backup.storage.file.lock import RepositoryLock
@@ -40,7 +40,6 @@ _SHARED = Object(TYPE_DATA, b"s" * 32, len(_SHARED_BODY))
 
 @pytest.fixture
 def repository(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[ServerFacade, Repository, Mock]:
-    monkeypatch.delenv("P8472BACKUP_PROTECTION_SECONDS", raising=False)
     clock = Mock(spec=TrustedTime)
     clock.now.return_value = _START
     monkeypatch.setattr(trusted_time, "server_clock", clock, raising=False)
@@ -58,8 +57,8 @@ def pruned(repository: tuple[ServerFacade, Repository, Mock]) -> tuple[ServerFac
     return facade, repo, clock, snapshot
 
 
-def _maintain(repo: Repository, *, threshold: int = 25) -> None:
-    RepositoryService().maintain_repository(repo.path.parent, repo.client_id, protection_duration=configured_protection_duration(None), compact_threshold_percent=threshold)
+def _maintain(repo: Repository, *, threshold: int = 25, protection_duration: timedelta = DEFAULT_PROTECTION_DURATION) -> None:
+    RepositoryService().maintain_repository(repo.path.parent, repo.client_id, protection_duration=protection_duration, compact_threshold_percent=threshold)
 
 
 def _assert_restore(facade: ServerFacade, snapshot: Snapshot, obj: Object, contents: bytes) -> None:
@@ -273,14 +272,13 @@ def test_checkpoint_sync_failure_keeps_old_packs_until_a_durable_retry(pruned: t
 
 @pytest.mark.parametrize("whole_repository", (False, True), ids=("backup-set", "repository"))
 @pytest.mark.parametrize(("stored_days", "configured_days"), ((12, 7), (7, 12)), ids=("stored-deadline", "extended-server-deadline"))
-def test_scheduled_retirement_uses_the_later_trusted_deadline(repository: tuple[ServerFacade, Repository, Mock], monkeypatch: pytest.MonkeyPatch, whole_repository: bool, stored_days: int, configured_days: int) -> None:
+def test_scheduled_retirement_uses_the_later_trusted_deadline(repository: tuple[ServerFacade, Repository, Mock], whole_repository: bool, stored_days: int, configured_days: int) -> None:
     _, repo, clock = repository
-    monkeypatch.setenv("P8472BACKUP_PROTECTION_SECONDS", str(stored_days * 86_400))
-    facade = ServerFacade(repo.path.parent, server_fqdn=_FQDN)
+    facade = ServerFacade(repo.path.parent, server_fqdn=_FQDN, protection_duration=timedelta(days=stored_days))
     snapshot = facade.backup(_CLIENT, _SET, iter(((_OLD_ROOT, BytesIO(b"old")),)), prune="")
     assert snapshot.protected_until == _START + timedelta(days=stored_days)
-    monkeypatch.setenv("P8472BACKUP_PROTECTION_SECONDS", str(configured_days * 86_400))
-    facade = ServerFacade(repo.path.parent, server_fqdn=_FQDN)
+    protection_duration = timedelta(days=configured_days)
+    facade = ServerFacade(repo.path.parent, server_fqdn=_FQDN, protection_duration=protection_duration)
     clock.now.return_value = _START + timedelta(days=8)
     if whole_repository:
         facade.remove_repository(_CLIENT)
@@ -289,13 +287,13 @@ def test_scheduled_retirement_uses_the_later_trusted_deadline(repository: tuple[
 
     clock.now.return_value = _START + timedelta(days=12)
     clock.now.reset_mock()
-    _maintain(repo)
+    _maintain(repo, protection_duration=protection_duration)
     clock.now.assert_called()
     _assert_restore(facade, snapshot, _OLD_ROOT, b"old")
     assert (repo.packs_root / str(_KEY) / "1.pack").is_file()
 
     clock.now.return_value += timedelta(microseconds=1)
-    _maintain(repo)
+    _maintain(repo, protection_duration=protection_duration)
     assert repo.path.is_dir() != whole_repository
     assert not (repo.packs_root / str(_KEY)).exists()
     assert not (repo.index_directory / str(_KEY)).exists()
@@ -303,6 +301,16 @@ def test_scheduled_retirement_uses_the_later_trusted_deadline(repository: tuple[
     assert not repo.backup_set_file(_SET).exists()
     if not whole_repository:
         assert RepositoryService.find_by_client_id(repo.path.parent, _CLIENT).backup_sets == {}
+
+
+def test_facade_protection_default_ignores_environment(repository: tuple[ServerFacade, Repository, Mock], monkeypatch: pytest.MonkeyPatch) -> None:
+    _, repo, _ = repository
+    monkeypatch.setenv("P8472BACKUP_PROTECTION_SECONDS", "0")
+    facade = ServerFacade(repo.path.parent, server_fqdn=_FQDN)
+
+    snapshot = facade.backup(_CLIENT, _SET, iter(((_OLD_ROOT, BytesIO(b"old")),)), prune="")
+
+    assert snapshot.protected_until == _START + timedelta(days=7)
 
 
 @pytest.mark.parametrize("whole_repository", (False, True))
@@ -417,6 +425,39 @@ def test_final_deletion_refuses_a_redirected_scope(repository: tuple[ServerFacad
 
     assert (outside / "keep").read_bytes() == b"important"
     assert (repo.snapshots_root / str(_SET)).is_dir()
+
+
+def test_final_repository_deletion_reports_a_failed_removal_and_can_resume(repository: tuple[ServerFacade, Repository, Mock], caplog: pytest.LogCaptureFixture) -> None:
+    facade, repo, _ = repository
+    facade.remove_repository(_CLIENT)
+    detached = repo.path.with_name(f".deleting-{_CLIENT}")
+
+    def interrupt_removal(path: Path) -> None:
+        assert path == detached
+        (path / "repository.json").unlink()
+        raise PermissionError("Removal interrupted")
+
+    with patch("p8472backup.server.repository_service.shutil.rmtree", interrupt_removal):
+        _maintain(repo)
+
+    assert not repo.path.exists()
+    assert detached.is_dir()
+    assert caplog.messages.count(f"Final repository deletion failed client_id={_CLIENT} reason=PermissionError") == 1
+
+    RepositoryService().finish_deletion(repo.path.parent, _CLIENT)
+    assert not detached.exists()
+
+
+def test_final_repository_deletion_refuses_a_detached_path_alias(repository: tuple[ServerFacade, Repository, Mock], caplog: pytest.LogCaptureFixture) -> None:
+    _, repo, _ = repository
+    detached = repo.path.with_name(f".deleting-{_CLIENT}")
+    detached.symlink_to(repo.path, target_is_directory=True)
+
+    RepositoryService().finish_deletion(repo.path.parent, _CLIENT)
+
+    assert detached.is_symlink()
+    assert (repo.path / "repository.json").is_file()
+    assert caplog.messages.count(f"Final repository deletion failed client_id={_CLIENT} reason=InconsistentStateError") == 1
 
 
 def test_maintenance_completes_prune_with_a_pending_register_deletion(repository: tuple[ServerFacade, Repository, Mock]) -> None:

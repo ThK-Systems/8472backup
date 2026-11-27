@@ -36,13 +36,9 @@ _COMPACTION_TEMPORARY_PREFIX = ".compact-"
 
 
 def configured_protection_duration(override: timedelta | None) -> timedelta:
-    """Use the same server protection setting for client calls and maintenance."""
+    """Use the common protection default unless a duration is supplied."""
     if override is None:
-        seconds = os.getenv("P8472BACKUP_PROTECTION_SECONDS")
-        try:
-            override = DEFAULT_PROTECTION_DURATION if seconds is None else timedelta(seconds=int(seconds))
-        except (ValueError, OverflowError) as error:
-            raise ValueError("P8472BACKUP_PROTECTION_SECONDS must be a supported number of whole seconds") from error
+        return DEFAULT_PROTECTION_DURATION
     if override < timedelta():
         raise ValueError("Snapshot protection duration must be nonnegative")
     return override
