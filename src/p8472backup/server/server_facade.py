@@ -15,19 +15,17 @@ from p8472backup.server.repository_service import RepositoryService
 from p8472backup.server.retention.policy import parse_prune_rule
 from p8472backup.server.snapshot import Snapshot
 from p8472backup.server.snapshot_listing import SnapshotListing
-from p8472backup.server.snapshot_service import DEFAULT_PROTECTION_DURATION, SnapshotReader, SnapshotService, backup_temporary_prefix
+from p8472backup.server.snapshot_service import SnapshotReader, SnapshotService, backup_temporary_prefix, configured_protection_duration
 
 
 class ServerFacade:
     """Provide the server facade for operations on client repositories."""
 
-    def __init__(self, storage_root: Path, *, server_fqdn: str, protection_duration: timedelta = DEFAULT_PROTECTION_DURATION) -> None:
+    def __init__(self, storage_root: Path, *, server_fqdn: str, protection_duration: timedelta | None = None) -> None:
         if not server_fqdn or not server_fqdn.isprintable():
             raise ValueError("A server FQDN is required")
-        if protection_duration < timedelta():
-            raise ValueError("Snapshot protection duration must be nonnegative")
+        self._protection_duration = configured_protection_duration(protection_duration)
         self._storage_root = storage_root.resolve(strict=True)
-        self._protection_duration = protection_duration
         self._server_fqdn = server_fqdn
 
     def init_repository(self, client_id: UUID, backup_sets: Mapping[UUID, UUID], *, mode: BackupMode = "pull", backup_set_names: Mapping[UUID, str] | None = None) -> Repository:

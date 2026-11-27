@@ -24,6 +24,9 @@ class RepositoryLock:
         fd = os.open(self._path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
         try:
             flock(fd, LOCK_EX | LOCK_NB)
+            # The repository may have been detached since this descriptor was opened.
+            if not os.path.samestat(os.fstat(fd), self._path.stat(follow_symlinks=False)):
+                raise BlockingIOError("Repository lock changed while opening")
         except BaseException:
             os.close(fd)
             raise

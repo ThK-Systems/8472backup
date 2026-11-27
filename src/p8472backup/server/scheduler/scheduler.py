@@ -3,7 +3,7 @@
 import asyncio
 import os
 from collections.abc import Iterable
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Literal
 from uuid import UUID
@@ -12,7 +12,7 @@ from p8472backup.common.error import InconsistentStateError
 from p8472backup.common.log import Log
 from p8472backup.server import trusted_time
 from p8472backup.server.repository_service import RepositoryService
-from p8472backup.server.snapshot_service import SnapshotService
+from p8472backup.server.snapshot_service import SnapshotService, configured_protection_duration
 
 
 DEFAULT_PULL_START = time(2)
@@ -20,19 +20,38 @@ DEFAULT_PULL_PAUSE_SECONDS = 5 * 60
 DEFAULT_COMPACT_PAUSE_SECONDS = 30 * 60
 DEFAULT_MAX_BACKUP_JOBS = 3
 DEFAULT_COMPACT_START: Literal[0] = 0
+DEFAULT_COMPACT_THRESHOLD_PERCENT = 25
 _CHECK_INTERVAL_SECONDS = 30
 
 
 class Scheduler:
     """Run the daily jobs in order in the server's event loop."""
 
-    def __init__(self, *, compact_start: Literal[0] | time = DEFAULT_COMPACT_START, max_backup_jobs: int = DEFAULT_MAX_BACKUP_JOBS, storage_root: Path | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        compact_start: Literal[0] | time = DEFAULT_COMPACT_START,
+        max_backup_jobs: int = DEFAULT_MAX_BACKUP_JOBS,
+        storage_root: Path | None = None,
+        compact_threshold_percent: int | None = None,
+        protection_duration: timedelta | None = None,
+    ) -> None:
         if max_backup_jobs < 1:
             raise ValueError("The backup job limit must be positive")
         if storage_root is None and (configured_root := os.getenv("P8472BACKUP_STORAGE_ROOT")):
             storage_root = Path(configured_root)
+        if compact_threshold_percent is None:
+            setting = os.getenv("P8472BACKUP_COMPACT_THRESHOLD_PERCENT")
+            try:
+                compact_threshold_percent = DEFAULT_COMPACT_THRESHOLD_PERCENT if setting is None else int(setting)
+            except ValueError as error:
+                raise ValueError("P8472BACKUP_COMPACT_THRESHOLD_PERCENT must be a whole percentage") from error
+        if not 0 <= compact_threshold_percent <= 100:
+            raise ValueError("Compaction threshold must be between 0 and 100 percent")
         self._storage_root = storage_root
         self._compact_start = compact_start
+        self._compact_threshold_percent = compact_threshold_percent
+        self._protection_duration = configured_protection_duration(protection_duration)
         self._backup_slots = asyncio.BoundedSemaphore(max_backup_jobs)
         self._active_push_jobs = 0
 
@@ -100,38 +119,52 @@ class Scheduler:
         """Run a pull job once the backup operation is available."""
 
     async def _compact(self) -> None:
-        """Analyze finalized pack usage one repository at a time."""
+        """Process due maintenance one repository at a time while idle."""
         storage_root = self._storage_root
         if storage_root is None:
             return
 
-        Log.info("Dispatching scheduled compaction analysis")
+        Log.info("Dispatching scheduled repository maintenance")
+        repositories = RepositoryService()
         try:
-            client_ids = await asyncio.to_thread(RepositoryService().list_client_ids, storage_root)
+            deleting = await asyncio.to_thread(repositories.list_client_ids, storage_root, deleting=True)
+            client_ids = await asyncio.to_thread(repositories.list_client_ids, storage_root)
         except OSError as error:
-            Log.warning("Compaction analysis could not list repositories reason=%s", type(error).__name__)
+            Log.warning("Repository maintenance could not list repositories reason=%s", type(error).__name__)
             return
 
+        for client_id in deleting:
+            if self._active_push_jobs:
+                return
+            await asyncio.to_thread(self._finish_deletion, storage_root, client_id)
         for client_id in client_ids:
             if self._active_push_jobs:
                 break
-            await asyncio.to_thread(self._analyze_repository, storage_root, client_id)
+            await asyncio.to_thread(self._maintain_repository, storage_root, client_id)
 
-    def _analyze_repository(self, storage_root: Path, client_id: UUID) -> None:
+    def _maintain_repository(self, storage_root: Path, client_id: UUID) -> None:
+        repositories = RepositoryService()
+        detached = False
         try:
-            with RepositoryService().locked_repository(storage_root, client_id, operation="analyze_compaction") as (repository, lock):
-                usage = SnapshotService().analyze_compaction(repository, lock)
+            with repositories.locked_repository(storage_root, client_id, operation="maintenance") as (repository, lock):
+                if repository.deleted:
+                    detached = repositories.delete(repository, lock, protection_duration=self._protection_duration)
+                else:
+                    for backup_set in repository.backup_sets.values():
+                        if backup_set.deleted:
+                            repository = repositories.delete_backup_set(repository, backup_set, lock, protection_duration=self._protection_duration)
+                if not detached:
+                    snapshots = SnapshotService()
+                    if snapshots.compaction_pending(repository, lock):
+                        snapshots.compact(repository, lock, threshold_percent=self._compact_threshold_percent)
         except (OSError, ValueError, InconsistentStateError):
             # The repository context logs the failure once.
             return
+        if detached:
+            self._finish_deletion(storage_root, client_id)
 
-        total_bytes = sum(pack.total_bytes for pack in usage)
-        live_bytes = sum(pack.live_bytes for pack in usage)
-        Log.info(
-            "Compaction analysis completed client_id=%s packs=%d total_bytes=%d live_bytes=%d reclaimable_bytes=%d",
-            client_id,
-            len(usage),
-            total_bytes,
-            live_bytes,
-            total_bytes - live_bytes,
-        )
+    def _finish_deletion(self, storage_root: Path, client_id: UUID) -> None:
+        try:
+            RepositoryService().finish_deletion(storage_root, client_id)
+        except (OSError, ValueError, InconsistentStateError) as error:
+            Log.warning("Final repository deletion failed client_id=%s reason=%s", client_id, type(error).__name__)

@@ -1,6 +1,7 @@
 """Initialize server-side repositories and their storage scopes."""
 
 import os
+import shutil
 from collections.abc import Collection, Generator, Iterable, Mapping
 from contextlib import contextmanager
 from dataclasses import replace
@@ -11,6 +12,7 @@ from uuid import UUID
 
 from p8472backup.common.error import InconsistentStateError
 from p8472backup.common.log import Log
+from p8472backup.server import trusted_time
 from p8472backup.server.repository import BackupMode, BackupSet, Repository
 from p8472backup.server.snapshot_service import SNAPSHOT_REGISTRY_NAME, SNAPSHOT_REGISTRY_VERSION, SnapshotService
 from p8472backup.storage.file.index import LocationIndex
@@ -21,24 +23,28 @@ from p8472backup.storage.file.lock import RepositoryLock
 _METADATA_NAME = "repository.json"
 _METADATA_VERSION = 1
 _INTERRUPTED_BACKUP_SET_REGISTRATION = "A previous registration may have been interrupted."
+_DELETION_PREFIX = ".deleting-"
 
 
 class RepositoryService:
     """Manage storage for one client repository."""
 
-    def list_client_ids(self, storage_root: Path) -> tuple[UUID, ...]:
-        """Find registered repository directories for scheduled work."""
+    def list_client_ids(self, storage_root: Path, *, deleting: bool = False) -> tuple[UUID, ...]:
+        """Find registered repositories or detached repositories awaiting removal."""
         client_ids: list[UUID] = []
         with os.scandir(storage_root) as entries:
             for entry in entries:
+                name = entry.name.removeprefix(_DELETION_PREFIX) if deleting else entry.name
+                if deleting and name == entry.name:
+                    continue
                 try:
-                    client_id = UUID(entry.name)
+                    client_id = UUID(name)
                 except ValueError:
                     continue
-                if entry.name != str(client_id):
+                if name != str(client_id):
                     continue
                 try:
-                    if entry.is_dir(follow_symlinks=False) and (Path(entry.path) / _METADATA_NAME).is_file():
+                    if entry.is_dir(follow_symlinks=False) and (deleting or (Path(entry.path) / _METADATA_NAME).is_file()):
                         client_ids.append(client_id)
                 except OSError as error:
                     Log.warning("Repository discovery failed client_id=%s reason=%s", client_id, type(error).__name__)
@@ -55,6 +61,8 @@ class RepositoryService:
         """Load verified metadata and hold the lock through one repository operation."""
         path = storage_root / str(client_id)
         try:
+            if path.is_symlink():
+                raise InconsistentStateError("Unexpected repository path")
             try:
                 lock = RepositoryLock(path)
             except FileNotFoundError as error:
@@ -173,7 +181,7 @@ class RepositoryService:
             self._write_metadata(repository, lock)
             Log.info("Backup set retired client_id=%s backup_set_id=%s", repository.client_id, backup_set_id)
 
-        SnapshotService().remove_unprotected_snapshots(repository, backup_set, lock, protection_duration=protection_duration)
+        SnapshotService().remove_unprotected_snapshots(repository, (backup_set,), lock, protection_duration=protection_duration)
 
     def remove_repository(self, repository: Repository, lock: RepositoryLock, *, protection_duration: timedelta) -> None:
         """Retire the repository and remove its unprotected snapshots."""
@@ -186,9 +194,73 @@ class RepositoryService:
             self._write_metadata(repository, lock)
             Log.info("Repository retired client_id=%s", repository.client_id)
 
+        SnapshotService().remove_unprotected_snapshots(repository, repository.backup_sets.values(), lock, protection_duration=protection_duration)
+
+    def delete_backup_set(self, repository: Repository, backup_set: BackupSet, lock: RepositoryLock, *, protection_duration: timedelta) -> Repository:
+        """Finish deleting a retired set once all its snapshot records are gone."""
         snapshots = SnapshotService()
-        for backup_set in repository.backup_sets.values():
-            snapshots.remove_unprotected_snapshots(repository, backup_set, lock, protection_duration=protection_duration)
+        sets = snapshots.remove_unprotected_snapshots(repository, (backup_set,), lock, protection_duration=protection_duration)
+        set_id, key_id = backup_set.backup_set_id, backup_set.key_id
+        if set_id not in sets:
+            return repository
+
+        remaining_sets = {other_id: other for other_id, other in repository.backup_sets.items() if other_id != set_id}
+        snapshot_directory = repository.snapshots_root / str(set_id)
+        directories = [snapshot_directory]
+        files = [repository.backup_set_file(set_id)]
+        if all(other.key_id != key_id for other in remaining_sets.values()):
+            directories.append(repository.packs_root / str(key_id))
+            files.append(repository.index_directory / str(key_id))
+        for path in (*directories, *files):
+            if lock.require_held_for(path) != path:
+                raise InconsistentStateError(f"Unexpected retired backup set path: {path.name}")
+
+        # Confirm retirement and the register before removing any of their storage.
+        sync_directory(repository.path)
+        if snapshot_directory.is_dir():
+            snapshots.cleanup(repository, backup_set, lock)
+        for directory in directories:
+            if os.path.lexists(directory):
+                shutil.rmtree(directory)
+            sync_directory(directory.parent)
+        for path in files:
+            path.unlink(missing_ok=True)
+            if path.parent.is_dir():
+                sync_directory(path.parent)
+        current = replace(repository, backup_sets=remaining_sets)
+        self._write_metadata(current, lock)
+        Log.info("Backup set deleted client_id=%s backup_set_id=%s", repository.client_id, set_id)
+        return current
+
+    def delete(self, repository: Repository, lock: RepositoryLock, *, protection_duration: timedelta) -> bool:
+        """Detach a retired repository after its last protected snapshot expires."""
+        lock.require_held_for(repository.path / _METADATA_NAME)
+        if not repository.deleted or repository.path.name != str(repository.client_id):
+            raise ValueError(f"Repository is not retired for deletion: {repository.client_id}")
+        sets = SnapshotService().remove_unprotected_snapshots(repository, repository.backup_sets.values(), lock, protection_duration=protection_duration)
+        if sets != set(repository.backup_sets):
+            return False
+
+        detached = repository.path.with_name(f"{_DELETION_PREFIX}{repository.client_id}")
+        if os.path.lexists(detached):
+            raise FileExistsError("Another retired repository is awaiting final deletion")
+        sync_directory(repository.path)
+        repository.path.rename(detached)
+        sync_directory(detached.parent)
+        return True
+
+    def finish_deletion(self, storage_root: Path, client_id: UUID) -> None:
+        """Remove a detached repository, including after an interrupted deletion."""
+        directory = storage_root.resolve(strict=True) / f"{_DELETION_PREFIX}{client_id}"
+        if directory.is_symlink():
+            raise InconsistentStateError("Unexpected detached repository path")
+        with RepositoryLock(directory):
+            trusted_time.server_clock.now()
+            # A rename can be visible after a failed parent directory sync.
+            sync_directory(directory.parent)
+            shutil.rmtree(directory)
+            sync_directory(directory.parent)
+        Log.info("Repository deleted client_id=%s", client_id)
 
     @staticmethod
     def _raise_missing_repository_metadata(error: FileNotFoundError) -> NoReturn:

@@ -162,6 +162,34 @@ class LocationIndex:
         # Mark the inserted entry as requiring persistence.
         self._dirty = True
 
+    def relocate(self, object_id: ObjectId, location: ObjectLocation) -> None:
+        """Update an existing record after a byte-for-byte copy to another pack."""
+        number = self.record_number(object_id)
+        if number is None:
+            raise ValueError("Cannot relocate an object missing from the location index")
+        offset = number * _RECORD_SIZE + OBJECT_ID_SIZE
+        _, _, length = _LOCATION_FIELDS.unpack_from(self._records, offset)
+        if location.length != length:
+            raise ValueError("A relocated object must have the same record length")
+        _LOCATION_FIELDS.pack_into(self._records, offset, location.pack_id, location.offset, location.length)
+        self._dirty = True
+
+    def discard_packs(self, pack_ids: set[int]) -> None:
+        """Remove entries still pointing at superseded packs in place."""
+        next_offset = 0
+        for offset in range(0, len(self._records), _RECORD_SIZE):
+            pack_id, _, _ = _LOCATION_FIELDS.unpack_from(self._records, offset + OBJECT_ID_SIZE)
+            if pack_id in pack_ids:
+                continue
+            if next_offset != offset:
+                self._records[next_offset : next_offset + _RECORD_SIZE] = self._records[offset : offset + _RECORD_SIZE]
+            next_offset += _RECORD_SIZE
+        if next_offset < len(self._records):
+            del self._records[next_offset:]
+            self._count = next_offset // _RECORD_SIZE
+            self._rebuild_buckets(len(self._buckets))
+            self._dirty = True
+
     def save_to(self, path: Path, lock: RepositoryLock, *, temporary_prefix: str = ".location-index-") -> bool:
         """Save pending changes and return True, or return False if unchanged and unsaved.
 

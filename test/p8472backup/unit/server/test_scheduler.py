@@ -1,10 +1,10 @@
 import asyncio
 import logging
 from contextlib import suppress
-from datetime import UTC, datetime, time
+from datetime import UTC, datetime, time, timedelta
 from io import BytesIO
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 from uuid import UUID
 
 import pytest
@@ -15,6 +15,7 @@ from p8472backup.server.repository_service import RepositoryService
 from p8472backup.server.scheduler.scheduler import DEFAULT_COMPACT_PAUSE_SECONDS, Scheduler
 from p8472backup.server.server_facade import ServerFacade
 from p8472backup.server.trusted_time import TrustedTime
+from p8472backup.storage.file.json_file import sync_directory
 from p8472backup.storage.file.lock import RepositoryLock
 
 
@@ -62,7 +63,7 @@ def test_pull_waits_until_one_of_three_push_jobs_finishes(monkeypatch: pytest.Mo
 
 
 @pytest.fixture
-def maintenance_tick(monkeypatch: pytest.MonkeyPatch) -> None:
+def maintenance_tick(monkeypatch: pytest.MonkeyPatch) -> Mock:
     clock = Mock(spec=TrustedTime)
     clock.now.return_value = datetime(2026, 1, 1, 3, tzinfo=UTC)
     monkeypatch.setattr(trusted_time, "server_clock", clock, raising=False)
@@ -72,17 +73,19 @@ def maintenance_tick(monkeypatch: pytest.MonkeyPatch) -> None:
             raise asyncio.CancelledError
 
     monkeypatch.setattr("p8472backup.server.scheduler.scheduler.asyncio.sleep", stop_after_tick)
+    return clock
 
 
-@pytest.mark.usefixtures("maintenance_tick")
 @pytest.mark.parametrize("from_environment", (False, True), ids=("explicit-root", "environment-and-default-time"))
-def test_scheduled_compaction_analyzes_a_real_pack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, from_environment: bool) -> None:
+def test_scheduled_compaction_reclaims_a_pruned_pack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, maintenance_tick: Mock, from_environment: bool) -> None:
     client_id, set_id, key_id = UUID(int=1), UUID(int=2), UUID(int=3)
     facade = ServerFacade(tmp_path, server_fqdn="backup.example.net")
     repo = facade.init_repository(client_id, {set_id: key_id})
     root = Object(TYPE_SNAPSHOT, b"r" * OBJECT_ID_SIZE, 1)
-    facade.backup(client_id, set_id, iter(((root, BytesIO(b"r")),)), prune="")
-    total = (repo.packs_root / str(key_id) / "1.pack").stat().st_size
+    facade.backup(client_id, set_id, iter(((root, BytesIO(b"r")),)), prune="1d")
+    maintenance_tick.now.return_value += timedelta(days=8)
+    new_root = Object(TYPE_SNAPSHOT, b"n" * OBJECT_ID_SIZE, 1)
+    snapshot = facade.backup(client_id, set_id, iter(((new_root, BytesIO(b"n")),)), prune="1d")
     caplog.set_level(logging.INFO, logger="p8472backup")
     caplog.clear()
 
@@ -97,9 +100,14 @@ def test_scheduled_compaction_analyzes_a_real_pack(tmp_path: Path, monkeypatch: 
 
     assert caplog.messages == [
         "Dispatching daily pull batch",
-        "Dispatching scheduled compaction analysis",
-        f"Compaction analysis completed client_id={client_id} packs=1 total_bytes={total} live_bytes={total} reclaimable_bytes=0",
+        "Dispatching scheduled repository maintenance",
+        f"Compaction completed client_id={client_id} packs_reclaimed=1 threshold_percent=25",
     ]
+    assert sorted(path.name for path in (repo.packs_root / str(key_id)).iterdir()) == ["2.pack"]
+    with facade.restore(client_id, set_id, snapshot.snapshot_id) as reader:
+        output = BytesIO()
+        assert reader.read_object(reader.root_id, output) == new_root
+        assert output.getvalue() == b"n"
 
 
 @pytest.mark.usefixtures("maintenance_tick")
@@ -109,6 +117,7 @@ def test_scheduled_compaction_continues_after_busy_and_damaged_repositories(tmp_
     locked = facade.init_repository(UUID(int=1), backup_sets)
     damaged = facade.init_repository(UUID(int=2), backup_sets)
     healthy = facade.init_repository(UUID(int=3), backup_sets)
+    facade.remove_backup_set(healthy.client_id, next(iter(backup_sets)))
     (damaged.path / "repository.json").write_bytes(b"{")
     unfinished = tmp_path / str(UUID(int=4))
     unfinished.mkdir()
@@ -132,11 +141,11 @@ def test_scheduled_compaction_continues_after_busy_and_damaged_repositories(tmp_
 
     assert caplog.record_tuples == [
         ("p8472backup", logging.INFO, "Dispatching daily pull batch"),
-        ("p8472backup", logging.INFO, "Dispatching scheduled compaction analysis"),
+        ("p8472backup", logging.INFO, "Dispatching scheduled repository maintenance"),
         ("p8472backup", logging.WARNING, f"Repository discovery failed client_id={inaccessible.client_id} reason=PermissionError"),
-        ("p8472backup", logging.WARNING, f"Operation analyze_compaction failed client_id={locked.client_id} reason=BlockingIOError"),
-        ("p8472backup", logging.WARNING, f"Operation analyze_compaction failed client_id={damaged.client_id} reason=JSONDecodeError"),
-        ("p8472backup", logging.INFO, f"Compaction analysis completed client_id={healthy.client_id} packs=0 total_bytes=0 live_bytes=0 reclaimable_bytes=0"),
+        ("p8472backup", logging.WARNING, f"Operation maintenance failed client_id={locked.client_id} reason=BlockingIOError"),
+        ("p8472backup", logging.WARNING, f"Operation maintenance failed client_id={damaged.client_id} reason=JSONDecodeError"),
+        ("p8472backup", logging.INFO, f"Backup set deleted client_id={healthy.client_id} backup_set_id={next(iter(backup_sets))}"),
     ]
     assert list(unfinished.iterdir()) == []
 
@@ -146,7 +155,7 @@ def test_scheduled_compaction_warns_if_the_storage_root_is_unavailable(tmp_path:
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(Scheduler(storage_root=tmp_path / "missing", compact_start=time(2, 30)).run())
 
-    assert caplog.record_tuples == [("p8472backup", logging.WARNING, "Compaction analysis could not list repositories reason=FileNotFoundError")]
+    assert caplog.record_tuples == [("p8472backup", logging.WARNING, "Repository maintenance could not list repositories reason=FileNotFoundError")]
 
 
 @pytest.mark.usefixtures("maintenance_tick")
@@ -172,9 +181,10 @@ def test_scheduled_compaction_stops_admitting_repositories_when_a_push_arrives(t
         loop = asyncio.get_running_loop()
         list_client_ids = RepositoryService.list_client_ids
 
-        def discover_and_start_push(service: RepositoryService, storage_root: Path) -> tuple[UUID, ...]:
-            client_ids = list_client_ids(service, storage_root)
-            assert asyncio.run_coroutine_threadsafe(scheduler.try_start_push(), loop).result(timeout=2)
+        def discover_and_start_push(service: RepositoryService, storage_root: Path, *, deleting: bool = False) -> tuple[UUID, ...]:
+            client_ids = list_client_ids(service, storage_root, deleting=deleting)
+            if not deleting:
+                assert asyncio.run_coroutine_threadsafe(scheduler.try_start_push(), loop).result(timeout=2)
             return client_ids
 
         monkeypatch.setattr(RepositoryService, "list_client_ids", discover_and_start_push)
@@ -183,4 +193,43 @@ def test_scheduled_compaction_stops_admitting_repositories_when_a_push_arrives(t
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(check())
 
-    assert caplog.messages == ["Dispatching daily pull batch", "Dispatching scheduled compaction analysis"]
+    assert caplog.messages == ["Dispatching daily pull batch", "Dispatching scheduled repository maintenance"]
+
+
+@pytest.mark.usefixtures("maintenance_tick")
+def test_scheduled_deletion_resumes_after_detaching_a_retired_repository(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    facade = ServerFacade(tmp_path, server_fqdn="backup.example.net")
+    client_id = UUID(int=1)
+    backup_sets = {UUID(int=2): UUID(int=3)}
+    repo = facade.init_repository(client_id, backup_sets)
+    facade.remove_repository(client_id)
+    detached = tmp_path / f".deleting-{client_id}"
+    caplog.set_level(logging.INFO, logger="p8472backup")
+    caplog.clear()
+
+    def interrupted_parent_sync(directory: Path) -> None:
+        if directory == tmp_path:
+            raise OSError("Storage root sync interrupted")
+        sync_directory(directory)
+
+    with (
+        patch("p8472backup.server.repository_service.sync_directory", interrupted_parent_sync),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        asyncio.run(Scheduler(storage_root=tmp_path).run())
+    assert not repo.path.exists()
+    assert (detached / "repository.json").exists()
+    assert f"Operation maintenance failed client_id={client_id} reason=OSError" in caplog.messages
+
+    # Model a process stopping during recursive removal, after deleting its metadata.
+    (detached / "repository.json").unlink()
+    new = facade.init_repository(client_id, backup_sets)
+    alias = tmp_path / f".deleting-{UUID(int=7)}"
+    alias.symlink_to(new.path, target_is_directory=True)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(Scheduler(storage_root=tmp_path).run())
+
+    assert not detached.exists()
+    assert (new.path / "repository.json").is_file()
+    assert alias.is_symlink()
+    assert caplog.messages.count(f"Repository deleted client_id={client_id}") == 1

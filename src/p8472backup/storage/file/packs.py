@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator, Iterator
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from struct import Struct
@@ -138,6 +139,13 @@ class Pack:
     @classmethod
     def iter_object_headers(cls, path: Path) -> Iterator[tuple[int, Object]]:
         """Validate a pack's record boundaries as its object headers are consumed."""
+        with closing(cls.iter_objects(path)) as records:
+            for offset, obj, _ in records:
+                yield offset, obj
+
+    @classmethod
+    def iter_objects(cls, path: Path) -> Generator[tuple[int, Object, BinaryIO], None, None]:
+        """Yield validated headers and a stream positioned at each record's body."""
         with path.open("rb") as source:
             pack = cls._load_header(source)
             end = HEADER_SIZE + pack.body_length
@@ -148,7 +156,7 @@ class Pack:
                 next_offset = offset + OBJECT_HEADER_SIZE + obj.length
                 if next_offset > end:
                     raise ValueError("Object record extends past the pack body")
-                yield offset, obj
+                yield offset, obj, source
                 offset = next_offset
             if offset != end:
                 raise ValueError("Object records do not fill the declared pack body")

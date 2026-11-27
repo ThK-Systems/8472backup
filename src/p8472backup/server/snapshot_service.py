@@ -1,8 +1,8 @@
 """Create and retrieve snapshots for an authorized backup set."""
 
 import os
-from collections.abc import Generator, Iterator
-from contextlib import contextmanager
+from collections.abc import Generator, Iterable, Iterator
+from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -31,6 +31,21 @@ DEFAULT_PROTECTION_DURATION = timedelta(days=7)
 SNAPSHOT_REGISTRY_NAME = "snapshot-registry.json"
 SNAPSHOT_REGISTRY_VERSION = 1
 _RUN_MARKER_PREFIX = ".in-progress-"
+_COMPACTION_MARKER = ".compaction-pending"
+_COMPACTION_TEMPORARY_PREFIX = ".compact-"
+
+
+def configured_protection_duration(override: timedelta | None) -> timedelta:
+    """Use the same server protection setting for client calls and maintenance."""
+    if override is None:
+        seconds = os.getenv("P8472BACKUP_PROTECTION_SECONDS")
+        try:
+            override = DEFAULT_PROTECTION_DURATION if seconds is None else timedelta(seconds=int(seconds))
+        except (ValueError, OverflowError) as error:
+            raise ValueError("P8472BACKUP_PROTECTION_SECONDS must be a supported number of whole seconds") from error
+    if override < timedelta():
+        raise ValueError("Snapshot protection duration must be nonnegative")
+    return override
 
 
 def backup_temporary_prefix(snapshot_id: UUID) -> str:
@@ -255,8 +270,11 @@ class SnapshotService:
         pack_directory = lock.require_held_for(repository.packs_root / str(backup_set.key_id))
         index = LocationIndex.load_from(index_path, lock)
         temporary_prefix = backup_temporary_prefix(snapshot_id)
-        root_id, catalogue = self._store_snapshot_objects(records, index, lock, pack_directory, target_size, temporary_prefix=temporary_prefix)
-        if not index.save_to(index_path, lock, temporary_prefix=temporary_prefix):
+        marker = self._compaction_marker(repository, lock)
+        already_pending = marker.is_file()
+        root_id, catalogue = self._store_snapshot_objects(records, index, lock, pack_directory, target_size, temporary_prefix=temporary_prefix, compaction_marker=marker)
+        index_saved = index.save_to(index_path, lock, temporary_prefix=temporary_prefix)
+        if not index_saved:
             # An interrupted save can leave a visible checkpoint with an unsynced name.
             sync_directory(index_path.parent)
 
@@ -273,6 +291,9 @@ class SnapshotService:
         self._save_snapshot(snapshot, repository, path, lock, temporary_prefix=temporary_prefix)
         registry.snapshots[snapshot_id] = backup_set_id
         self._write_registry(repository, lock, registry, temporary_prefix=temporary_prefix)
+        if index_saved and not already_pending:
+            marker.unlink()
+            sync_directory(repository.path)
         Log.info("Backup committed client_id=%s backup_set_id=%s snapshot_id=%s", repository.client_id, backup_set_id, snapshot_id)
         return snapshot
 
@@ -380,7 +401,90 @@ class SnapshotService:
             usage.extend(self._analyze_key_domain(repository, lock, key_id, snapshots))
         return tuple(usage)
 
-    def _analyze_key_domain(self, repository: Repository, lock: RepositoryLock, key_id: UUID, snapshots: list[tuple[UUID, UUID]]) -> list[PackUsage]:
+    def compaction_pending(self, repository: Repository, lock: RepositoryLock) -> bool:
+        """Return whether a durable deletion or unfinished write requires analysis."""
+        return self._compaction_marker(repository, lock).is_file()
+
+    def _compaction_marker(self, repository: Repository, lock: RepositoryLock) -> Path:
+        marker = repository.path / _COMPACTION_MARKER
+        if lock.require_held_for(marker) != marker or (os.path.lexists(marker) and not marker.is_file()):
+            raise InconsistentStateError("Unexpected compaction marker path")
+        return marker
+
+    def _mark_compaction_pending(self, marker: Path) -> None:
+        with marker.open("ab") as output:
+            os.fsync(output.fileno())
+        sync_directory(marker.parent)
+
+    def compact(self, repository: Repository, lock: RepositoryLock, *, threshold_percent: int) -> None:
+        """Reclaim dead pack space while preserving all published snapshot objects."""
+        if not 0 <= threshold_percent <= 100:
+            raise ValueError("Compaction threshold must be between 0 and 100 percent")
+        marker = self._compaction_marker(repository, lock)
+        registry = self._check_registry(repository, lock)
+        domains = self._snapshots_by_key(repository, registry)
+        selected: dict[UUID, set[int]] = {}
+        for key_id, snapshots in domains.items():
+            usage = self._analyze_key_domain(repository, lock, key_id, snapshots)
+            selected[key_id] = {pack.pack_id for pack in usage if pack.reclaimable_bytes > 0 and 100 * pack.reclaimable_bytes >= threshold_percent * pack.total_bytes}
+
+        trusted_time.server_clock.now()
+        # Confirm the manifest and the retry marker before modifying pack storage.
+        self._mark_compaction_pending(marker)
+        for set_id in dict.fromkeys(registry.pending_deletions.values()):
+            self._delete_snapshots(repository, set_id, lock, registry, ())
+        self._discard_compaction_temporary_files(self._backup_directory(repository.index_directory, lock))
+        sync_directory(repository.index_directory)
+        for key_id, snapshots in domains.items():
+            directory = self._backup_directory(repository.packs_root / str(key_id), lock)
+            self._discard_compaction_temporary_files(directory)
+            if selected[key_id]:
+                self._compact_key_domain(repository, lock, key_id, snapshots, directory, selected[key_id])
+            # Confirm unlinks that may already be visible after an interrupted attempt.
+            sync_directory(directory)
+        marker.unlink()
+        sync_directory(repository.path)
+        Log.info("Compaction completed client_id=%s packs_reclaimed=%d threshold_percent=%d", repository.client_id, sum(len(packs) for packs in selected.values()), threshold_percent)
+
+    def _discard_compaction_temporary_files(self, directory: Path) -> None:
+        for path in directory.iterdir():
+            if not path.name.startswith(_COMPACTION_TEMPORARY_PREFIX):
+                continue
+            if path.is_symlink() or not path.is_file():
+                raise InconsistentStateError(f"Unexpected compaction temporary file: {path.name}")
+            path.unlink()
+
+    def _compact_key_domain(self, repository: Repository, lock: RepositoryLock, key_id: UUID, snapshots: list[tuple[UUID, UUID]], directory: Path, selected: set[int]) -> None:
+        index, live, _ = self._compaction_index(repository, lock, key_id, snapshots)
+
+        def live_records() -> Generator[tuple[Object, BinaryIO], None, None]:
+            for pack_id in sorted(selected):
+                path = lock.require_held_for(directory / f"{pack_id}.pack")
+                with closing(Pack.iter_objects(path)) as records:
+                    for offset, obj, body in records:
+                        number = index.record_number(obj.object_id)
+                        if number is None or not (live[number // 8] & (1 << (number % 8))):
+                            continue
+                        if index.get(obj.object_id) == ObjectLocation(pack_id, offset, OBJECT_HEADER_SIZE + obj.length):
+                            yield obj, body
+
+        with closing(live_records()) as records:
+            self._write_packs(records, index, lock, directory, DEFAULT_TARGET_SIZE, temporary_prefix=_COMPACTION_TEMPORARY_PREFIX, relocate=True)
+        index.discard_packs(selected)
+        findings: list[str] = []
+        self._check_snapshot_catalogues(repository, lock, snapshots, index, findings)
+        if findings:
+            raise InconsistentStateError("\n".join(findings))
+
+        trusted_time.server_clock.now()
+        index_path = repository.index_directory / str(key_id)
+        if not index.save_to(index_path, lock, temporary_prefix=_COMPACTION_TEMPORARY_PREFIX):
+            # A previous attempt may have replaced this checkpoint before syncing its name.
+            sync_directory(index_path.parent)
+        for pack_id in sorted(selected):
+            (directory / f"{pack_id}.pack").unlink()
+
+    def _compaction_index(self, repository: Repository, lock: RepositoryLock, key_id: UUID, snapshots: list[tuple[UUID, UUID]]) -> tuple[LocationIndex, bytearray, set[ObjectId]]:
         index_path = repository.index_directory / str(key_id)
         if lock.require_held_for(index_path) != index_path:
             raise InconsistentStateError(f"Unexpected location index path: {index_path.name}")
@@ -394,7 +498,10 @@ class SnapshotService:
         roots = self._check_snapshot_catalogues(repository, lock, snapshots, index, findings, live=live)
         if findings:
             raise InconsistentStateError("\n".join(findings))
+        return index, live, roots
 
+    def _analyze_key_domain(self, repository: Repository, lock: RepositoryLock, key_id: UUID, snapshots: list[tuple[UUID, UUID]]) -> list[PackUsage]:
+        index, live, roots = self._compaction_index(repository, lock, key_id, snapshots)
         directory = self._backup_directory(repository.packs_root / str(key_id), lock)
         packs = self._finalized_packs(directory)
         indexed = index.pack_entry_counts()
@@ -532,36 +639,42 @@ class SnapshotService:
         registry = self._read_registry(repository, lock)
         snapshots = self._read_set_snapshot_metadata(repository, backup_set_id, lock, registry)
         keep = retained_snapshots({snapshot_id: metadata.committed_at for snapshot_id, metadata in snapshots.items()}, counts)
-        candidates = {snapshot_id: metadata for snapshot_id, metadata in snapshots.items() if snapshot_id not in keep}
-        return self._delete_unprotected_snapshots(repository, backup_set_id, lock, registry, candidates, protection_duration=protection_duration)
+        now = trusted_time.server_clock.now()
+        expired = tuple(snapshot_id for snapshot_id, metadata in snapshots.items() if snapshot_id not in keep and not self._is_protected(metadata, now, protection_duration))
+        return self._delete_snapshots(repository, backup_set_id, lock, registry, expired)
 
-    def remove_unprotected_snapshots(self, repository: Repository, backup_set: BackupSet, lock: RepositoryLock, *, protection_duration: timedelta) -> None:
-        """Remove expired snapshot records from a deleted backup set."""
-        backup_set_id = backup_set.backup_set_id
-        if not backup_set.deleted or repository.backup_sets.get(backup_set_id) != backup_set:
-            raise ValueError(f"Backup set is not deleted in this repository: {backup_set_id}")
+    def remove_unprotected_snapshots(self, repository: Repository, backup_sets: Iterable[BackupSet], lock: RepositoryLock, *, protection_duration: timedelta) -> set[UUID]:
+        """Remove expired snapshots and return retired sets with no remaining records."""
         registry = self._read_registry(repository, lock)
-        snapshots = self._read_set_snapshot_metadata(repository, backup_set_id, lock, registry)
-        for snapshot_id, metadata in snapshots.items():
-            self._read_catalogue(repository.snapshot_file(backup_set_id, snapshot_id), lock, metadata)
-        self._delete_unprotected_snapshots(repository, backup_set_id, lock, registry, snapshots, protection_duration=protection_duration)
+        now = trusted_time.server_clock.now()
+        expired_by_set: dict[UUID, tuple[UUID, ...]] = {}
+        pending_sets = set(registry.pending_deletions.values())
+        for backup_set in backup_sets:
+            set_id = backup_set.backup_set_id
+            if not backup_set.deleted or repository.backup_sets.get(set_id) != backup_set:
+                raise ValueError(f"Backup set is not deleted in this repository: {set_id}")
+            snapshots = self._read_set_snapshot_metadata(repository, set_id, lock, registry)
+            expired = tuple(snapshot_id for snapshot_id, metadata in snapshots.items() if not self._is_protected(metadata, now, protection_duration))
+            if expired or set_id in pending_sets:
+                for snapshot_id, metadata in snapshots.items():
+                    self._read_catalogue(repository.snapshot_file(set_id, snapshot_id), lock, metadata)
+            expired_by_set[set_id] = expired
+
+        for set_id, expired in expired_by_set.items():
+            self._delete_snapshots(repository, set_id, lock, registry, expired)
+        return set(expired_by_set) - set(registry.snapshots.values()) - set(registry.pending_deletions.values())
 
     def _read_set_snapshot_metadata(self, repository: Repository, backup_set_id: UUID, lock: RepositoryLock, registry: _SnapshotRegistry) -> dict[UUID, _SnapshotMetadata]:
         return {snapshot_id: self._read_snapshot_metadata(repository, set_id, snapshot_id, lock) for snapshot_id, set_id in registry.snapshots.items() if set_id == backup_set_id}
 
-    def _delete_unprotected_snapshots(
+    def _delete_snapshots(
         self,
         repository: Repository,
         backup_set_id: UUID,
         lock: RepositoryLock,
         registry: _SnapshotRegistry,
-        candidates: dict[UUID, _SnapshotMetadata],
-        *,
-        protection_duration: timedelta,
+        expired: tuple[UUID, ...],
     ) -> tuple[UUID, ...]:
-        directory = lock.require_held_for(repository.snapshots_root / str(backup_set_id))
-        now = trusted_time.server_clock.now()
-        expired = [snapshot_id for snapshot_id, metadata in candidates.items() if not self._is_protected(metadata, now, protection_duration)]
         if expired:
             for snapshot_id in registry.snapshots.keys() - expired:
                 if registry.snapshots[snapshot_id] == backup_set_id:
@@ -574,11 +687,10 @@ class SnapshotService:
         pending = tuple(snapshot_id for snapshot_id, set_id in registry.pending_deletions.items() if set_id == backup_set_id)
         if not pending:
             return ()
+        directory = self._backup_directory(repository.snapshots_root / str(backup_set_id), lock)
+        self._mark_compaction_pending(self._compaction_marker(repository, lock))
         if expired:
             self._write_registry(repository, lock, registry)
-        else:
-            # An earlier attempt may have replaced the register before syncing its directory.
-            sync_directory(repository.path)
 
         for snapshot_id in pending:
             path = directory / repository.snapshot_file(backup_set_id, snapshot_id).name
@@ -609,8 +721,11 @@ class SnapshotService:
         if snapshots.keys() & pending_deletions.keys():
             raise ValueError("Snapshot register contains published entries pending deletion")
         if not snapshots:
-            for set_id in repository.backup_sets:
-                directory = lock.require_held_for(repository.snapshots_root / str(set_id))
+            pending_sets = set(pending_deletions.values())
+            for set_id, backup_set in repository.backup_sets.items():
+                directory = self._backup_directory(repository.snapshots_root / str(set_id), lock)
+                if backup_set.deleted and set_id not in pending_sets and not os.path.lexists(directory):
+                    continue
                 if any(entry.suffix == ".snapshot" for entry in directory.iterdir()):
                     raise InconsistentStateError("Repository contains development snapshot records that require conversion")
         return _SnapshotRegistry(snapshots, pending_deletions)
@@ -749,6 +864,7 @@ class SnapshotService:
         target_size: int,
         *,
         temporary_prefix: str,
+        compaction_marker: Path,
     ) -> tuple[ObjectId, ObjectCatalogue]:
         """Store new objects and collect membership through the final root.
 
@@ -757,7 +873,7 @@ class SnapshotService:
         object_ids: set[ObjectId] = set()
         root_id: ObjectId | None = None
 
-        def iter_missing_objects() -> Iterator[tuple[Object, BinaryIO]]:
+        def iter_missing_objects() -> Generator[tuple[Object, BinaryIO], None, None]:
             nonlocal root_id
             for obj, body in records:
                 is_root = obj.object_type == TYPE_SNAPSHOT
@@ -779,22 +895,42 @@ class SnapshotService:
                     root_id = obj.object_id
                     return
 
-        missing = iter_missing_objects()
+        with closing(iter_missing_objects()) as missing:
+            self._write_packs(missing, index, lock, pack_directory, target_size, temporary_prefix=temporary_prefix, compaction_marker=compaction_marker)
+        if root_id is None:
+            raise ValueError("Backup input ended before the final snapshot root")
+        return root_id, ObjectCatalogue(frozenset(object_ids))
+
+    def _write_packs(
+        self,
+        records: Iterator[tuple[Object, BinaryIO]],
+        index: LocationIndex,
+        lock: RepositoryLock,
+        pack_directory: Path,
+        target_size: int,
+        *,
+        temporary_prefix: str,
+        compaction_marker: Path | None = None,
+        relocate: bool = False,
+    ) -> None:
         destinations = self._pack_destinations(pack_directory, index)
-        while (first := next(missing, None)) is not None:
+        first = next(records, None)
+        if first is None:
+            return
+        if compaction_marker is not None:
+            self._mark_compaction_pending(compaction_marker)
+        store_location = index.relocate if relocate else index.put
+        while first is not None:
             pack_id, path = next(destinations)
             if pack_id >= 2**64:
                 raise ValueError(f"Pack ID exceeds the supported range: {pack_id}")
             path = lock.require_held_for(path)
 
             def record_location(object_id: ObjectId, offset: int, length: int) -> None:
-                index.put(object_id, ObjectLocation(pack_id, offset, length))
+                store_location(object_id, ObjectLocation(pack_id, offset, length))
 
-            Pack.write_to(path, chain((first,), missing), target_size, on_stored=record_location, temporary_prefix=temporary_prefix)
-
-        if root_id is None:
-            raise ValueError("Backup input ended before the final snapshot root")
-        return root_id, ObjectCatalogue(frozenset(object_ids))
+            Pack.write_to(path, chain((first,), records), target_size, on_stored=record_location, temporary_prefix=temporary_prefix)
+            first = next(records, None)
 
     @staticmethod
     def _pack_destinations(directory: Path, index: LocationIndex) -> Iterator[tuple[int, Path]]:
