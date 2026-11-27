@@ -173,7 +173,13 @@ On restore, decode the JSON root ID back into its original 32 bytes. IDs read fr
 
 The local `SnapshotService` uses the register for publication, lookup, listing, and snapshot removal. A repository with an empty register and old `.snapshot` records requires conversion before those operations can proceed.
 
-OPEN questions include registry integrity and recovery, conversion of existing development records, transport and authenticated admission, retry acknowledgement, data integrity checks for opaque ciphertext, and corruption recovery.
+The server stores an additional recovery copy under `/var/lib/8472backup/recovery/<client-id>/<repository-incarnation>/` by default. The `.metadata-recovery` record binds the copy to the repository instance. The copy holds snapshot JSON, catalogues, their verification data, and the register generation including pending deletions. The server stores these files on its local filesystem. Availability of the packs remains a prerequisite for restoration.
+
+Before replacing the primary register, the server durably writes the proposed generation to `prepared.json`. After primary publication is durable, it writes the verified generation to `confirmed.json` and clears the prepared file. Backup acknowledgement and reclaiming deleted data follow confirmation. During a retry, a readable primary register selects a matching generation. If neither generation can be established from the surviving files, recovery stops. A repository with intact pre-existing metadata can initialize its copy on the next write or reclamation.
+
+`ServerFacade.repair_snapshot_metadata()` holds the exclusive repository lock. It validates the selected recovery generation, snapshot identity and timestamps, catalogue checksums and membership, and the required index and pack records. It then atomically replaces affected primary files and returns their count. Final cleanup removes the copy for the detached repository incarnation. `check()` remains a read-only validation operation.
+
+OPEN questions include conversion of existing development records, transport and authenticated admission, retry acknowledgement, and data integrity checks for opaque ciphertext.
 
 ### 11.1 Backup-run locking
 
@@ -191,7 +197,7 @@ Acquire the repository lock before opening the index or accessing packs. Hold it
 
 Different client repositories may run independently within the shared server memory budget. Once maintenance owns a repository's lock, it uses the authoritative retained-snapshot catalogues and effective protection rules to determine liveness.
 
-The file backend provides a `RepositoryLock` context manager for local filesystems. It requests an exclusive, nonblocking `flock` on the repository's `.repository.lock` file. Acquisition reports contention immediately. The lock file stays in place so callers lock the same file. Repository operations will hold the context for their full lifetime.
+The server provides `RepositoryLock` in `server/lock.py`. It requests an exclusive, nonblocking `flock` on the repository's `.repository.lock` file. Acquisition reports contention immediately. The lock file stays in place so callers lock the same file. Repository operations hold the context for their full lifetime.
 
 If a lock-holding process hangs, the backup server administrator can terminate it with `kill -TERM <PID>`. Terminating a shared server process interrupts every job it owns. Cleanup can acquire the lock once the last file descriptor holding it closes.
 
@@ -257,7 +263,7 @@ The scheduler checks retired scopes in its maintenance window. Under the exclusi
 
 `RepositoryService.delete()` moves an eligible repository atomically to `.deleting-<client-id>` under the same server storage root, then syncs that parent directory. The detached path is reserved for final deletion. The scheduler resumes recursive removal from this name after a restart, including when some files have already been removed. It acquires the detached repository lock and confirms the rename by syncing the parent before removing files, then syncs the parent again after removal.
 
-OPEN questions include remote removal permissions, coordination with scheduled jobs, and recovery after interrupted final deletion.
+The remote removal permissions remain open.
 
 ### 12.1 Liveness and garbage collection
 
@@ -271,7 +277,7 @@ Read the retained catalogues in bounded blocks under the repository lock. For ea
 
 The read-only compaction analysis validates the published catalogues and scans finalized pack headers under the repository lock. It reports total, live, and reclaimable bytes per pack. A referenced object contributes live bytes at its indexed location. An unindexed copy contributes reclaimable bytes. The pack header counts as live if the pack holds any live records.
 
-Scheduled maintenance requires a storage root. Local callers pass it to the scheduler. The planned server TOML configuration will supply it in deployments. The scheduler starts maintenance 30 minutes after the daily pull batch by default, with an optional fixed UTC start. It dispatches repositories serially while operation capacity is available and no backups are active. `RepositoryService.maintain_repository()` runs retired-scope cleanup and due compaction under the same exclusive `RepositoryLock`. Detached repository removal uses repository capacity during its own lock scope. Busy or invalid repositories are logged and can retry in a later window. Shared memory accounting remains open.
+Scheduled maintenance requires a storage root. Local callers pass it to the scheduler. The planned server TOML configuration will supply it in deployments. The scheduler starts maintenance 30 minutes after the daily pull batch by default, with an optional fixed UTC start. It dispatches repositories serially while operation capacity is available and no backups are active. `RepositoryService.maintain_repository()` runs retired-scope cleanup and due compaction under the same exclusive `RepositoryLock`. Detached repository removal uses repository capacity during its own lock scope. Busy or invalid repositories are logged and can retry in a later window. Maintenance allocations share the server work budget.
 
 The server durably creates an empty `.compaction-pending` file in the repository before unpublishing snapshots or writing new backup packs. A successful backup clears a marker that it created for its own pack writes after publishing the snapshot. An interrupted write leaves the marker for maintenance, including after client cleanup. Maintenance clears the marker after completing a pass, including a pass that finds no eligible pack. A later removal or interrupted write triggers a new analysis. Retired scopes are checked in each maintenance window for newly expired protection.
 

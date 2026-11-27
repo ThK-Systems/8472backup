@@ -10,13 +10,13 @@ import pytest
 from p8472backup.archive.objects import TYPE_SNAPSHOT, Object
 from p8472backup.common.error import InconsistentStateError
 from p8472backup.server import trusted_time
+from p8472backup.server.lock import RepositoryLock
 from p8472backup.server.repository_service import RepositoryService
 from p8472backup.server.server_facade import ServerFacade
 from p8472backup.server.snapshot import Snapshot
 from p8472backup.server.snapshot_service import SnapshotService
 from p8472backup.server.trusted_time import TrustedTimeError
 from p8472backup.storage.file.index import LocationIndex, ObjectLocation
-from p8472backup.storage.file.lock import RepositoryLock
 
 
 _CLIENT_ID = UUID(int=1)
@@ -410,7 +410,7 @@ def test_set_mode_persists_client_mode_under_repository_lock(tmp_path: Path) -> 
 def test_set_mode_retries_sync_for_a_visible_replacement(tmp_path: Path) -> None:
     service = ServerFacade(tmp_path, server_fqdn=_SERVER_FQDN)
     repository = service.init_repository(_CLIENT_ID, {_FIRST_SET: _KEY_ID})
-    with patch("p8472backup.storage.file.json_file.sync_directory", side_effect=OSError("Metadata directory sync failed")):
+    with patch("p8472backup.server.json_file.sync_directory", side_effect=OSError("Metadata directory sync failed")):
         with pytest.raises(OSError, match="Metadata directory sync failed"):
             service.set_mode(_CLIENT_ID, "push")
 

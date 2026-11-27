@@ -12,12 +12,12 @@ from p8472backup.archive.objects import HEADER_SIZE as OBJECT_HEADER_SIZE, TYPE_
 from p8472backup.archive.snapshotrootcontent import SnapshotRootContent
 from p8472backup.common.error import InconsistentStateError
 from p8472backup.server import trusted_time
+from p8472backup.server.lock import RepositoryLock
 from p8472backup.server.repository import Repository
 from p8472backup.server.repository_service import RepositoryService
 from p8472backup.server.snapshot_service import SnapshotService
 from p8472backup.server.trusted_time import TrustedTime
 from p8472backup.storage.file.index import LocationIndex, ObjectLocation
-from p8472backup.storage.file.lock import RepositoryLock
 from p8472backup.storage.file.packs import HEADER_SIZE as PACK_HEADER_SIZE, Pack
 
 

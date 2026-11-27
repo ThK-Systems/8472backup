@@ -8,7 +8,7 @@ from typing import BinaryIO
 from uuid import UUID
 
 from p8472backup.archive.objects import Object
-from p8472backup.common.error import InconsistentStateError
+from p8472backup.common.error import InconsistentStateError, MemoryBusyError, MemoryLimitError
 from p8472backup.common.log import Log
 from p8472backup.server.repository import BackupMode, Repository
 from p8472backup.server.repository_service import RepositoryService
@@ -32,7 +32,7 @@ class ServerFacade:
         """Register the initial backup sets and return the repository."""
         try:
             return RepositoryService().init_repository(self._storage_root / str(client_id), client_id, backup_sets.items(), mode=mode, backup_set_names=backup_set_names)
-        except (OSError, ValueError, InconsistentStateError) as error:
+        except (OSError, ValueError, InconsistentStateError, MemoryLimitError) as error:
             Log.warning("Operation init_repository failed client_id=%s reason=%s", client_id, type(error).__name__)
             raise
 
@@ -77,11 +77,13 @@ class ServerFacade:
                     snapshot = snapshots.create_snapshot(repository, backup_set_id, records, lock=lock, snapshot_id=snapshot_id, protection_duration=self._protection_duration, comment=comment)
                 try:
                     snapshots.prune(repository, backup_set, lock, prune_rule=prune, protection_duration=self._protection_duration)
+                except MemoryBusyError as error:
+                    Log.warning("Prune deferred after backup client_id=%s backup_set_id=%s snapshot_id=%s reason=%s", client_id, backup_set_id, snapshot.snapshot_id, type(error).__name__)
                 except Exception as error:
                     error.add_note(f"Snapshot {snapshot.snapshot_id} committed before prune failed.")
                     raise
                 return snapshot
-        except (OSError, ValueError, InconsistentStateError) as error:
+        except (OSError, ValueError, InconsistentStateError, MemoryLimitError) as error:
             scope = f"client_id={client_id} backup_set_id={backup_set_id}"
             if snapshot_id is not None:
                 scope += f" snapshot_id={snapshot_id}"
@@ -147,6 +149,11 @@ class ServerFacade:
         with RepositoryService().locked_repository(self._storage_root, client_id, operation="rebuild_index", backup_set_id=backup_set_id) as (repository, lock):
             backup_set = repository.get_backup_set(backup_set_id)
             SnapshotService().rebuild_index(repository, backup_set, lock)
+
+    def repair_snapshot_metadata(self, client_id: UUID) -> int:
+        """Restore the verified repository's snapshot metadata from its recovery copy."""
+        with RepositoryService().locked_repository(self._storage_root, client_id, operation="repair_snapshot_metadata") as (repository, lock):
+            return SnapshotService().repair_snapshot_metadata(repository, lock)
 
     @staticmethod
     def version() -> str:

@@ -9,8 +9,8 @@ from time import perf_counter
 
 from benchmark_in_memory_location_index import entry_for
 
+from p8472backup.server.lock import RepositoryLock
 from p8472backup.storage.file.index import LocationIndex
-from p8472backup.storage.file.lock import RepositoryLock
 
 
 def measure(directory: Path, entries: int, repeats: int) -> dict[str, object]:

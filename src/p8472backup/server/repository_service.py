@@ -10,15 +10,16 @@ from pathlib import Path
 from typing import NoReturn
 from uuid import UUID
 
-from p8472backup.common.error import InconsistentStateError
+from p8472backup.common.error import InconsistentStateError, MemoryLimitError
 from p8472backup.common.log import Log
 from p8472backup.server import trusted_time
 from p8472backup.server.admission import OperationKind, reserve_operation
+from p8472backup.server.json_file import is_json_object, read_json, sync_directory, write_json
+from p8472backup.server.lock import RepositoryLock
+from p8472backup.server.metadata_recovery import MetadataRecovery
 from p8472backup.server.repository import BackupMode, BackupSet, Repository
 from p8472backup.server.snapshot_service import SNAPSHOT_REGISTRY_NAME, SNAPSHOT_REGISTRY_VERSION, SnapshotService
 from p8472backup.storage.file.index import LocationIndex
-from p8472backup.storage.file.json_file import is_json_object, read_json, sync_directory, write_json
-from p8472backup.storage.file.lock import RepositoryLock
 
 
 _METADATA_NAME = "repository.json"
@@ -81,7 +82,7 @@ class RepositoryService:
                 with lock:
                     repository = self._read_metadata(path, lock, client_id=client_id)
                     yield repository, lock
-        except (OSError, ValueError, InconsistentStateError) as error:
+        except (OSError, ValueError, InconsistentStateError, MemoryLimitError) as error:
             if operation is not None:
                 scope = f"client_id={client_id}"
                 if backup_set_id is not None:
@@ -126,7 +127,9 @@ class RepositoryService:
                 for directory in (repository.data_directory, repository.path, repository.path.parent):
                     sync_directory(directory)
 
-                write_json(repository.path / SNAPSHOT_REGISTRY_NAME, lock, {"version": SNAPSHOT_REGISTRY_VERSION, "snapshots": {}})
+                register: dict[str, object] = {"version": SNAPSHOT_REGISTRY_VERSION, "snapshots": {}}
+                write_json(repository.path / SNAPSHOT_REGISTRY_NAME, lock, register)
+                MetadataRecovery.initialize(repository.path, client_id, lock, register)
                 self._write_metadata(repository, lock)
         Log.info("Repository initialized client_id=%s mode=%s backup_sets=%d", client_id, mode, len(sets))
         return repository
@@ -151,7 +154,7 @@ class RepositoryService:
         if key_id in existing_key_ids:
             if not packs_directory.is_dir() or not index_file.is_file():
                 raise InconsistentStateError("Existing key domain storage is incomplete.")
-            LocationIndex.load_from(index_file, lock)
+            LocationIndex.load_from(index_file, lock).close()
         elif os.path.lexists(packs_directory) or os.path.lexists(index_file):
             raise InconsistentStateError(f"Key domain storage already exists. {_INTERRUPTED_BACKUP_SET_REGISTRATION}")
 
@@ -223,7 +226,7 @@ class RepositoryService:
                     snapshots = SnapshotService()
                     if snapshots.compaction_pending(repository, lock):
                         snapshots.compact(repository, lock, threshold_percent=compact_threshold_percent)
-        except (OSError, ValueError, InconsistentStateError):
+        except (OSError, ValueError, InconsistentStateError, MemoryLimitError):
             # The repository context logs the failure once.
             return
         if detached:
@@ -289,13 +292,16 @@ class RepositoryService:
                 directory = storage_root.resolve(strict=True) / f"{_DELETION_PREFIX}{client_id}"
                 if directory.is_symlink():
                     raise InconsistentStateError("Unexpected detached repository path")
-                with RepositoryLock(directory):
+                with RepositoryLock(directory) as lock:
                     trusted_time.server_clock.now()
                     # A rename can be visible after a failed parent directory sync.
                     sync_directory(directory.parent)
+                    recovery = MetadataRecovery.open(directory, client_id, lock, detached=True)
+                    if recovery is not None:
+                        recovery.remove()
                     shutil.rmtree(directory)
                     sync_directory(directory.parent)
-        except (OSError, ValueError, InconsistentStateError) as error:
+        except (OSError, ValueError, InconsistentStateError, MemoryLimitError) as error:
             Log.warning("Final repository deletion failed client_id=%s reason=%s", client_id, type(error).__name__)
         else:
             Log.info("Repository deleted client_id=%s", client_id)
@@ -317,7 +323,8 @@ class RepositoryService:
             sync_directory(directory)
 
         for key_id in new_key_ids:
-            LocationIndex().save_to(repository.index_directory / str(key_id), lock)
+            with LocationIndex() as index:
+                index.save_to(repository.index_directory / str(key_id), lock)
 
     def set_mode(self, repository: Repository, mode: BackupMode, lock: RepositoryLock) -> None:
         """Persist the mode using the repository and lock from locked_repository()."""
@@ -336,7 +343,7 @@ class RepositoryService:
     def _read_metadata(self, path: Path, lock: RepositoryLock, *, client_id: UUID) -> Repository:
         """Load the verified repository metadata under its lock."""
         try:
-            metadata = read_json(path / _METADATA_NAME, lock)
+            metadata = read_json(path / _METADATA_NAME, lock, workspace="repository metadata")
         except FileNotFoundError as error:
             self._raise_missing_repository_metadata(error)
         if not is_json_object(metadata):

@@ -1,5 +1,6 @@
 import errno
 import os
+import shutil
 import signal
 from datetime import UTC, datetime, timedelta
 from fcntl import flock
@@ -12,7 +13,8 @@ from uuid import UUID
 import pytest
 
 from p8472backup.archive.objects import HEADER_SIZE as OBJECT_HEADER_SIZE, TYPE_DATA, TYPE_SNAPSHOT, Object
-from p8472backup.server import trusted_time
+from p8472backup.server import metadata_recovery, trusted_time
+from p8472backup.server.lock import RepositoryLock
 from p8472backup.server.repository import Repository
 from p8472backup.server.repository_service import RepositoryService
 from p8472backup.server.server_facade import ServerFacade
@@ -20,7 +22,6 @@ from p8472backup.server.snapshot import Snapshot
 from p8472backup.server.snapshot_service import DEFAULT_PROTECTION_DURATION, SnapshotService
 from p8472backup.server.trusted_time import TrustedTime, TrustedTimeError
 from p8472backup.storage.file.index import LocationIndex
-from p8472backup.storage.file.lock import RepositoryLock
 from p8472backup.storage.file.packs import HEADER_SIZE as PACK_HEADER_SIZE, Pack
 
 
@@ -185,6 +186,7 @@ def test_compaction_preserves_protected_objects_in_a_retired_repository(pruned: 
 
 
 def _compact_until_killed(storage_root: Path, checkpoint: Path, phase: str) -> None:
+    metadata_recovery.DEFAULT_STATE_DIRECTORY = storage_root / ".server-state"
     trusted_time.server_clock = Mock(spec=TrustedTime)
     with patch.object(trusted_time.server_clock, "now", return_value=_START + timedelta(days=8)):
         operation = "link" if phase == "before-pack" else "replace"
@@ -431,9 +433,12 @@ def test_final_repository_deletion_reports_a_failed_removal_and_can_resume(repos
     facade, repo, _ = repository
     facade.remove_repository(_CLIENT)
     detached = repo.path.with_name(f".deleting-{_CLIENT}")
+    remove = shutil.rmtree
 
     def interrupt_removal(path: Path) -> None:
-        assert path == detached
+        if path != detached:
+            remove(path)
+            return
         (path / "repository.json").unlink()
         raise PermissionError("Removal interrupted")
 
@@ -495,7 +500,7 @@ def test_a_lock_opened_before_repository_detachment_cannot_guard_a_new_repositor
         (path / ".repository.lock").touch()
         flock(fd, operation)
 
-    with patch("p8472backup.storage.file.lock.flock", detach_before_locking), pytest.raises(BlockingIOError, match="lock changed"), RepositoryLock(path):
+    with patch("p8472backup.server.lock.flock", detach_before_locking), pytest.raises(BlockingIOError, match="lock changed"), RepositoryLock(path):
         pytest.fail("A lock from the old repository guarded the new path")
 
     with RepositoryLock(path):

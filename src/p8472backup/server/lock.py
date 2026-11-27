@@ -1,4 +1,4 @@
-"""Exclusive access to a client repository on a local filesystem."""
+"""Coordinate exclusive server access to a client repository."""
 
 from __future__ import annotations
 

@@ -12,13 +12,13 @@ import pytest
 
 from p8472backup.archive.objects import OBJECT_ID_SIZE, TYPE_SNAPSHOT, Object
 from p8472backup.common.error import InconsistentStateError
-from p8472backup.server import trusted_time
+from p8472backup.server import metadata_recovery, trusted_time
+from p8472backup.server.json_file import sync_directory
+from p8472backup.server.lock import RepositoryLock
 from p8472backup.server.repository import BackupMode, Repository
 from p8472backup.server.server_facade import ServerFacade
 from p8472backup.server.snapshot import Snapshot
 from p8472backup.server.snapshot_service import SNAPSHOT_REGISTRY_NAME, SnapshotService
-from p8472backup.storage.file.json_file import sync_directory
-from p8472backup.storage.file.lock import RepositoryLock
 
 
 _CLIENT_ID = UUID(int=1)
@@ -48,6 +48,7 @@ def _marker(repository: Repository, set_id: UUID = _SET_ID, snapshot_id: UUID = 
 
 
 def _backup_until_killed(storage_root: Path, operation: str, destination: Path, after: bool) -> None:
+    metadata_recovery.DEFAULT_STATE_DIRECTORY = storage_root / ".server-state"
     publish = os.replace if operation == "replace" else os.link
 
     def publish_or_kill(source: str | Path, target: str | Path) -> None:
@@ -209,7 +210,10 @@ def test_cleanup_keeps_registered_catalogues_when_unlinking_temporary_names(init
     os.link(catalogue, temporary)
     register = repository.path / SNAPSHOT_REGISTRY_NAME
     if pending_deletion:
-        register.write_text(json.dumps({"version": 1, "snapshots": {}, "pending_deletions": {str(snapshot.snapshot_id): str(_SET_ID)}}), encoding="utf-8")
+        with RepositoryLock(repository.path) as lock:
+            recovery = metadata_recovery.MetadataRecovery.open(repository.path, _CLIENT_ID, lock)
+            assert recovery is not None
+            recovery.publish_register(register, {"version": 1, "snapshots": {}, "pending_deletions": {str(snapshot.snapshot_id): str(_SET_ID)}})
     files = {path: path.read_bytes() for path in (metadata, catalogue, register)}
 
     assert facade.cleanup(_CLIENT_ID, _SET_ID) == 1

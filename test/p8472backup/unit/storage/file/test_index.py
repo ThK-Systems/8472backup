@@ -5,8 +5,8 @@ from unittest.mock import patch
 import pytest
 
 from p8472backup.archive.objects import HEADER_SIZE as OBJECT_HEADER_SIZE, TYPE_DATA, Object
+from p8472backup.server.lock import RepositoryLock
 from p8472backup.storage.file.index import LocationIndex, ObjectLocation
-from p8472backup.storage.file.lock import RepositoryLock
 from p8472backup.storage.file.packs import HEADER_SIZE as PACK_HEADER_SIZE, Pack
 
 

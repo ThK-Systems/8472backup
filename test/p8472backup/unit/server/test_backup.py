@@ -20,14 +20,14 @@ from p8472backup.archive.metacontent import MetaContent
 from p8472backup.archive.objects import HEADER_SIZE as OBJECT_HEADER_SIZE, OBJECT_ID_SIZE, TYPE_DATA, TYPE_METADATA, TYPE_SNAPSHOT, Object, ObjectId
 from p8472backup.archive.snapshotrootcontent import SnapshotRootContent
 from p8472backup.common.error import InconsistentStateError
-from p8472backup.server import trusted_time
+from p8472backup.server import metadata_recovery, trusted_time
+from p8472backup.server.lock import RepositoryLock
 from p8472backup.server.repository import Repository
 from p8472backup.server.repository_service import RepositoryService
 from p8472backup.server.server_facade import ServerFacade
 from p8472backup.server.snapshot_service import SNAPSHOT_REGISTRY_NAME, SnapshotReader, SnapshotService
 from p8472backup.server.trusted_time import TrustedTime
 from p8472backup.storage.file.index import LocationIndex, ObjectLocation
-from p8472backup.storage.file.lock import RepositoryLock
 from p8472backup.storage.file.packs import HEADER_SIZE as PACK_HEADER_SIZE, Pack
 
 
@@ -286,6 +286,10 @@ def test_restore_rejects_an_invalid_catalogue_with_a_matching_checksum(backup_re
     metadata: dict[str, object] = json.loads(path.read_text(encoding="utf-8"))
     metadata["catalogue_sha256"] = sha256(catalogue).hexdigest()
     path.write_text(json.dumps(metadata), encoding="utf-8")
+    with RepositoryLock(repository.path) as lock:
+        recovery = metadata_recovery.MetadataRecovery.open(repository.path, _CLIENT_ID, lock)
+        assert recovery is not None
+        recovery.save_snapshot(path)
 
     with pytest.raises(InconsistentStateError, match=message) as failure, facade.restore(_CLIENT_ID, _SET_ID, snapshot.snapshot_id):
         pytest.fail("Restore opened an invalid catalogue")
@@ -469,6 +473,7 @@ def test_backup_requires_the_last_root_byte(backup_repository: tuple[ServerFacad
 
 
 def _kill_backup_at_last_root_byte(storage_root: Path) -> None:
+    metadata_recovery.DEFAULT_STATE_DIRECTORY = storage_root / ".server-state"
     body = BytesIO(_ROOT_BODY[:-1])
     read = body.read
 

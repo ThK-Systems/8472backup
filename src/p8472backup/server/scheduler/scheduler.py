@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Literal
 from uuid import UUID
 
-from p8472backup.common.error import ServerBusyError
+from p8472backup.common.error import MemoryLimitError, ServerBusyError
 from p8472backup.common.log import Log
 from p8472backup.server import trusted_time
 from p8472backup.server.admission import has_capacity
@@ -84,6 +84,9 @@ class Scheduler:
                     except ServerBusyError:
                         # The facade can lose the slot to a concurrent operation.
                         pass
+                    except MemoryLimitError:
+                        # The facade has reported the rejected backup.
+                        break
                     else:
                         break
                 await asyncio.sleep(_CHECK_INTERVAL_SECONDS)

@@ -14,11 +14,11 @@ import pytest
 
 from p8472backup.archive.objects import TYPE_DATA, TYPE_SNAPSHOT, Object
 from p8472backup.common.error import InconsistentStateError
-from p8472backup.server import trusted_time
+from p8472backup.server import metadata_recovery, trusted_time
+from p8472backup.server.lock import RepositoryLock
 from p8472backup.server.repository_service import RepositoryService
 from p8472backup.server.server_facade import ServerFacade
 from p8472backup.server.snapshot_service import SnapshotService
-from p8472backup.storage.file.lock import RepositoryLock
 
 
 _CLIENT_ID = UUID(int=1)
@@ -190,6 +190,7 @@ def test_prune_resumes_a_partial_deletion_after_the_next_backup(tmp_path: Path) 
 
 
 def _prune_until_killed(storage_root: Path, now: datetime, register: Path, replace_number: int | None, unlink_target: Path | None) -> None:
+    metadata_recovery.DEFAULT_STATE_DIRECTORY = storage_root / ".server-state"
     replace, unlink = os.replace, Path.unlink
     replacements = 0
 

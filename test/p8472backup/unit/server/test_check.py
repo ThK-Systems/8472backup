@@ -11,11 +11,12 @@ import pytest
 from p8472backup.archive.objects import HEADER_SIZE as OBJECT_HEADER_SIZE, OBJECT_ID_SIZE, TYPE_DATA, TYPE_SNAPSHOT, Object, ObjectId
 from p8472backup.common.error import InconsistentStateError
 from p8472backup.server import trusted_time
+from p8472backup.server.lock import RepositoryLock
+from p8472backup.server.metadata_recovery import MetadataRecovery
 from p8472backup.server.repository import Repository
 from p8472backup.server.server_facade import ServerFacade
 from p8472backup.server.snapshot import Snapshot
 from p8472backup.storage.file.index import LocationIndex, ObjectLocation
-from p8472backup.storage.file.lock import RepositoryLock
 from p8472backup.storage.file.packs import HEADER_SIZE as PACK_HEADER_SIZE, Pack
 
 
@@ -126,8 +127,11 @@ def test_check_stops_if_the_snapshot_register_is_unusable(saved_backup: tuple[Se
 @pytest.mark.parametrize(("remove_json", "remove_catalogue"), ((False, False), (True, False), (False, True), (True, True)))
 def test_check_accepts_pending_snapshot_deletions(saved_backup: tuple[ServerFacade, Repository, Path], remove_json: bool, remove_catalogue: bool) -> None:
     facade, repository, path = saved_backup
-    register = {"version": 1, "snapshots": {}, "pending_deletions": {path.stem: str(_SET_ID)}}
-    (repository.path / "snapshot-registry.json").write_text(json.dumps(register), encoding="utf-8")
+    register: dict[str, object] = {"version": 1, "snapshots": {}, "pending_deletions": {path.stem: str(_SET_ID)}}
+    with RepositoryLock(repository.path) as lock:
+        recovery = MetadataRecovery.open(repository.path, _CLIENT_ID, lock)
+        assert recovery is not None
+        recovery.publish_register(repository.path / "snapshot-registry.json", register)
     if remove_json:
         path.unlink()
     if remove_catalogue:
@@ -179,11 +183,15 @@ def test_check_validates_snapshot_metadata(saved_backup: tuple[ServerFacade, Rep
     ),
 )
 def test_check_validates_catalogue_membership_with_a_matching_checksum(saved_backup: tuple[ServerFacade, Repository, Path], catalogue: bytes, message: str) -> None:
-    facade, _, path = saved_backup
+    facade, repository, path = saved_backup
     path.with_suffix(".catalog").write_bytes(catalogue)
     metadata: dict[str, object] = json.loads(path.read_text(encoding="utf-8"))
     metadata["catalogue_sha256"] = sha256(catalogue).hexdigest()
     path.write_text(json.dumps(metadata), encoding="utf-8")
+    with RepositoryLock(repository.path) as lock:
+        recovery = MetadataRecovery.open(repository.path, _CLIENT_ID, lock)
+        assert recovery is not None
+        recovery.save_snapshot(path)
 
     with pytest.raises(InconsistentStateError, match=message):
         facade.check(_CLIENT_ID)

@@ -14,16 +14,19 @@ from typing import BinaryIO
 from uuid import UUID, uuid4
 
 from p8472backup.archive.objects import HEADER_SIZE as OBJECT_HEADER_SIZE, OBJECT_ID_SIZE, TYPE_SNAPSHOT, Object, ObjectId
-from p8472backup.common.error import InconsistentStateError
+from p8472backup.common.error import InconsistentStateError, MemoryBusyError, MemoryLimitError
 from p8472backup.common.log import Log
 from p8472backup.server import trusted_time
+from p8472backup.server.admission import reserve_operation
+from p8472backup.server.json_file import is_json_object, read_json, read_json_file, sync_directory, write_json
+from p8472backup.server.lock import RepositoryLock
+from p8472backup.server.memory import reserve_workspace
+from p8472backup.server.metadata_recovery import MetadataRecovery
 from p8472backup.server.repository import BackupSet, Repository
 from p8472backup.server.retention.policy import parse_prune_rule, retained_snapshots
 from p8472backup.server.snapshot import SNAPSHOT_VERSION, ObjectCatalogue, Snapshot
 from p8472backup.server.snapshot_listing import BackupSetListing, SnapshotListEntry
 from p8472backup.storage.file.index import LocationIndex, ObjectLocation
-from p8472backup.storage.file.json_file import is_json_object, read_json, sync_directory, write_json
-from p8472backup.storage.file.lock import RepositoryLock
 from p8472backup.storage.file.packs import DEFAULT_TARGET_SIZE, HEADER_SIZE as PACK_HEADER_SIZE, Pack
 
 
@@ -112,7 +115,9 @@ class SnapshotReader:
 
     def close(self) -> None:
         """Release the in-memory index and catalogue at the end of the restore."""
-        self._index = None
+        if self._index is not None:
+            self._index.close()
+            self._index = None
         self._catalogue_bits.clear()
 
     def _require_index(self) -> LocationIndex:
@@ -153,12 +158,14 @@ class SnapshotService:
         try:
             yield snapshot_id
         except BaseException as error:
-            if auto_cleanup:
+            if auto_cleanup or isinstance(error, (MemoryBusyError, MemoryLimitError)):
                 try:
                     self.cleanup(repository, backup_set, lock)
                 except Exception as cleanup_error:
                     error.add_note(f"Automatic cleanup failed: {cleanup_error}")
                     Log.warning("Automatic cleanup failed client_id=%s backup_set_id=%s snapshot_id=%s reason=%s", repository.client_id, backup_set.backup_set_id, snapshot_id, type(cleanup_error).__name__)
+                    if isinstance(error, MemoryBusyError):
+                        raise InconsistentStateError("Cleanup required after backup memory admission failed") from error
             raise
         else:
             try:
@@ -172,6 +179,8 @@ class SnapshotService:
         """Remove files belonging to stopped runs and return their count."""
         try:
             registry = self._read_registry(repository, lock)
+        except MemoryBusyError:
+            raise
         except (OSError, ValueError) as error:
             raise InconsistentStateError(f"Cannot read the snapshot register: {error}") from error
 
@@ -199,6 +208,10 @@ class SnapshotService:
         if not markers:
             return 0
 
+        recovery = MetadataRecovery.open(repository.path, repository.client_id, lock)
+        if recovery is not None:
+            recovery.confirm_register(repository.path / SNAPSHOT_REGISTRY_NAME)
+
         directories = [repository.index_directory, repository.packs_root / str(backup_set.key_id)]
         set_metadata_directory = repository.backup_set_file(set_id).parent
         if os.path.lexists(set_metadata_directory):
@@ -215,6 +228,8 @@ class SnapshotService:
         for path in unpublished:
             path.unlink(missing_ok=True)
             path.with_suffix(".catalog").unlink(missing_ok=True)
+            if recovery is not None:
+                recovery.remove_snapshot(path)
 
         # Sync even directories where an earlier attempt already unlinked the files.
         for parent in directories:
@@ -264,12 +279,12 @@ class SnapshotService:
 
         index_path = repository.index_directory / str(backup_set.key_id)
         pack_directory = lock.require_held_for(repository.packs_root / str(backup_set.key_id))
-        index = LocationIndex.load_from(index_path, lock)
         temporary_prefix = backup_temporary_prefix(snapshot_id)
         marker = self._compaction_marker(repository, lock)
         already_pending = marker.is_file()
-        root_id, catalogue = self._store_snapshot_objects(records, index, lock, pack_directory, target_size, temporary_prefix=temporary_prefix, compaction_marker=marker)
-        index_saved = index.save_to(index_path, lock, temporary_prefix=temporary_prefix)
+        with LocationIndex.load_from(index_path, lock) as index:
+            root_id, catalogue = self._store_snapshot_objects(records, index, lock, pack_directory, target_size, temporary_prefix=temporary_prefix, compaction_marker=marker)
+            index_saved = index.save_to(index_path, lock, temporary_prefix=temporary_prefix)
         if not index_saved:
             # An interrupted save can leave a visible checkpoint with an unsynced name.
             sync_directory(index_path.parent)
@@ -284,7 +299,9 @@ class SnapshotService:
             _catalogue=catalogue,
             comment=comment,
         )
+        recovery = self._metadata_recovery(repository, lock)
         self._save_snapshot(snapshot, repository, path, lock, temporary_prefix=temporary_prefix)
+        recovery.save_snapshot(path)
         registry.snapshots[snapshot_id] = backup_set_id
         self._write_registry(repository, lock, registry, temporary_prefix=temporary_prefix)
         if index_saved and not already_pending:
@@ -296,7 +313,7 @@ class SnapshotService:
     def get_snapshot(self, repository: Repository, backup_set_id: UUID, snapshot_id: UUID) -> Snapshot:
         """Load a committed snapshot in this service's client and backup set."""
         repository.get_backup_set(backup_set_id)
-        with RepositoryLock(repository.path) as lock:
+        with reserve_operation(), RepositoryLock(repository.path) as lock:
             self._require_published_snapshot(repository, backup_set_id, snapshot_id, lock)
             return self._load_snapshot(repository, backup_set_id, snapshot_id, lock)
 
@@ -309,9 +326,15 @@ class SnapshotService:
         index = LocationIndex.load_from(repository.index_directory / key_id, lock)
         path = repository.snapshot_file(backup_set_id, snapshot_id)
         try:
-            catalogue_bits = self._check_catalogue(path, lock, metadata, index)
-        except (OSError, ValueError) as error:
-            raise InconsistentStateError(self._check_file_error(repository, path.with_suffix(".catalog"), error)) from error
+            try:
+                catalogue_bits = self._check_catalogue(path, lock, metadata, index)
+            except MemoryBusyError:
+                raise
+            except (OSError, ValueError) as error:
+                raise InconsistentStateError(self._check_file_error(repository, path.with_suffix(".catalog"), error)) from error
+        except BaseException:
+            index.close()
+            raise
         return SnapshotReader(metadata, index, catalogue_bits, repository.packs_root / key_id, lock)
 
     def _require_published_snapshot(self, repository: Repository, backup_set_id: UUID, snapshot_id: UUID, lock: RepositoryLock) -> None:
@@ -352,6 +375,43 @@ class SnapshotService:
             raise InconsistentStateError("\n".join(findings))
         Log.info("Repository check completed client_id=%s snapshots_checked=%d", repository.client_id, len(registry.snapshots))
 
+    def repair_snapshot_metadata(self, repository: Repository, lock: RepositoryLock) -> int:
+        """Restore verified snapshot metadata from the current recovery generation."""
+        recovery = MetadataRecovery.open(repository.path, repository.client_id, lock)
+        if recovery is None:
+            raise InconsistentStateError("No snapshot metadata recovery copy exists")
+        path = repository.path / SNAPSHOT_REGISTRY_NAME
+        if lock.require_held_for(path) != path:
+            raise InconsistentStateError("Unexpected snapshot register path")
+        try:
+            primary = read_json(path, lock, workspace="snapshot register")
+            self._decode_registry(repository, lock, primary)
+        except MemoryBusyError:
+            raise
+        except (OSError, ValueError, InconsistentStateError):
+            primary = None
+        data = recovery.register_for_repair(primary)
+        registry = self._decode_registry(repository, lock, data)
+        findings: list[str] = []
+        for key_id, snapshots in self._snapshots_by_key(repository, registry).items():
+            self._check_key_domain(repository, lock, key_id, snapshots, findings, recovery=recovery)
+        if findings:
+            raise InconsistentStateError("\n".join(findings))
+
+        replaced = 0
+        for snapshot_id, set_id in registry.snapshots.items():
+            metadata = repository.snapshot_file(set_id, snapshot_id)
+            for original in (metadata, metadata.with_suffix(".catalog")):
+                if not recovery.matches_copy(original):
+                    recovery.restore_file(original)
+                    replaced += 1
+        if primary != data:
+            write_json(path, lock, data)
+            replaced += 1
+        recovery.confirm_register(path)
+        Log.info("Snapshot metadata repair completed client_id=%s files_replaced=%d", repository.client_id, replaced)
+        return replaced
+
     def rebuild_index(self, repository: Repository, backup_set: BackupSet, lock: RepositoryLock) -> None:
         """Replace one key domain's checkpoint after validating its published snapshots."""
         if repository.get_backup_set(backup_set.backup_set_id) != backup_set:
@@ -368,33 +428,38 @@ class SnapshotService:
 
         try:
             index = LocationIndex.rebuild_from_packs(packs, lock)
+        except MemoryBusyError:
+            raise
         except (OSError, ValueError) as error:
             raise InconsistentStateError(self._check_file_error(repository, pack_directory, error)) from error
-        snapshots = [(set_id, snapshot_id) for snapshot_id, set_id in registry.snapshots.items() if repository.get_backup_set(set_id).key_id == key_id]
-        findings: list[str] = []
-        roots = self._check_snapshot_catalogues(repository, lock, snapshots, index, findings)
-        if findings:
-            raise InconsistentStateError("\n".join(findings))
+        with index:
+            snapshots = [(set_id, snapshot_id) for snapshot_id, set_id in registry.snapshots.items() if repository.get_backup_set(set_id).key_id == key_id]
+            findings: list[str] = []
+            roots = self._check_snapshot_catalogues(repository, lock, snapshots, index, findings)
+            if findings:
+                raise InconsistentStateError("\n".join(findings))
 
-        for root_id in roots:
-            location = index.get(root_id)
-            if location is None:
-                raise InconsistentStateError(f"Snapshot root is missing from the rebuilt index: {root_id.hex()}")
-            root = Pack.read_object_header(lock.require_held_for(packs[location.pack_id]), location.offset, location.length)
-            if root.object_type != TYPE_SNAPSHOT or root.object_id != root_id:
-                raise InconsistentStateError(f"Invalid pack record for snapshot root: {root_id.hex()}")
+            for root_id in roots:
+                location = index.get(root_id)
+                if location is None:
+                    raise InconsistentStateError(f"Snapshot root is missing from the rebuilt index: {root_id.hex()}")
+                root = Pack.read_object_header(lock.require_held_for(packs[location.pack_id]), location.offset, location.length)
+                if root.object_type != TYPE_SNAPSHOT or root.object_id != root_id:
+                    raise InconsistentStateError(f"Invalid pack record for snapshot root: {root_id.hex()}")
 
-        # A finalized pack name can be visible after an interrupted directory sync.
-        sync_directory(pack_directory)
-        index.save_to(index_path, lock)
-        Log.info("Location index rebuild completed client_id=%s key_id=%s packs_scanned=%d objects_indexed=%d snapshots_checked=%d", repository.client_id, key_id, len(packs), len(index), len(snapshots))
+            # A finalized pack name can be visible after an interrupted directory sync.
+            sync_directory(pack_directory)
+            index.save_to(index_path, lock)
+            Log.info("Location index rebuild completed client_id=%s key_id=%s packs_scanned=%d objects_indexed=%d snapshots_checked=%d", repository.client_id, key_id, len(packs), len(index), len(snapshots))
 
     def analyze_compaction(self, repository: Repository, lock: RepositoryLock) -> tuple[PackUsage, ...]:
         """Measure reclaimable space after verifying the published snapshots and packs."""
         registry = self._check_registry(repository, lock)
         usage: list[PackUsage] = []
         for key_id, snapshots in self._snapshots_by_key(repository, registry).items():
-            usage.extend(self._analyze_key_domain(repository, lock, key_id, snapshots))
+            domain_usage = self._analyze_key_domain(repository, lock, key_id, snapshots)
+            reserve_workspace("compaction analysis results", (len(usage) + len(domain_usage)) * 256)
+            usage.extend(domain_usage)
         return tuple(usage)
 
     def compaction_pending(self, repository: Repository, lock: RepositoryLock) -> bool:
@@ -420,11 +485,15 @@ class SnapshotService:
         registry = self._check_registry(repository, lock)
         domains = self._snapshots_by_key(repository, registry)
         selected: dict[UUID, set[int]] = {}
+        selected_count = 0
         for key_id, snapshots in domains.items():
             usage = self._analyze_key_domain(repository, lock, key_id, snapshots)
+            reserve_workspace("selected packs", (selected_count + len(usage)) * 256)
             selected[key_id] = {pack.pack_id for pack in usage if pack.reclaimable_bytes > 0 and 100 * pack.reclaimable_bytes >= threshold_percent * pack.total_bytes}
+            selected_count += len(selected[key_id])
 
         trusted_time.server_clock.now()
+        self._metadata_recovery(repository, lock).confirm_register(repository.path / SNAPSHOT_REGISTRY_NAME)
         # Confirm the manifest and the retry marker before modifying pack storage.
         self._mark_compaction_pending(marker)
         for set_id in dict.fromkeys(registry.pending_deletions.values()):
@@ -451,85 +520,91 @@ class SnapshotService:
             path.unlink()
 
     def _compact_key_domain(self, repository: Repository, lock: RepositoryLock, key_id: UUID, snapshots: list[tuple[UUID, UUID]], directory: Path, selected: set[int]) -> None:
-        index, live, _ = self._compaction_index(repository, lock, key_id, snapshots)
+        with self._compaction_index(repository, lock, key_id, snapshots) as (index, live, _):
 
-        def live_records() -> Generator[tuple[Object, BinaryIO], None, None]:
+            def live_records() -> Generator[tuple[Object, BinaryIO], None, None]:
+                for pack_id in sorted(selected):
+                    path = lock.require_held_for(directory / f"{pack_id}.pack")
+                    with closing(Pack.iter_objects(path)) as records:
+                        for offset, obj, body in records:
+                            number = index.record_number(obj.object_id)
+                            if number is None or not (live[number // 8] & (1 << (number % 8))):
+                                continue
+                            if index.get(obj.object_id) == ObjectLocation(pack_id, offset, OBJECT_HEADER_SIZE + obj.length):
+                                yield obj, body
+
+            with closing(live_records()) as records:
+                self._write_packs(records, index, lock, directory, DEFAULT_TARGET_SIZE, temporary_prefix=_COMPACTION_TEMPORARY_PREFIX, relocate=True)
+            index.discard_packs(selected)
+            findings: list[str] = []
+            self._check_snapshot_catalogues(repository, lock, snapshots, index, findings)
+            if findings:
+                raise InconsistentStateError("\n".join(findings))
+
+            trusted_time.server_clock.now()
+            index_path = repository.index_directory / str(key_id)
+            if not index.save_to(index_path, lock, temporary_prefix=_COMPACTION_TEMPORARY_PREFIX):
+                # A previous attempt may have replaced this checkpoint before syncing its name.
+                sync_directory(index_path.parent)
             for pack_id in sorted(selected):
-                path = lock.require_held_for(directory / f"{pack_id}.pack")
-                with closing(Pack.iter_objects(path)) as records:
-                    for offset, obj, body in records:
-                        number = index.record_number(obj.object_id)
-                        if number is None or not (live[number // 8] & (1 << (number % 8))):
-                            continue
-                        if index.get(obj.object_id) == ObjectLocation(pack_id, offset, OBJECT_HEADER_SIZE + obj.length):
-                            yield obj, body
+                (directory / f"{pack_id}.pack").unlink()
 
-        with closing(live_records()) as records:
-            self._write_packs(records, index, lock, directory, DEFAULT_TARGET_SIZE, temporary_prefix=_COMPACTION_TEMPORARY_PREFIX, relocate=True)
-        index.discard_packs(selected)
-        findings: list[str] = []
-        self._check_snapshot_catalogues(repository, lock, snapshots, index, findings)
-        if findings:
-            raise InconsistentStateError("\n".join(findings))
-
-        trusted_time.server_clock.now()
-        index_path = repository.index_directory / str(key_id)
-        if not index.save_to(index_path, lock, temporary_prefix=_COMPACTION_TEMPORARY_PREFIX):
-            # A previous attempt may have replaced this checkpoint before syncing its name.
-            sync_directory(index_path.parent)
-        for pack_id in sorted(selected):
-            (directory / f"{pack_id}.pack").unlink()
-
-    def _compaction_index(self, repository: Repository, lock: RepositoryLock, key_id: UUID, snapshots: list[tuple[UUID, UUID]]) -> tuple[LocationIndex, bytearray, set[ObjectId]]:
+    @contextmanager
+    def _compaction_index(self, repository: Repository, lock: RepositoryLock, key_id: UUID, snapshots: list[tuple[UUID, UUID]]) -> Generator[tuple[LocationIndex, bytearray, set[ObjectId]], None, None]:
         index_path = repository.index_directory / str(key_id)
         if lock.require_held_for(index_path) != index_path:
             raise InconsistentStateError(f"Unexpected location index path: {index_path.name}")
         try:
             index = LocationIndex.load_from(index_path, lock)
+        except MemoryBusyError:
+            raise
         except (OSError, ValueError) as error:
             raise InconsistentStateError(self._check_file_error(repository, index_path, error)) from error
 
-        live = bytearray((len(index) + 7) // 8)
-        findings: list[str] = []
-        roots = self._check_snapshot_catalogues(repository, lock, snapshots, index, findings, live=live)
-        if findings:
-            raise InconsistentStateError("\n".join(findings))
-        return index, live, roots
+        with index:
+            size = (len(index) + 7) // 8
+            reserve_workspace("catalogue bitmaps", size * 2 + 256)
+            live = bytearray(size)
+            findings: list[str] = []
+            roots = self._check_snapshot_catalogues(repository, lock, snapshots, index, findings, live=live)
+            if findings:
+                raise InconsistentStateError("\n".join(findings))
+            yield index, live, roots
 
     def _analyze_key_domain(self, repository: Repository, lock: RepositoryLock, key_id: UUID, snapshots: list[tuple[UUID, UUID]]) -> list[PackUsage]:
-        index, live, roots = self._compaction_index(repository, lock, key_id, snapshots)
-        directory = self._backup_directory(repository.packs_root / str(key_id), lock)
-        packs = self._finalized_packs(directory)
-        indexed = index.pack_entry_counts()
-        usage: list[PackUsage] = []
-        for pack_id, path in sorted(packs.items()):
-            unmatched = indexed.pop(pack_id, 0)
-            total_bytes = PACK_HEADER_SIZE
-            live_bytes = 0
-            try:
-                for offset, obj in Pack.iter_object_headers(lock.require_held_for(path)):
-                    length = OBJECT_HEADER_SIZE + obj.length
-                    total_bytes += length
-                    number = index.record_number(obj.object_id)
-                    if number is None or index.get(obj.object_id) != ObjectLocation(pack_id, offset, length):
-                        continue
-                    unmatched -= 1
-                    if obj.object_type != TYPE_SNAPSHOT and obj.object_id in roots:
-                        raise ValueError(f"Snapshot root {obj.object_id.hex()} has unexpected object type {obj.object_type}")
-                    byte, bit = divmod(number, 8)
-                    if live[byte] & (1 << bit):
-                        live_bytes += length
-            except (OSError, ValueError) as error:
-                raise InconsistentStateError(self._check_file_error(repository, path, error)) from error
-            if unmatched:
-                raise InconsistentStateError(f"{path.relative_to(repository.path)}: indexed locations missing from pack headers: {unmatched}")
-            if live_bytes:
-                live_bytes += PACK_HEADER_SIZE
-            usage.append(PackUsage(key_id, pack_id, total_bytes, live_bytes))
+        with self._compaction_index(repository, lock, key_id, snapshots) as (index, live, roots):
+            directory = self._backup_directory(repository.packs_root / str(key_id), lock)
+            packs = self._finalized_packs(directory)
+            indexed = index.pack_entry_counts()
+            usage: list[PackUsage] = []
+            for pack_id, path in sorted(packs.items()):
+                unmatched = indexed.pop(pack_id, 0)
+                total_bytes = PACK_HEADER_SIZE
+                live_bytes = 0
+                try:
+                    for offset, obj in Pack.iter_object_headers(lock.require_held_for(path)):
+                        length = OBJECT_HEADER_SIZE + obj.length
+                        total_bytes += length
+                        number = index.record_number(obj.object_id)
+                        if number is None or index.get(obj.object_id) != ObjectLocation(pack_id, offset, length):
+                            continue
+                        unmatched -= 1
+                        if obj.object_type != TYPE_SNAPSHOT and obj.object_id in roots:
+                            raise ValueError(f"Snapshot root {obj.object_id.hex()} has unexpected object type {obj.object_type}")
+                        byte, bit = divmod(number, 8)
+                        if live[byte] & (1 << bit):
+                            live_bytes += length
+                except (OSError, ValueError) as error:
+                    raise InconsistentStateError(self._check_file_error(repository, path, error)) from error
+                if unmatched:
+                    raise InconsistentStateError(f"{path.relative_to(repository.path)}: indexed locations missing from pack headers: {unmatched}")
+                if live_bytes:
+                    live_bytes += PACK_HEADER_SIZE
+                usage.append(PackUsage(key_id, pack_id, total_bytes, live_bytes))
 
-        if indexed:
-            raise InconsistentStateError(f"Indexed pack is missing: {directory.relative_to(repository.path) / f'{min(indexed)}.pack'}")
-        return usage
+            if indexed:
+                raise InconsistentStateError(f"Indexed pack is missing: {directory.relative_to(repository.path) / f'{min(indexed)}.pack'}")
+            return usage
 
     def _snapshots_by_key(self, repository: Repository, registry: _SnapshotRegistry) -> dict[UUID, list[tuple[UUID, UUID]]]:
         domains: dict[UUID, list[tuple[UUID, UUID]]] = {backup_set.key_id: [] for backup_set in repository.backup_sets.values()}
@@ -549,53 +624,67 @@ class SnapshotService:
                     continue
                 if pack_id >= 2**64 or not entry.is_file(follow_symlinks=False):
                     raise InconsistentStateError(f"Unexpected pack file: {entry.name}")
+                if len(packs) % 256 == 0:
+                    reserve_workspace("finalized packs", (len(packs) + 256) * 1024)
                 packs[pack_id] = directory / entry.name
         return packs
 
     def _check_registry(self, repository: Repository, lock: RepositoryLock) -> _SnapshotRegistry:
         try:
             return self._read_registry(repository, lock)
+        except MemoryBusyError:
+            raise
         except (OSError, ValueError, InconsistentStateError) as error:
             raise InconsistentStateError(self._check_file_error(repository, repository.path / SNAPSHOT_REGISTRY_NAME, error)) from error
 
-    def _check_key_domain(self, repository: Repository, lock: RepositoryLock, key_id: UUID, snapshots: list[tuple[UUID, UUID]], findings: list[str]) -> None:
+    def _check_key_domain(self, repository: Repository, lock: RepositoryLock, key_id: UUID, snapshots: list[tuple[UUID, UUID]], findings: list[str], *, recovery: MetadataRecovery | None = None) -> None:
         index_path = repository.index_directory / str(key_id)
         try:
             index: LocationIndex | None = LocationIndex.load_from(index_path, lock)
+        except MemoryBusyError:
+            raise
         except (OSError, ValueError) as error:
             findings.append(self._check_file_error(repository, index_path, error))
             index = None
 
-        roots = self._check_snapshot_catalogues(repository, lock, snapshots, index, findings)
         if index is None:
+            self._check_snapshot_catalogues(repository, lock, snapshots, None, findings, recovery=recovery)
             return
-        for pack_id, unmatched in index.pack_entry_counts().items():
-            path = repository.packs_root / str(key_id) / f"{pack_id}.pack"
-            try:
-                for offset, obj in Pack.iter_object_headers(lock.require_held_for(path)):
-                    if index.get(obj.object_id) != ObjectLocation(pack_id, offset, OBJECT_HEADER_SIZE + obj.length):
-                        continue
-                    unmatched -= 1
-                    if obj.object_type != TYPE_SNAPSHOT and obj.object_id in roots:
-                        findings.append(f"{path.relative_to(repository.path)}: snapshot root {obj.object_id.hex()} has unexpected object type {obj.object_type}")
-            except (OSError, ValueError) as error:
-                findings.append(self._check_file_error(repository, path, error))
-                continue
-            if unmatched:
-                findings.append(f"{path.relative_to(repository.path)}: indexed locations missing from pack headers: {unmatched}")
+        with index:
+            roots = self._check_snapshot_catalogues(repository, lock, snapshots, index, findings, recovery=recovery)
+            for pack_id, unmatched in index.pack_entry_counts().items():
+                path = repository.packs_root / str(key_id) / f"{pack_id}.pack"
+                try:
+                    for offset, obj in Pack.iter_object_headers(lock.require_held_for(path)):
+                        if index.get(obj.object_id) != ObjectLocation(pack_id, offset, OBJECT_HEADER_SIZE + obj.length):
+                            continue
+                        unmatched -= 1
+                        if obj.object_type != TYPE_SNAPSHOT and obj.object_id in roots:
+                            findings.append(f"{path.relative_to(repository.path)}: snapshot root {obj.object_id.hex()} has unexpected object type {obj.object_type}")
+                except (OSError, ValueError) as error:
+                    findings.append(self._check_file_error(repository, path, error))
+                    continue
+                if unmatched:
+                    findings.append(f"{path.relative_to(repository.path)}: indexed locations missing from pack headers: {unmatched}")
 
-    def _check_snapshot_catalogues(self, repository: Repository, lock: RepositoryLock, snapshots: list[tuple[UUID, UUID]], index: LocationIndex | None, findings: list[str], *, live: bytearray | None = None) -> set[ObjectId]:
+    def _check_snapshot_catalogues(
+        self, repository: Repository, lock: RepositoryLock, snapshots: list[tuple[UUID, UUID]], index: LocationIndex | None, findings: list[str], *, live: bytearray | None = None, recovery: MetadataRecovery | None = None
+    ) -> set[ObjectId]:
         roots: set[ObjectId] = set()
         for set_id, snapshot_id in snapshots:
             path = repository.snapshot_file(set_id, snapshot_id)
             try:
-                metadata = self._read_snapshot_metadata(repository, set_id, snapshot_id, lock)
+                metadata = self._read_snapshot_metadata(repository, set_id, snapshot_id, lock, recovery=recovery)
+            except MemoryBusyError:
+                raise
             except (OSError, ValueError, OverflowError) as error:
                 findings.append(self._check_file_error(repository, path, error))
                 continue
             roots.add(metadata.root_id)
             try:
-                self._check_catalogue(path, lock, metadata, index, live=live)
+                self._check_catalogue(path, lock, metadata, index, live=live, recovery=recovery)
+            except MemoryBusyError:
+                raise
             except (OSError, ValueError) as error:
                 findings.append(self._check_file_error(repository, path.with_suffix(".catalog"), error))
         return roots
@@ -604,10 +693,12 @@ class SnapshotService:
         detail = error.strerror if isinstance(error, OSError) and error.strerror else str(error)
         return f"{path.relative_to(repository.path)}: {detail}"
 
-    def _check_catalogue(self, path: Path, lock: RepositoryLock, metadata: _SnapshotMetadata, index: LocationIndex | None, *, live: bytearray | None = None) -> bytearray:
-        seen = bytearray((len(index) + 7) // 8) if index is not None else bytearray()
+    def _check_catalogue(self, path: Path, lock: RepositoryLock, metadata: _SnapshotMetadata, index: LocationIndex | None, *, live: bytearray | None = None, recovery: MetadataRecovery | None = None) -> bytearray:
+        size = (len(index) + 7) // 8 if index is not None else 0
+        reserve_workspace("catalogue bitmaps", size * 2 + 256)
+        seen = bytearray(size)
         missing = duplicates = 0
-        for object_id in self._iter_catalogue_ids(path, lock, metadata):
+        for object_id in self._iter_catalogue_ids(path, lock, metadata, recovery=recovery):
             if index is None:
                 continue
             number = index.record_number(object_id)
@@ -686,12 +777,16 @@ class SnapshotService:
         directory = self._backup_directory(repository.snapshots_root / str(backup_set_id), lock)
         self._mark_compaction_pending(self._compaction_marker(repository, lock))
         if expired:
-            self._write_registry(repository, lock, registry)
+            recovery = self._write_registry(repository, lock, registry)
+        else:
+            recovery = self._metadata_recovery(repository, lock)
+            recovery.confirm_register(repository.path / SNAPSHOT_REGISTRY_NAME)
 
         for snapshot_id in pending:
             path = directory / repository.snapshot_file(backup_set_id, snapshot_id).name
             path.unlink(missing_ok=True)
             path.with_suffix(".catalog").unlink(missing_ok=True)
+            recovery.remove_snapshot(path)
         sync_directory(directory)
         for snapshot_id in pending:
             del registry.pending_deletions[snapshot_id]
@@ -704,9 +799,16 @@ class SnapshotService:
         if path.is_symlink():
             raise InconsistentStateError("Unexpected snapshot register path")
         try:
-            registry = read_json(path, lock)
+            registry = read_json(path, lock, workspace="snapshot register")
         except FileNotFoundError as error:
             raise InconsistentStateError("Snapshot register is missing") from error
+        parsed = self._decode_registry(repository, lock, registry)
+        recovery = MetadataRecovery.open(repository.path, repository.client_id, lock)
+        if recovery is not None:
+            recovery.verify_register(registry)
+        return parsed
+
+    def _decode_registry(self, repository: Repository, lock: RepositoryLock, registry: object) -> _SnapshotRegistry:
         if not is_json_object(registry):
             raise ValueError("Invalid snapshot register")
         version = registry.get("version")
@@ -739,12 +841,52 @@ class SnapshotService:
             snapshots[snapshot_id] = set_id
         return snapshots
 
-    def _write_registry(self, repository: Repository, lock: RepositoryLock, registry: _SnapshotRegistry, *, temporary_prefix: str | None = None) -> None:
+    def _encode_registry(self, registry: _SnapshotRegistry) -> dict[str, object]:
+        reserve_workspace("register publication", (len(registry.snapshots) + len(registry.pending_deletions) + 1) * 512)
         data: dict[str, object] = {"version": SNAPSHOT_REGISTRY_VERSION}
         for key, entries in (("snapshots", registry.snapshots), ("pending_deletions", registry.pending_deletions)):
             if entries or key == "snapshots":
                 data[key] = {str(snapshot_id): str(set_id) for snapshot_id, set_id in entries.items()}
-        write_json(repository.path / SNAPSHOT_REGISTRY_NAME, lock, data, temporary_prefix=temporary_prefix)
+        return data
+
+    def _write_registry(self, repository: Repository, lock: RepositoryLock, registry: _SnapshotRegistry, *, temporary_prefix: str | None = None) -> MetadataRecovery:
+        data = self._encode_registry(registry)
+        recovery = self._metadata_recovery(repository, lock)
+        recovery.publish_register(repository.path / SNAPSHOT_REGISTRY_NAME, data, temporary_prefix=temporary_prefix)
+        return recovery
+
+    def _metadata_recovery(self, repository: Repository, lock: RepositoryLock) -> MetadataRecovery:
+        recovery = MetadataRecovery.open(repository.path, repository.client_id, lock)
+        if recovery is not None:
+            return recovery
+
+        # Establish the first generation for an intact pre-recovery repository.
+        raw = read_json(repository.path / SNAPSHOT_REGISTRY_NAME, lock, workspace="snapshot register")
+        registry = self._decode_registry(repository, lock, raw)
+        for set_id, backup_set in repository.backup_sets.items():
+            directory = self._backup_directory(repository.snapshots_root / str(set_id), lock)
+            if backup_set.deleted and not os.path.lexists(directory):
+                continue
+            for path in directory.iterdir():
+                if path.suffix not in (".json", ".catalog"):
+                    continue
+                snapshot_id = UUID(path.stem)
+                owner = registry.snapshots.get(snapshot_id) or registry.pending_deletions.get(snapshot_id)
+                if owner == set_id:
+                    continue
+                if owner is None and (directory / f"{_RUN_MARKER_PREFIX}{snapshot_id}").is_file():
+                    continue
+                raise InconsistentStateError(f"Unregistered snapshot metadata: {path.name}")
+        findings: list[str] = []
+        for key_id, snapshots in self._snapshots_by_key(repository, registry).items():
+            self._check_key_domain(repository, lock, key_id, snapshots, findings)
+        if findings:
+            raise InconsistentStateError("\n".join(findings))
+        register = self._encode_registry(registry)
+        if raw != register:
+            raise InconsistentStateError("Cannot initialize recovery for a noncanonical snapshot register")
+        paths = (repository.snapshot_file(set_id, snapshot_id) for snapshot_id, set_id in registry.snapshots.items())
+        return MetadataRecovery.initialize(repository.path, repository.client_id, lock, register, paths)
 
     def _is_protected(self, metadata: _SnapshotMetadata, now: datetime, protection_duration: timedelta) -> bool:
         return now <= max(metadata.protected_until, metadata.committed_at + protection_duration)
@@ -786,8 +928,10 @@ class SnapshotService:
             metadata["comment"] = snapshot.comment
         write_json(path, lock, metadata, temporary_prefix=temporary_prefix)
 
-    def _read_snapshot_metadata(self, repository: Repository, backup_set_id: UUID, snapshot_id: UUID, lock: RepositoryLock) -> _SnapshotMetadata:
-        metadata = read_json(repository.snapshot_file(backup_set_id, snapshot_id), lock)
+    def _read_snapshot_metadata(self, repository: Repository, backup_set_id: UUID, snapshot_id: UUID, lock: RepositoryLock, *, recovery: MetadataRecovery | None = None) -> _SnapshotMetadata:
+        path = repository.snapshot_file(backup_set_id, snapshot_id)
+        from_copy = recovery is not None
+        metadata = read_json(path, lock) if recovery is None else read_json_file(recovery.snapshot_file(path))
         if not is_json_object(metadata):
             raise ValueError("Invalid snapshot metadata")
         version = metadata.get("version")
@@ -812,12 +956,19 @@ class SnapshotService:
             raise ValueError("Snapshot timestamps must include a time zone")
         if protected_until < committed_at:
             raise ValueError("Snapshot protection deadline precedes commit time")
-        return _SnapshotMetadata(root_id, committed_at.astimezone(UTC), protected_until.astimezone(UTC), checksum, comment)
+        record = _SnapshotMetadata(root_id, committed_at.astimezone(UTC), protected_until.astimezone(UTC), checksum, comment)
+        if recovery is None:
+            recovery = MetadataRecovery.open(repository.path, repository.client_id, lock)
+        if recovery is not None:
+            recovery.verify_snapshot(path, copy=from_copy)
+        return record
 
-    def _iter_catalogue_ids(self, path: Path, lock: RepositoryLock, metadata: _SnapshotMetadata) -> Iterator[ObjectId]:
+    def _iter_catalogue_ids(self, path: Path, lock: RepositoryLock, metadata: _SnapshotMetadata, *, recovery: MetadataRecovery | None = None) -> Iterator[ObjectId]:
         checksum = sha256()
         root_found = False
-        with lock.require_held_for(path.with_suffix(".catalog")).open("rb") as source:
+        path = path.with_suffix(".catalog")
+        source_path = lock.require_held_for(path) if recovery is None else recovery.snapshot_file(path)
+        with source_path.open("rb") as source:
             while object_id := source.read(OBJECT_ID_SIZE):
                 if len(object_id) != OBJECT_ID_SIZE:
                     raise ValueError("Invalid snapshot object catalogue: truncated object ID")
@@ -834,6 +985,7 @@ class SnapshotService:
         for object_id in self._iter_catalogue_ids(path, lock, metadata):
             if object_id in object_ids:
                 raise ValueError("Invalid snapshot object catalogue: duplicate object ID")
+            self._reserve_catalogue_entry(len(object_ids))
             object_ids.add(object_id)
         return ObjectCatalogue(frozenset(object_ids))
 
@@ -877,6 +1029,7 @@ class SnapshotService:
                     if is_root:
                         raise ValueError("Snapshot root ID matches an earlier object in the backup")
                     continue
+                self._reserve_catalogue_entry(len(object_ids))
                 object_ids.add(obj.object_id)
                 location = index.get(obj.object_id)
                 if location is None:
@@ -896,6 +1049,11 @@ class SnapshotService:
         if root_id is None:
             raise ValueError("Backup input ended before the final snapshot root")
         return root_id, ObjectCatalogue(frozenset(object_ids))
+
+    def _reserve_catalogue_entry(self, count: int) -> None:
+        if count % 256 == 0:
+            # Include bytes objects, set growth and the immutable copy at publication.
+            reserve_workspace("snapshot catalogue", (count + 256) * 512)
 
     def _write_packs(
         self,

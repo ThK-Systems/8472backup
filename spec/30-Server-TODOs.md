@@ -4,11 +4,11 @@ See the [project specification](10-8472backup-Spec.md) and the [client backlog](
 
 ## 1. Server configuration and integration
 
-Load server settings from TOML and pass them to the façade and scheduler. Add the systemd unit with journal integration and deployment version stamping with the full Git commit ID.
+Load server settings from TOML, including the state directory and memory budget, and pass settings to the façade and scheduler. Add the systemd unit with journal integration and deployment version stamping with the full Git commit ID.
 
 ## 2. Scheduling and resource limits
 
-Connect pull job discovery and execution to the scheduler, including mode changes, retired sets, and retries. Add the shared memory budget to operation admission. Translate capacity exhaustion into a push wait response in the client protocol. See the [configuration roadmap](70-ConfigurationRoadmap.md).
+Connect pull job discovery and execution to the scheduler, including mode changes, retired sets, and retries. Translate capacity exhaustion into a push wait response in the client protocol. See the [configuration roadmap](70-ConfigurationRoadmap.md).
 
 ## 3. Client transport
 

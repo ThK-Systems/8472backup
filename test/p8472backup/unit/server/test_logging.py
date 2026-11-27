@@ -10,8 +10,8 @@ import pytest
 from p8472backup.archive.objects import OBJECT_ID_SIZE, TYPE_SNAPSHOT, Object
 from p8472backup.common.log import Log
 from p8472backup.server import main, trusted_time
+from p8472backup.server.lock import RepositoryLock
 from p8472backup.server.server_facade import ServerFacade
-from p8472backup.storage.file.lock import RepositoryLock
 
 
 _CLIENT_ID = UUID(int=1)

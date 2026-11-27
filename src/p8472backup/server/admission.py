@@ -6,6 +6,7 @@ from threading import Lock
 from typing import Literal
 
 from p8472backup.common.error import ServerBusyError
+from p8472backup.server.memory import operation_memory
 
 
 type OperationKind = Literal["repository", "backup", "maintenance"]
@@ -44,7 +45,8 @@ def reserve_operation(kind: OperationKind = "repository") -> Generator[None, Non
         _active_operations += 1
         _active_backups += backup_slots
     try:
-        yield
+        with operation_memory():
+            yield
     finally:
         with _counter_lock:
             _active_operations -= 1

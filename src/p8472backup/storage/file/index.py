@@ -10,10 +10,12 @@ from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+from types import TracebackType
 from typing import Self
 
 from p8472backup.archive.objects import HEADER_SIZE as OBJECT_HEADER_SIZE, OBJECT_ID_SIZE, Object, ObjectId
-from p8472backup.storage.file.lock import RepositoryLock
+from p8472backup.server.lock import RepositoryLock
+from p8472backup.server.memory import MemoryReservation, reserve_workspace
 from p8472backup.storage.file.packs import Pack
 
 
@@ -25,6 +27,8 @@ _CHECKPOINT_HEADER = struct.Struct("<8sHQ")
 _CHECKPOINT_MAGIC = b"8472IDX\x00"
 _CHECKPOINT_VERSION = 1
 _CHECKSUM_SIZE = sha256().digest_size
+_INDEX_OVERHEAD = 1024
+_BUCKET_SIZE = 4
 
 
 @dataclass(frozen=True)
@@ -43,12 +47,30 @@ class LocationIndex:
     """
 
     def __init__(self) -> None:
+        self._memory = MemoryReservation()
+        self._memory.resize(_INITIAL_BUCKET_COUNT * _BUCKET_SIZE + _INDEX_OVERHEAD)
         self._buckets: array[int] = array("I", [0]) * _INITIAL_BUCKET_COUNT
-        if self._buckets.itemsize != 4:
+        if self._buckets.itemsize != _BUCKET_SIZE:
             raise RuntimeError("Location index requires 32-bit unsigned array elements")
         self._records = bytearray()
         self._count = 0
         self._dirty = True
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, exc_type: type[BaseException] | None, exc_value: BaseException | None, traceback: TracebackType | None) -> None:
+        self.close()
+
+    def close(self) -> None:
+        """Free the index buffers and return their working memory reservation."""
+        self._buckets = array("I")
+        self._records = bytearray()
+        self._count = 0
+        self._memory.close()
+
+    def _allocated_bytes(self) -> int:
+        return self._records.__alloc__() + len(self._buckets) * _BUCKET_SIZE + _INDEX_OVERHEAD
 
     def __len__(self) -> int:
         """Return the number of indexed objects."""
@@ -73,15 +95,19 @@ class LocationIndex:
 
     def _rebuild_buckets(self, capacity: int) -> None:
         """Rebuild the bucket table without moving the packed records."""
-        buckets: array[int] = array("I", [0]) * capacity
-        for record_index in range(self._count):
-            offset = record_index * _RECORD_SIZE
-            object_id = bytes(self._records[offset : offset + OBJECT_ID_SIZE])
-            bucket = self._find_bucket(object_id, buckets)
-            if buckets[bucket]:
-                raise ValueError("Duplicate object ID in location index")
-            buckets[bucket] = record_index + 1
-        self._buckets = buckets
+        self._memory.resize(self._allocated_bytes() + capacity * _BUCKET_SIZE)
+        try:
+            buckets: array[int] = array("I", [0]) * capacity
+            for record_index in range(self._count):
+                offset = record_index * _RECORD_SIZE
+                object_id = bytes(self._records[offset : offset + OBJECT_ID_SIZE])
+                bucket = self._find_bucket(object_id, buckets)
+                if buckets[bucket]:
+                    raise ValueError("Duplicate object ID in location index")
+                buckets[bucket] = record_index + 1
+            self._buckets = buckets
+        finally:
+            self._memory.resize(self._allocated_bytes())
 
     def get(self, object_id: ObjectId) -> ObjectLocation | None:
         """Return the location for an object ID, or None if it is absent.
@@ -115,6 +141,8 @@ class LocationIndex:
         for offset in range(OBJECT_ID_SIZE, len(self._records), _RECORD_SIZE):
             pack_id: int
             pack_id, _, _ = _LOCATION_FIELDS.unpack_from(self._records, offset)
+            if pack_id not in counts and len(counts) % 256 == 0:
+                reserve_workspace("index pack counts", (len(counts) + 256) * 256)
             counts[pack_id] = counts.get(pack_id, 0) + 1
         return counts
 
@@ -154,7 +182,16 @@ class LocationIndex:
             # Recalculate the new ID's bucket using the new capacity.
             bucket = self._find_bucket(object_id, self._buckets)
         # Append the ID and location as a 56-byte record.
-        self._records.extend(object_id + fields)
+        new_size = len(self._records) + _RECORD_SIZE
+        if new_size >= self._records.__alloc__():
+            # Allow for bytearray over-allocation and both buffers during reallocation.
+            self._memory.resize(self._allocated_bytes() + new_size + new_size // 4 + 32)
+            try:
+                self._records.extend(object_id + fields)
+            finally:
+                self._memory.resize(self._allocated_bytes())
+        else:
+            self._records.extend(object_id + fields)
         # Publish the new record's one-based position in its bucket.
         self._buckets[bucket] = position
         # Record that the index contains one more entry.
@@ -177,9 +214,14 @@ class LocationIndex:
     def discard_packs(self, pack_ids: set[int]) -> None:
         """Remove entries still pointing at superseded packs in place."""
         next_offset = 0
+        reserved_rebuild = False
         for offset in range(0, len(self._records), _RECORD_SIZE):
             pack_id, _, _ = _LOCATION_FIELDS.unpack_from(self._records, offset + OBJECT_ID_SIZE)
             if pack_id in pack_ids:
+                if not reserved_rebuild:
+                    # Reserve both phases before moving the first retained record.
+                    self._memory.resize(self._allocated_bytes() + max(len(self._records) + 1, len(self._buckets) * _BUCKET_SIZE))
+                    reserved_rebuild = True
                 continue
             if next_offset != offset:
                 self._records[next_offset : next_offset + _RECORD_SIZE] = self._records[offset : offset + _RECORD_SIZE]
@@ -245,22 +287,25 @@ class LocationIndex:
             record_bytes = count * _RECORD_SIZE
             if os.fstat(source.fileno()).st_size != len(header) + record_bytes + _CHECKSUM_SIZE:
                 raise ValueError("Location index size does not match its entry count")
-            records = bytearray(record_bytes)
-            if source.readinto(records) != record_bytes:
-                raise ValueError("Truncated location index records")
-            checksum = sha256(header)
-            checksum.update(records)
-            if source.read(_CHECKSUM_SIZE) != checksum.digest():
-                raise ValueError("Location index checksum mismatch")
-
-        index = cls()
-        index._records = records
-        index._count = count
-        required_buckets = max(_INITIAL_BUCKET_COUNT, 2 * count)
-        capacity = 1 << (required_buckets - 1).bit_length()
-        index._rebuild_buckets(capacity)
-        index._dirty = False
-        return index
+            required_buckets = max(_INITIAL_BUCKET_COUNT, 2 * count)
+            capacity = 1 << (required_buckets - 1).bit_length()
+            index = cls()
+            try:
+                index._memory.resize(index._allocated_bytes() + record_bytes + 1 + capacity * _BUCKET_SIZE)
+                index._records = bytearray(record_bytes)
+                if source.readinto(index._records) != record_bytes:
+                    raise ValueError("Truncated location index records")
+                checksum = sha256(header)
+                checksum.update(index._records)
+                if source.read(_CHECKSUM_SIZE) != checksum.digest():
+                    raise ValueError("Location index checksum mismatch")
+                index._count = count
+                index._rebuild_buckets(capacity)
+            except BaseException:
+                index.close()
+                raise
+            index._dirty = False
+            return index
 
     @classmethod
     def rebuild_from_packs(cls, packs: Mapping[int, Path], lock: RepositoryLock) -> Self:
@@ -271,11 +316,15 @@ class LocationIndex:
         """
         lock.require_held()
         index = cls()
-        for pack_id in sorted(packs):
-            path = lock.require_held_for(packs[pack_id])
-            try:
-                for offset, obj in Pack.iter_object_headers(path):
-                    index.put(obj.object_id, ObjectLocation(pack_id, offset, OBJECT_HEADER_SIZE + obj.length))
-            except (ValueError, OverflowError) as error:
-                raise ValueError(f"{path.name}: {error}") from error
+        try:
+            for pack_id in sorted(packs):
+                path = lock.require_held_for(packs[pack_id])
+                try:
+                    for offset, obj in Pack.iter_object_headers(path):
+                        index.put(obj.object_id, ObjectLocation(pack_id, offset, OBJECT_HEADER_SIZE + obj.length))
+                except (ValueError, OverflowError) as error:
+                    raise ValueError(f"{path.name}: {error}") from error
+        except BaseException:
+            index.close()
+            raise
         return index
