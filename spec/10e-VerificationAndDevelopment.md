@@ -87,6 +87,7 @@ Include candidate ciphers, keyed hashes, chunkers, object overhead, and pack beh
 - Work in small coherent increments Thomas can review completely.
 - Explain consequential format, protocol, cryptographic, and durability decisions before implementing them. Resolve routine reversible choices without repeated permission requests.
 - Keep comments, identifiers, tests, and project documentation in English.
+- Use `p8472backup.common.log.Log` for operational logging. Use `INFO` for significant events, `WARNING` when service can continue after a problem, and `ERROR` for fatal failures. Add `DEBUG` for a concrete diagnostic need. Log each incident once at the point that determines its outcome. Keep logs free of credentials, source paths, and file contents.
 - Keep modules explicit and comprehensible. Avoid speculative frameworks, clever metaprogramming, or hidden generated logic.
 - Record accepted decisions and recovery procedures in Git; chat history must not be essential project documentation.
 - Use established libraries through Python modules under the Debian Trixie dependency policy in chapter 3. Check the packaged version, native implementation, license compatibility, platform availability, maintenance, and data-copy overhead before selecting them.

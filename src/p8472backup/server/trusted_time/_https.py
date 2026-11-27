@@ -1,7 +1,6 @@
 """Collect HTTPS Date samples in a child process with a shared deadline."""
 
 import asyncio
-import logging
 import re
 import ssl
 import sys
@@ -30,7 +29,7 @@ async def collect(sources: tuple[str, ...], timeout: float) -> list[Sample]:
     started = monotonic()
     deadline = started + timeout
     command = (sys.executable, "-I", str(_WORKER), str(deadline), *sources)
-    worker = await asyncio.create_subprocess_exec(*command, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE)
+    worker = await asyncio.create_subprocess_exec(*command, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
     reply = asyncio.create_task(worker.communicate())
     try:
         completed, _ = await asyncio.wait((reply,), timeout=max(0.0, deadline - monotonic()))
@@ -89,14 +88,14 @@ def _query(source: str, deadline: float, context: ssl.SSLContext) -> Sample:
 def _run_worker(deadline: float, sources: list[str]) -> None:
     context = ssl.create_default_context()
     with ThreadPoolExecutor(max_workers=len(sources)) as pool:
-        queries = {pool.submit(_query, source, deadline, context): source for source in sources}
+        queries = [pool.submit(_query, source, deadline, context) for source in sources]
         for query in as_completed(queries):
             try:
                 date, sent, received = query.result()
-            except (HTTPException, OSError, ValueError) as error:
-                logging.warning("Trusted time source %s failed: %s", urlsplit(queries[query]).hostname, error)
-            else:
-                print(date, sent, received, flush=True)
+            except (HTTPException, OSError, ValueError):
+                # The parent reports unusable samples when it evaluates the round.
+                continue
+            print(date, sent, received, flush=True)
 
 
 if __name__ == "__main__":

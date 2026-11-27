@@ -11,6 +11,7 @@ from statistics import median
 from threading import Lock
 from urllib.parse import urlsplit
 
+from p8472backup.common.log import Log
 from p8472backup.server.trusted_time import _https
 
 
@@ -77,7 +78,7 @@ class TrustedTime:
                 self._require_open()
             samples = await _https.collect(self._sources, _SYNC_TIMEOUT)
             anchor = max((received for _, _, received in samples), default=0.0)
-            estimate, lower, upper = _select_reference(samples, anchor, self._quorum)
+            estimate, lower, upper, agreeing = _select_reference(samples, anchor, self._quorum)
 
             with self._lock:
                 self._require_open()
@@ -94,6 +95,10 @@ class TrustedTime:
             with self._lock:
                 reason = str(error) if isinstance(error, TrustedTimeError) else f"Trusted time synchronization failed: {error}"
                 raise self._invalidate(reason) from error
+        if agreeing < len(self._sources):
+            Log.warning("Trusted time synchronized with %d of %d sources agreeing", agreeing, len(self._sources))
+        else:
+            Log.info("Trusted time synchronized sources=%d", agreeing)
 
     async def run(self) -> None:
         """Refresh an initialized clock until failure or task cancellation."""
@@ -177,7 +182,7 @@ def _source_host(source: str) -> str:
         return host
 
 
-def _select_reference(samples: Sequence[_https.Sample], anchor: float, quorum: int) -> tuple[float, float, float]:
+def _select_reference(samples: Sequence[_https.Sample], anchor: float, quorum: int) -> tuple[float, float, float, int]:
     # Project each Date from the middle of its request interval onto the same clock instant.
     estimates: list[tuple[float, float]] = []
     for date, sent, received in samples:
@@ -207,4 +212,4 @@ def _select_reference(samples: Sequence[_https.Sample], anchor: float, quorum: i
     estimate = median(value for value, _ in group)
     lower = min(value - error for value, error in group)
     upper = max(value + error for value, error in group)
-    return estimate, lower, upper
+    return estimate, lower, upper, len(group)

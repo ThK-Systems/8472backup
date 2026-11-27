@@ -10,6 +10,7 @@ from typing import NoReturn
 from uuid import UUID
 
 from p8472backup.common.error import InconsistentStateError
+from p8472backup.common.log import Log
 from p8472backup.server.repository import BackupMode, BackupSet, Repository
 from p8472backup.server.snapshot_service import SNAPSHOT_REGISTRY_NAME, SNAPSHOT_REGISTRY_VERSION, SnapshotService
 from p8472backup.storage.file.index import LocationIndex
@@ -32,16 +33,24 @@ class RepositoryAdminService:
             return replace(repository, snapshots=SnapshotService().list_snapshots(repository, lock))
 
     @contextmanager
-    def locked_repository(self, storage_root: Path, client_id: UUID) -> Generator[tuple[Repository, RepositoryLock], None, None]:
+    def locked_repository(self, storage_root: Path, client_id: UUID, *, operation: str | None = None, backup_set_id: UUID | None = None) -> Generator[tuple[Repository, RepositoryLock], None, None]:
         """Load verified metadata and hold the lock through one repository operation."""
         path = storage_root / str(client_id)
         try:
-            lock = RepositoryLock(path)
-        except FileNotFoundError as error:
-            raise FileNotFoundError(f"Backup repository not found for client {client_id}") from error
-        with lock:
-            repository = self._read_metadata(path, lock, client_id=client_id)
-            yield repository, lock
+            try:
+                lock = RepositoryLock(path)
+            except FileNotFoundError as error:
+                raise FileNotFoundError(f"Backup repository not found for client {client_id}") from error
+            with lock:
+                repository = self._read_metadata(path, lock, client_id=client_id)
+                yield repository, lock
+        except (OSError, ValueError, InconsistentStateError) as error:
+            if operation is not None:
+                scope = f"client_id={client_id}"
+                if backup_set_id is not None:
+                    scope += f" backup_set_id={backup_set_id}"
+                Log.warning("Operation %s failed %s reason=%s", operation, scope, type(error).__name__)
+            raise
 
     def init_repository(self, path: Path, client_id: UUID, backup_sets: Iterable[tuple[object, object]], *, mode: BackupMode = "pull", backup_set_names: Mapping[UUID, str] | None = None) -> Repository:
         """Create the repository and register all its initial backup sets."""
@@ -79,6 +88,7 @@ class RepositoryAdminService:
 
             write_json(repository.path / SNAPSHOT_REGISTRY_NAME, lock, {"version": SNAPSHOT_REGISTRY_VERSION, "snapshots": {}})
             self._write_metadata(repository, lock)
+        Log.info("Repository initialized client_id=%s mode=%s backup_sets=%d", client_id, mode, len(sets))
         return repository
 
     def add_backup_set(self, repository: Repository, backup_set_id: object, key_id: object, lock: RepositoryLock, *, name: str | None = None) -> None:
@@ -107,6 +117,7 @@ class RepositoryAdminService:
 
         self._create_backup_set_storage(repository, (new_set,), lock, existing_key_ids=existing_key_ids)
         self._write_metadata(replace(repository, backup_sets={**repository.backup_sets, backup_set_id: new_set}), lock)
+        Log.info("Backup set registered client_id=%s backup_set_id=%s", repository.client_id, backup_set_id)
 
     def save_prune_rule(self, repository: Repository, backup_set: BackupSet, lock: RepositoryLock, prune_rule: str, *, temporary_prefix: str | None = None) -> None:
         """Durably save the rule validated at backup admission."""
@@ -140,6 +151,7 @@ class RepositoryAdminService:
             backup_set = replace(backup_set, deleted=True)
             repository = replace(repository, backup_sets={**repository.backup_sets, backup_set_id: backup_set})
             self._write_metadata(repository, lock)
+            Log.info("Backup set retired client_id=%s backup_set_id=%s", repository.client_id, backup_set_id)
 
         SnapshotService().remove_unprotected_snapshots(repository, backup_set, lock, protection_duration=protection_duration)
 
@@ -152,6 +164,7 @@ class RepositoryAdminService:
             backup_sets = {set_id: replace(backup_set, deleted=True) for set_id, backup_set in repository.backup_sets.items()}
             repository = replace(repository, backup_sets=backup_sets, deleted=True)
             self._write_metadata(repository, lock)
+            Log.info("Repository retired client_id=%s", repository.client_id)
 
         snapshots = SnapshotService()
         for backup_set in repository.backup_sets.values():
@@ -188,6 +201,7 @@ class RepositoryAdminService:
             sync_directory(metadata_path.parent)
         else:
             self._write_metadata(replace(repository, mode=mode), lock)
+            Log.info("Backup mode changed client_id=%s mode=%s", repository.client_id, mode)
 
     def _read_metadata(self, path: Path, lock: RepositoryLock, *, client_id: UUID) -> Repository:
         """Load the verified repository metadata under its lock."""

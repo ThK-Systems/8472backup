@@ -2,6 +2,7 @@
 # pyright: reportPrivateUsage=false
 
 import asyncio
+import logging
 import re
 import signal
 import ssl
@@ -18,6 +19,7 @@ from urllib.request import HTTPSHandler, Request
 
 import pytest
 
+from p8472backup.common.log import Log
 from p8472backup.server import main, trusted_time
 from p8472backup.server.trusted_time import TrustedTime, TrustedTimeError, _https, clock as clock_module
 
@@ -30,7 +32,7 @@ _SOURCES = ("https://one.example/", "https://two.example/", "https://three.examp
 
 def test_quorum_normalizes_to_one_instant_and_selects_the_largest_group() -> None:
     samples = [(_EPOCH - 12, 7, 9), (_EPOCH - 5, 13, 15), (_EPOCH - 2, 16, 16), (_EPOCH + 2, 19, 19), (_EPOCH + 5, 20, 20)]
-    assert clock_module._select_reference(samples, 20, 3) == (_EPOCH + 1.5, _EPOCH - 2.013, _EPOCH + 4.001)
+    assert clock_module._select_reference(samples, 20, 3) == (_EPOCH + 1.5, _EPOCH - 2.013, _EPOCH + 4.001, 4)
 
 
 def test_quorum_rejects_tied_overlapping_groups() -> None:
@@ -48,6 +50,22 @@ def test_startup_requires_a_majority_of_configured_sources(monkeypatch: pytest.M
         asyncio.run(clock.synchronize())
     with pytest.raises(TrustedTimeError, match="2 agreeing, 3 required"):
         clock.now()
+
+
+@pytest.mark.parametrize("samples", (3, 4))
+def test_successful_time_round_reports_degraded_quorum_once(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, samples: int) -> None:
+    readings = [(_EPOCH, 10, 10)] * samples
+    if samples == 4:
+        readings[-1] = (_EPOCH + 20, 10, 10)
+    monkeypatch.setattr(_https, "collect", AsyncMock(return_value=readings))
+    monkeypatch.setattr(_https, "monotonic", lambda: 10.0)
+    clock = TrustedTime(_SOURCES)
+
+    with caplog.at_level(logging.INFO, logger="p8472backup"):
+        asyncio.run(clock.synchronize())
+
+    assert clock.now() == _UTC
+    assert caplog.record_tuples == [("p8472backup", logging.WARNING, "Trusted time synchronized with 3 of 4 sources agreeing")]
 
 
 @pytest.mark.parametrize("sources", [(_SOURCES[0], "https://ONE.example.:8443/other"), ("https://127.0.0.1/", "https://[::ffff:127.0.0.1]/")])
@@ -291,8 +309,8 @@ def test_cancelling_collection_terminates_the_worker(tmp_path: Path, monkeypatch
     async def cancel_collection() -> None:
         started: asyncio.Future[asyncio.subprocess.Process] = asyncio.get_running_loop().create_future()
 
-        async def spawn_worker(*command: str, stdin: int, stdout: int) -> asyncio.subprocess.Process:
-            process = await spawn(*command, stdin=stdin, stdout=stdout)
+        async def spawn_worker(*command: str, stdin: int, stdout: int, stderr: int) -> asyncio.subprocess.Process:
+            process = await spawn(*command, stdin=stdin, stdout=stdout, stderr=stderr)
             started.set_result(process)
             return process
 
@@ -307,20 +325,24 @@ def test_cancelling_collection_terminates_the_worker(tmp_path: Path, monkeypatch
     asyncio.run(cancel_collection())
 
 
-def test_daemon_exits_on_startup_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_server_logs_startup_failure_once_and_exits(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
     collect = AsyncMock(return_value=[])
     monkeypatch.setattr(_https, "collect", collect)
     refresh = AsyncMock()
     monkeypatch.setattr(TrustedTime, "run", refresh)
+    monkeypatch.setattr(Log, "configure", lambda: None)
     for _ in range(2):
-        with pytest.raises(SystemExit, match="No trusted time quorum"):
+        caplog.clear()
+        with pytest.raises(SystemExit) as failure:
             main.main()
+        assert failure.value.code == 1
+        assert caplog.record_tuples == [("p8472backup", logging.ERROR, "Server stopped: No trusted time quorum (0 agreeing, 4 required)")]
         assert not hasattr(trusted_time, "server_clock")
     assert collect.await_count == 2
     refresh.assert_not_called()
 
 
-def test_daemon_starts_refresh_task_after_synchronization(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_server_starts_refresh_task_after_synchronization(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
     clock = Mock(spec=TrustedTime)
 
     async def run() -> None:
@@ -332,8 +354,14 @@ def test_daemon_starts_refresh_task_after_synchronization(monkeypatch: pytest.Mo
 
     clock.run.side_effect = run
     monkeypatch.setattr(main, "TrustedTime", lambda: clock)
-    with pytest.raises(SystemExit, match="Trusted time refresh failed"):
+    monkeypatch.setattr(Log, "configure", lambda: None)
+    with caplog.at_level(logging.INFO, logger="p8472backup"), pytest.raises(SystemExit) as failure:
         main.main()
+    assert failure.value.code == 1
+    assert caplog.record_tuples == [
+        ("p8472backup", logging.INFO, f"Server started version={main.VERSION}"),
+        ("p8472backup", logging.ERROR, "Server stopped: Trusted time refresh failed"),
+    ]
     clock.run.assert_awaited_once_with()
     clock.close.assert_called_once_with()
     assert not hasattr(trusted_time, "server_clock")

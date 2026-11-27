@@ -81,4 +81,6 @@ Plan the switch to a post-quantum SSH authentication key once the supported Open
 
 ## 17. Logging
 
-Add logs suitable for systemd and journald. Record backup admission, commit and failure, and the results of retention and cleanup. Include client, backup-set, run, and snapshot IDs where available. Keep logs free of credentials, source paths, and file contents. Keep diagnostics separate from protocol traffic.
+The shared `Log` class reads `P8472BACKUP_ENV` at server startup. Set it to `dev` to write `INFO` to stdout and `WARNING` and `ERROR` to stderr with readable level names. In `intg` and `prod`, the class writes to stderr with syslog severity prefixes. The default is `prod`. Configure the systemd unit to collect stderr in the journal and interpret the prefixes.
+
+Backup admission, commit, and failures include the client and set IDs and a snapshot ID once assigned. The server logs repository changes, snapshot removal, cleanup, check results, scheduled dispatches, and trusted time outcomes. Apply the project logging rules to the transport when it is connected and reserve its stdout for protocol frames.

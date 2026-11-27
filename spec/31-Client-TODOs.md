@@ -66,4 +66,4 @@ Choose an optional padding strategy for data, metadata, and snapshot root conten
 
 ## 15. Logging
 
-Report backup, restore, and mount failures with enough context for diagnosis. Include the backup set and run or snapshot ID where available. Report push waits and retries. Send diagnostics to stderr and reserve stdout for protocol messages during SSH sessions. Keep credentials and file contents out of logs.
+Use the shared `Log` class for operational logging. Report backup, restore, and mount failures with enough context for diagnosis. Include the backup set and run or snapshot ID where available. Report push waits and retries. Send diagnostics to stderr and reserve stdout for protocol messages during SSH sessions. Keep credentials and file contents out of logs.

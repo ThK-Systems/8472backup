@@ -15,6 +15,7 @@ from uuid import UUID, uuid4
 
 from p8472backup.archive.objects import HEADER_SIZE as OBJECT_HEADER_SIZE, OBJECT_ID_SIZE, TYPE_SNAPSHOT, Object, ObjectId
 from p8472backup.common.error import InconsistentStateError
+from p8472backup.common.log import Log
 from p8472backup.server import trusted_time
 from p8472backup.server.repository import BackupSet, Repository
 from p8472backup.server.retention.policy import parse_prune_rule, retained_snapshots
@@ -74,6 +75,7 @@ class SnapshotService:
         with marker.open("xb") as output:
             os.fsync(output.fileno())
         sync_directory(directory)
+        Log.info("Backup started client_id=%s backup_set_id=%s snapshot_id=%s", repository.client_id, backup_set.backup_set_id, snapshot_id)
 
         try:
             yield snapshot_id
@@ -83,6 +85,7 @@ class SnapshotService:
                     self.cleanup(repository, backup_set, lock)
                 except Exception as cleanup_error:
                     error.add_note(f"Automatic cleanup failed: {cleanup_error}")
+                    Log.warning("Automatic cleanup failed client_id=%s backup_set_id=%s snapshot_id=%s reason=%s", repository.client_id, backup_set.backup_set_id, snapshot_id, type(cleanup_error).__name__)
             raise
         else:
             try:
@@ -146,6 +149,7 @@ class SnapshotService:
         for marker in markers.values():
             marker.unlink()
         sync_directory(directory)
+        Log.info("Backup cleanup completed client_id=%s backup_set_id=%s runs_removed=%d", repository.client_id, set_id, len(markers))
         return len(markers)
 
     def _backup_directory(self, path: Path, lock: RepositoryLock) -> Path:
@@ -218,6 +222,7 @@ class SnapshotService:
         self._save_snapshot(snapshot, repository, path, lock, temporary_prefix=temporary_prefix)
         registry.snapshots[snapshot_id] = backup_set_id
         self._write_registry(repository, lock, registry, temporary_prefix=temporary_prefix)
+        Log.info("Backup committed client_id=%s backup_set_id=%s snapshot_id=%s", repository.client_id, backup_set_id, snapshot_id)
         return snapshot
 
     def get_snapshot(self, repository: Repository, backup_set_id: UUID, snapshot_id: UUID) -> Snapshot:
@@ -268,6 +273,7 @@ class SnapshotService:
             self._check_key_domain(repository, lock, key_id, snapshots, findings)
         if findings:
             raise InconsistentStateError("\n".join(findings))
+        Log.info("Repository check completed client_id=%s snapshots_checked=%d", repository.client_id, len(registry.snapshots))
 
     def _check_key_domain(self, repository: Repository, lock: RepositoryLock, key_id: UUID, snapshots: list[tuple[UUID, UUID]], findings: list[str]) -> None:
         index_path = repository.index_directory / str(key_id)
@@ -396,6 +402,7 @@ class SnapshotService:
         for snapshot_id in pending:
             del registry.pending_deletions[snapshot_id]
         self._write_registry(repository, lock, registry)
+        Log.info("Snapshot removal completed client_id=%s backup_set_id=%s snapshots_removed=%d", repository.client_id, backup_set_id, len(pending))
         return pending
 
     def _read_registry(self, repository: Repository, lock: RepositoryLock) -> _SnapshotRegistry:

@@ -6,6 +6,7 @@ from datetime import UTC, date, datetime, time
 from typing import Literal
 from uuid import UUID
 
+from p8472backup.common.log import Log
 from p8472backup.server import trusted_time
 
 
@@ -39,6 +40,7 @@ class Scheduler:
             pull_is_due = (last_pull is None or today > last_pull) and now >= pull_start
             if pull_is_due:
                 last_pull = today
+                Log.info("Dispatching daily pull batch")
                 await self._run_pull_batch()
                 if self._compact_start == 0:
                     await asyncio.sleep(DEFAULT_COMPACT_PAUSE_SECONDS)
@@ -53,6 +55,7 @@ class Scheduler:
             compact_is_due = compact_due is not None and (last_compact is None or compact_due > last_compact)
             if compact_is_due and self._active_push_jobs == 0:
                 last_compact = compact_due
+                Log.info("Dispatching scheduled compaction")
                 await self._compact()
 
             await asyncio.sleep(_CHECK_INTERVAL_SECONDS)
@@ -60,6 +63,7 @@ class Scheduler:
     async def try_start_push(self) -> bool:
         """Reserve a push slot if available, without waiting for one."""
         if self._backup_slots.locked():
+            Log.warning("Push deferred because all backup slots are in use")
             return False
         trusted_time.server_clock.now()
         await self._backup_slots.acquire()
