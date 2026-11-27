@@ -161,7 +161,7 @@ class LocationIndex:
         # Mark the inserted entry as requiring persistence.
         self._dirty = True
 
-    def save_to(self, path: Path, lock: RepositoryLock) -> bool:
+    def save_to(self, path: Path, lock: RepositoryLock, *, temporary_prefix: str = ".location-index-") -> bool:
         """Save pending changes and return True, or return False if unchanged and unsaved.
 
         A new index requires an initial save, including when it is empty.
@@ -178,7 +178,7 @@ class LocationIndex:
 
         directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
         try:
-            output = NamedTemporaryFile(dir=path.parent, prefix=".location-index-", delete=False)
+            output = NamedTemporaryFile(dir=path.parent, prefix=temporary_prefix, delete=False)
             temporary_path = Path(output.name)
             try:
                 with output:

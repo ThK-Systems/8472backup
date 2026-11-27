@@ -57,7 +57,7 @@ Keep the existing exclusive repository lock and enforce one active backup run pe
 
 ## 12. Interrupted runs and recovery
 
-Add the `cleanup` façade operation for the regular client CLI and support the per-set `auto-cleanup` setting, which defaults to `false`. Apply the same repository-locked cleanup rules to explicit requests and, when automatic cleanup is enabled, to aborted runs and provisional files found on the next backup. Report lock contention immediately. Finalized packs can contain orphaned objects. Determine reclaimability from published snapshots and active operations. Implement `LocationIndex.rebuild_from_packs()`, which is currently a stub. A durably committed snapshot remains valid if its acknowledgement is lost.
+Connect the local `cleanup()` façade method to the regular client CLI and forward each set's `auto-cleanup` option to `backup()`. The local service applies the repository-locked cleanup rules in chapter 11.3. Define recovery and acknowledgement on the transport. Determine reclaimability of orphaned objects in finalized packs from published snapshots and active operations. Implement `LocationIndex.rebuild_from_packs()`, which is currently a stub.
 
 ## 13. Prune and compact
 

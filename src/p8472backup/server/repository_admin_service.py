@@ -110,12 +110,12 @@ class RepositoryAdminService:
         self._create_backup_set_storage(repository, (new_set,), lock, existing_key_ids=existing_key_ids)
         self._write_metadata(replace(repository, backup_sets={**repository.backup_sets, backup_set_id: new_set}), lock)
 
-    def save_prune_rule(self, repository: Repository, backup_set: BackupSet, lock: RepositoryLock, prune_rule: str) -> None:
+    def save_prune_rule(self, repository: Repository, backup_set: BackupSet, lock: RepositoryLock, prune_rule: str, *, temporary_prefix: str | None = None) -> None:
         """Validate and durably save the rule accepted with a backup."""
         parse_prune_rule(prune_rule)
         path = lock.require_held_for(repository.backup_set_file(backup_set.backup_set_id))
         path.parent.mkdir(mode=0o700, exist_ok=True)
-        write_json(path, lock, {"prune": prune_rule})
+        write_json(path, lock, {"prune": prune_rule}, temporary_prefix=temporary_prefix)
         sync_directory(repository.path)
 
     def read_prune_rule(self, repository: Repository, backup_set: BackupSet, lock: RepositoryLock) -> str:

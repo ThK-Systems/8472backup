@@ -147,7 +147,7 @@ def test_creating_snapshot_requires_declared_root_first(repository: Repository, 
 
 
 def test_failed_index_save_does_not_publish_snapshot(repository: Repository, snapshot_service: SnapshotService, monkeypatch: pytest.MonkeyPatch) -> None:
-    def fail_save(index: LocationIndex, path: Path, lock: RepositoryLock) -> bool:
+    def fail_save(index: LocationIndex, path: Path, lock: RepositoryLock, *, temporary_prefix: str) -> bool:
         lock.require_held_for(path)
         raise OSError("index sync failed")
 

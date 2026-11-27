@@ -22,9 +22,9 @@ def sync_directory(directory: Path) -> None:
         os.close(fd)
 
 
-def write_json(path: Path, lock: RepositoryLock, data: dict[str, object]) -> None:
+def write_json(path: Path, lock: RepositoryLock, data: dict[str, object], *, temporary_prefix: str | None = None) -> None:
     path = lock.require_held_for(path)
-    with NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, prefix=f".{path.stem}-", delete_on_close=False) as output:
+    with NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, prefix=temporary_prefix or f".{path.stem}-", delete_on_close=False) as output:
         json.dump(data, output, indent=2)
         output.write("\n")
         output.flush()

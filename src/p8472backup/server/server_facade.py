@@ -10,9 +10,10 @@ from p8472backup.archive.objects import Object, ObjectId
 from p8472backup.common.error import InconsistentStateError
 from p8472backup.server.repository import BackupMode, Repository
 from p8472backup.server.repository_admin_service import RepositoryAdminService
+from p8472backup.server.retention.policy import parse_prune_rule
 from p8472backup.server.snapshot import Snapshot
 from p8472backup.server.snapshot_listing import SnapshotListing
-from p8472backup.server.snapshot_service import DEFAULT_PROTECTION_DURATION, SnapshotService
+from p8472backup.server.snapshot_service import DEFAULT_PROTECTION_DURATION, SnapshotService, backup_temporary_prefix
 
 
 class ServerFacade:
@@ -56,21 +57,29 @@ class ServerFacade:
         with service.locked_repository(self._storage_root, client_id) as (repository, lock):
             service.set_mode(repository, mode, lock)
 
-    def backup(self, client_id: UUID, backup_set_id: UUID, records: Iterator[tuple[Object, BinaryIO]], root_id: ObjectId, *, prune: str, comment: str | None = None) -> Snapshot:
+    def backup(self, client_id: UUID, backup_set_id: UUID, records: Iterator[tuple[Object, BinaryIO]], root_id: ObjectId, *, prune: str, comment: str | None = None, auto_cleanup: bool = False) -> Snapshot:
         """Accept a prune rule, commit a local backup, and apply the rule."""
         repo_admin_service = RepositoryAdminService()
         snapshots = SnapshotService()
         with repo_admin_service.locked_repository(self._storage_root, client_id) as (repository, lock):
             backup_set = repository.get_active_backup_set(backup_set_id)
             snapshots.validate_snapshot_input(root_id, comment)
-            repo_admin_service.save_prune_rule(repository, backup_set, lock, prune)
-            snapshot = snapshots.create_snapshot(repository, backup_set_id, records, root_id, lock=lock, protection_duration=self._protection_duration, comment=comment)
+            # Reject invalid rules before reserving a run marker.
+            parse_prune_rule(prune)
+            with snapshots.backup_run(repository, backup_set, lock, auto_cleanup=auto_cleanup) as snapshot_id:
+                repo_admin_service.save_prune_rule(repository, backup_set, lock, prune, temporary_prefix=backup_temporary_prefix(snapshot_id))
+                snapshot = snapshots.create_snapshot(repository, backup_set_id, records, root_id, lock=lock, snapshot_id=snapshot_id, protection_duration=self._protection_duration, comment=comment)
             try:
                 snapshots.prune(repository, backup_set, lock, prune_rule=prune, protection_duration=self._protection_duration)
             except Exception as error:
                 error.add_note(f"Snapshot {snapshot.snapshot_id} committed before prune failed.")
                 raise
             return snapshot
+
+    def cleanup(self, client_id: UUID, backup_set_id: UUID) -> int:
+        """Clean up stopped backup runs for the selected set."""
+        with RepositoryAdminService().locked_repository(self._storage_root, client_id) as (repository, lock):
+            return SnapshotService().cleanup(repository, repository.get_backup_set(backup_set_id), lock)
 
     def prune(self, client_id: UUID, backup_set_id: UUID) -> tuple[UUID, ...]:
         """Prune one backup set using its stored rule and return the removed snapshot IDs."""

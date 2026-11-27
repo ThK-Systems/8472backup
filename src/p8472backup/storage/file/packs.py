@@ -68,6 +68,7 @@ class Pack:
         target_size: int = DEFAULT_TARGET_SIZE,
         *,
         on_stored: Callable[[ObjectId, int, int], None] | None = None,
+        temporary_prefix: str = ".pack-",
     ) -> Pack:
         """Publish one pack, leaving later records in the iterator for the next pack.
 
@@ -82,7 +83,7 @@ class Pack:
         with SpooledTemporaryFile(max_size=_LOCATION_BUFFER_SIZE, dir=str(path.parent)) as locations:
             directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
             try:
-                output = NamedTemporaryFile(dir=path.parent, prefix=".pack-", delete=False)
+                output = NamedTemporaryFile(dir=path.parent, prefix=temporary_prefix, delete=False)
                 temporary_path = Path(output.name)
                 try:
                     with output:

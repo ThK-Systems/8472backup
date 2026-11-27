@@ -2,7 +2,8 @@
 
 import json
 import os
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -29,6 +30,12 @@ from p8472backup.storage.file.packs import DEFAULT_TARGET_SIZE, Pack
 DEFAULT_PROTECTION_DURATION = timedelta(days=7)
 SNAPSHOT_REGISTRY_NAME = "snapshot-registry.json"
 SNAPSHOT_REGISTRY_VERSION = 1
+_RUN_MARKER_PREFIX = ".in-progress-"
+
+
+def backup_temporary_prefix(snapshot_id: UUID) -> str:
+    """Return the common prefix for a backup run's temporary files."""
+    return f".backup-{snapshot_id}-"
 
 
 @dataclass(frozen=True)
@@ -53,6 +60,101 @@ class SnapshotService:
         """Validate snapshot arguments available before reading the object stream."""
         self._validate_comment(comment)
         Object.validate_object_id(root_id)
+
+    @contextmanager
+    def backup_run(self, repository: Repository, backup_set: BackupSet, lock: RepositoryLock, *, auto_cleanup: bool) -> Generator[UUID, None, None]:
+        """Reserve a snapshot ID for a backup that holds the repository lock."""
+        directory = self._backup_directory(repository.snapshots_root / str(backup_set.backup_set_id), lock)
+        if any(path.name.startswith(_RUN_MARKER_PREFIX) for path in directory.iterdir()):
+            if not auto_cleanup:
+                raise InconsistentStateError(f"Cleanup required for backup set {backup_set.backup_set_id}")
+            self.cleanup(repository, backup_set, lock)
+
+        snapshot_id = uuid4()
+        marker = directory / f"{_RUN_MARKER_PREFIX}{snapshot_id}"
+        with marker.open("xb") as output:
+            os.fsync(output.fileno())
+        sync_directory(directory)
+
+        try:
+            yield snapshot_id
+        except BaseException as error:
+            if auto_cleanup:
+                try:
+                    self.cleanup(repository, backup_set, lock)
+                except Exception as cleanup_error:
+                    error.add_note(f"Automatic cleanup failed: {cleanup_error}")
+            raise
+        else:
+            try:
+                marker.unlink()
+                sync_directory(directory)
+            except OSError as error:
+                error.add_note(f"Snapshot {snapshot_id} committed before run marker removal completed.")
+                raise
+
+    def cleanup(self, repository: Repository, backup_set: BackupSet, lock: RepositoryLock) -> int:
+        """Remove files belonging to stopped runs and return their count."""
+        if (repository.path / SNAPSHOT_REGISTRY_NAME).is_symlink():
+            raise InconsistentStateError("Unexpected snapshot register path")
+        try:
+            registry = self._read_registry(repository, lock)
+        except (OSError, ValueError) as error:
+            raise InconsistentStateError(f"Cannot read the snapshot register: {error}") from error
+
+        set_id = backup_set.backup_set_id
+        directory = self._backup_directory(repository.snapshots_root / str(set_id), lock)
+        markers: dict[UUID, Path] = {}
+        unpublished: list[Path] = []
+        for path in directory.iterdir():
+            if not path.name.startswith(_RUN_MARKER_PREFIX):
+                continue
+            stored_id = path.name.removeprefix(_RUN_MARKER_PREFIX)
+            try:
+                snapshot_id = UUID(stored_id)
+            except ValueError as error:
+                raise InconsistentStateError(f"Invalid backup run marker: {path.name}") from error
+            if stored_id != str(snapshot_id) or path.is_symlink() or not path.is_file():
+                raise InconsistentStateError(f"Invalid backup run marker: {path.name}")
+            owner = registry.snapshots.get(snapshot_id) or registry.pending_deletions.get(snapshot_id)
+            if owner is None:
+                unpublished.append(repository.snapshot_file(set_id, snapshot_id))
+            elif owner != set_id:
+                raise InconsistentStateError(f"Backup run marker belongs to a snapshot in another set: {snapshot_id}")
+            markers[snapshot_id] = path
+
+        if not markers:
+            return 0
+
+        directories = [repository.index_directory, repository.packs_root / str(backup_set.key_id)]
+        set_metadata_directory = repository.backup_set_file(set_id).parent
+        if os.path.lexists(set_metadata_directory):
+            directories.append(set_metadata_directory)
+        for parent in directories:
+            self._backup_directory(parent, lock)
+        directories.extend((directory, repository.path))
+
+        prefixes = tuple(backup_temporary_prefix(snapshot_id) for snapshot_id in markers)
+        for parent in directories:
+            for path in parent.iterdir():
+                if path.name.startswith(prefixes):
+                    path.unlink()
+        for path in unpublished:
+            path.unlink(missing_ok=True)
+            path.with_suffix(".catalog").unlink(missing_ok=True)
+
+        # Sync even directories where an earlier attempt already unlinked the files.
+        for parent in directories:
+            sync_directory(parent)
+        for marker in markers.values():
+            marker.unlink()
+        sync_directory(directory)
+        return len(markers)
+
+    def _backup_directory(self, path: Path, lock: RepositoryLock) -> Path:
+        if lock.require_held_for(path) != path:
+            raise InconsistentStateError(f"Unexpected backup directory: {path.name}")
+        return path
 
     def create_snapshot(
         self,
@@ -93,8 +195,9 @@ class SnapshotService:
         if first is None or first[0].object_type != TYPE_SNAPSHOT or first[0].object_id != root_id:
             raise ValueError("The first record must be the declared type 3 snapshot root")
 
-        catalogue = self._store_snapshot_objects(chain((first,), records), index, lock, repository.packs_root / str(backup_set.key_id), target_size)
-        index.save_to(index_path, lock)
+        temporary_prefix = backup_temporary_prefix(snapshot_id)
+        catalogue = self._store_snapshot_objects(chain((first,), records), index, lock, repository.packs_root / str(backup_set.key_id), target_size, temporary_prefix=temporary_prefix)
+        index.save_to(index_path, lock, temporary_prefix=temporary_prefix)
 
         committed_at = trusted_time.server_clock.now()
         snapshot = Snapshot(
@@ -106,9 +209,9 @@ class SnapshotService:
             _catalogue=catalogue,
             comment=comment,
         )
-        self._save_snapshot(snapshot, repository, path, lock)
+        self._save_snapshot(snapshot, repository, path, lock, temporary_prefix=temporary_prefix)
         registry.snapshots[snapshot_id] = backup_set_id
-        self._write_registry(repository, lock, registry)
+        self._write_registry(repository, lock, registry, temporary_prefix=temporary_prefix)
         return snapshot
 
     def get_snapshot(self, repository: Repository, backup_set_id: UUID, snapshot_id: UUID) -> Snapshot:
@@ -319,12 +422,12 @@ class SnapshotService:
             snapshots[snapshot_id] = set_id
         return snapshots
 
-    def _write_registry(self, repository: Repository, lock: RepositoryLock, registry: _SnapshotRegistry) -> None:
+    def _write_registry(self, repository: Repository, lock: RepositoryLock, registry: _SnapshotRegistry, *, temporary_prefix: str | None = None) -> None:
         data: dict[str, object] = {"version": SNAPSHOT_REGISTRY_VERSION}
         for key, entries in (("snapshots", registry.snapshots), ("pending_deletions", registry.pending_deletions)):
             if entries or key == "snapshots":
                 data[key] = {str(snapshot_id): str(set_id) for snapshot_id, set_id in entries.items()}
-        write_json(repository.path / SNAPSHOT_REGISTRY_NAME, lock, data)
+        write_json(repository.path / SNAPSHOT_REGISTRY_NAME, lock, data, temporary_prefix=temporary_prefix)
 
     def _is_protected(self, metadata: _SnapshotMetadata, now: datetime, protection_duration: timedelta) -> bool:
         return now <= max(metadata.protected_until, metadata.committed_at + protection_duration)
@@ -338,7 +441,7 @@ class SnapshotService:
             raise ValueError("Snapshot comment must be at most 40 characters")
         return comment
 
-    def _save_snapshot(self, snapshot: Snapshot, repository: Repository, path: Path, lock: RepositoryLock) -> None:
+    def _save_snapshot(self, snapshot: Snapshot, repository: Repository, path: Path, lock: RepositoryLock, *, temporary_prefix: str) -> None:
         """Write the durable snapshot files before publishing their register entry."""
         if snapshot.version != SNAPSHOT_VERSION:
             raise ValueError("Unsupported snapshot format")
@@ -351,7 +454,7 @@ class SnapshotService:
             raise ValueError("Snapshot root is missing from the object catalogue")
 
         checksum = sha256()
-        with NamedTemporaryFile(dir=path.parent, prefix=".snapshot-", delete_on_close=False) as output:
+        with NamedTemporaryFile(dir=path.parent, prefix=temporary_prefix, delete_on_close=False) as output:
             for object_id in object_ids:
                 Object.validate_object_id(object_id)
                 output.write(object_id)
@@ -373,7 +476,7 @@ class SnapshotService:
         }
         if snapshot.comment is not None:
             metadata["comment"] = snapshot.comment
-        write_json(path, lock, metadata)
+        write_json(path, lock, metadata, temporary_prefix=temporary_prefix)
 
     def _read_snapshot_metadata(self, repository: Repository, backup_set_id: UUID, snapshot_id: UUID, lock: RepositoryLock) -> _SnapshotMetadata:
         path = lock.require_held_for(repository.snapshot_file(backup_set_id, snapshot_id))
@@ -449,6 +552,8 @@ class SnapshotService:
         lock: RepositoryLock,
         pack_directory: Path,
         target_size: int,
+        *,
+        temporary_prefix: str,
     ) -> ObjectCatalogue:
         """Collect the catalogue and write new objects to packs.
 
@@ -475,7 +580,7 @@ class SnapshotService:
             def record_location(object_id: ObjectId, offset: int, length: int) -> None:
                 index.put(object_id, ObjectLocation(pack_id, offset, length))
 
-            Pack.write_to(path, chain((first,), missing), target_size, on_stored=record_location)
+            Pack.write_to(path, chain((first,), missing), target_size, on_stored=record_location, temporary_prefix=temporary_prefix)
 
         return ObjectCatalogue(frozenset(object_ids))
 
