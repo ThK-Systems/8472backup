@@ -17,19 +17,18 @@ import pytest
 
 from p8472backup.archive.datacontent import COMPRESSION_NONE, DataContent
 from p8472backup.archive.metacontent import MetaContent
-from p8472backup.archive.objects import OBJECT_ID_SIZE, TYPE_DATA, TYPE_METADATA, TYPE_SNAPSHOT, Object, ObjectId
+from p8472backup.archive.objects import HEADER_SIZE as OBJECT_HEADER_SIZE, OBJECT_ID_SIZE, TYPE_DATA, TYPE_METADATA, TYPE_SNAPSHOT, Object, ObjectId
 from p8472backup.archive.snapshotrootcontent import SnapshotRootContent
 from p8472backup.common.error import InconsistentStateError
 from p8472backup.server import trusted_time
 from p8472backup.server.repository import Repository
 from p8472backup.server.repository_admin_service import RepositoryAdminService
 from p8472backup.server.server_facade import ServerFacade
-from p8472backup.server.snapshot import Snapshot
-from p8472backup.server.snapshot_service import SNAPSHOT_REGISTRY_NAME, SnapshotService
+from p8472backup.server.snapshot_service import SNAPSHOT_REGISTRY_NAME, SnapshotReader, SnapshotService
 from p8472backup.server.trusted_time import TrustedTime
-from p8472backup.storage.file.index import LocationIndex
+from p8472backup.storage.file.index import LocationIndex, ObjectLocation
 from p8472backup.storage.file.lock import RepositoryLock
-from p8472backup.storage.file.packs import Pack
+from p8472backup.storage.file.packs import HEADER_SIZE as PACK_HEADER_SIZE, Pack
 
 
 _CLIENT_ID = UUID(int=1)
@@ -44,6 +43,7 @@ _ORIGINAL = b"shared!!first!!!"
 _ROOT_BODY = b"opaque snapshot root from the client"
 _ROOT = Object(TYPE_SNAPSHOT, b"r" * OBJECT_ID_SIZE, len(_ROOT_BODY))
 _DATA = Object(TYPE_DATA, b"d" * OBJECT_ID_SIZE, 1)
+_DATA_RECORD_LENGTH = OBJECT_HEADER_SIZE + _DATA.length
 
 
 @pytest.fixture
@@ -74,21 +74,23 @@ def _file_records(path: Path) -> list[tuple[Object, BytesIO]]:
     return records
 
 
-def _read_fixture_file(snapshot: Snapshot, repository: Repository, index: LocationIndex, lock: RepositoryLock) -> bytes:
-    bodies: dict[ObjectId, bytes] = {}
-    for object_id in snapshot.object_catalog.object_ids:
-        location = index.get(object_id)
-        assert location is not None
-        pack = lock.require_held_for(repository.packs_root / str(_KEY_ID) / f"{location.pack_id}.pack")
-        output = BytesIO()
-        assert Pack.read_object(pack, location.offset, location.length, output).object_id == object_id
-        bodies[object_id] = output.getvalue()
-    root = SnapshotRootContent.from_plaintext(bodies[snapshot.root_id])
+def _read_object_body(reader: SnapshotReader, object_id: ObjectId, object_type: int) -> bytes:
+    output = BytesIO()
+    obj = reader.read_object(object_id, output)
+    body = output.getvalue()
+    assert obj.object_id == object_id
+    assert obj.object_type == object_type
+    assert obj.length == len(body)
+    return body
+
+
+def _read_fixture_file(reader: SnapshotReader) -> bytes:
+    root = SnapshotRootContent.from_plaintext(_read_object_body(reader, reader.root_id, TYPE_SNAPSHOT))
     assert root.description == b"client backup configuration"
     (metadata_id,) = root.metadata_ids
-    metadata = MetaContent.from_plaintext(bodies[metadata_id])
+    metadata = MetaContent.from_plaintext(_read_object_body(reader, metadata_id, TYPE_METADATA))
     assert metadata.metadata.decode("utf-16") == "report.txt"
-    return b"".join(DataContent.from_plaintext(bodies[chunk_id]).data for chunk_id in metadata.chunk_ids)
+    return b"".join(DataContent.from_plaintext(_read_object_body(reader, chunk_id, TYPE_DATA)).data for chunk_id in metadata.chunk_ids)
 
 
 @pytest.mark.parametrize(
@@ -135,8 +137,10 @@ def test_backup_and_incremental_backup_restore_both_file_versions(tmp_path: Path
         index = LocationIndex.load_from(opened.index_directory / str(_KEY_ID), lock)
         location = index.get(reused)
         assert location is not None and location.pack_id == 1
-        assert _read_fixture_file(original, opened, index, lock) == _ORIGINAL
-        assert _read_fixture_file(current, opened, index, lock) == updated
+    with facade.restore(_CLIENT_ID, _SET_ID, original.snapshot_id) as reader:
+        assert _read_fixture_file(reader) == _ORIGINAL
+    with facade.restore(_CLIENT_ID, _SET_ID, current.snapshot_id) as reader:
+        assert _read_fixture_file(reader) == updated
     facade.check(_CLIENT_ID)
 
 
@@ -155,6 +159,7 @@ def test_restore_keeps_the_selected_index_and_repository_lock_for_the_context(ba
 
     with patch.object(LocationIndex, "load_from", side_effect=track_index_load), facade.restore(_CLIENT_ID, _OTHER_SET_ID, snapshot.snapshot_id) as reader:
         assert reader.root_id == _ROOT.object_id
+        assert _read_object_body(reader, reader.root_id, TYPE_SNAPSHOT) == _ROOT_BODY
         (index_ref,) = loaded_indexes
         assert index_ref() is not None
         with pytest.raises(BlockingIOError), RepositoryLock(repository.path):
@@ -164,6 +169,8 @@ def test_restore_keeps_the_selected_index_and_repository_lock_for_the_context(ba
     assert index_ref() is None
     with pytest.raises(RuntimeError, match="Snapshot reader is closed"):
         reader.contains_object(_ROOT.object_id)
+    with pytest.raises(RuntimeError, match="Snapshot reader is closed"):
+        reader.read_object(_ROOT.object_id, BytesIO())
     with RepositoryLock(repository.path) as lock:
         lock.require_held()
 
@@ -177,21 +184,29 @@ def test_restore_rejects_a_snapshot_from_another_set_in_the_same_key_domain(back
         pytest.fail("Restore opened a snapshot from another set")
 
 
-def test_restore_opens_a_published_snapshot_in_a_retired_repository(backup_repository: tuple[ServerFacade, Repository]) -> None:
+def test_restore_reads_a_published_snapshot_in_a_retired_repository(backup_repository: tuple[ServerFacade, Repository]) -> None:
     facade, _ = backup_repository
     snapshot = facade.backup(_CLIENT_ID, _SET_ID, iter(((_ROOT, BytesIO(_ROOT_BODY)),)), prune="")
     facade.remove_repository(_CLIENT_ID)
 
     with facade.restore(_CLIENT_ID, _SET_ID, snapshot.snapshot_id) as reader:
         assert reader.root_id == snapshot.root_id
+        assert _read_object_body(reader, reader.root_id, TYPE_SNAPSHOT) == _ROOT_BODY
 
 
-def test_restore_releases_the_repository_lock_after_an_error(backup_repository: tuple[ServerFacade, Repository]) -> None:
+@pytest.mark.parametrize(
+    ("short_write", "message"),
+    (pytest.param(False, "Restore output failed", id="write-failed"), pytest.param(True, "Short write while copying object body", id="short-write")),
+)
+def test_restore_releases_the_repository_lock_after_an_output_error(backup_repository: tuple[ServerFacade, Repository], short_write: bool, message: str) -> None:
     facade, repository = backup_repository
     snapshot = facade.backup(_CLIENT_ID, _SET_ID, iter(((_ROOT, BytesIO(_ROOT_BODY)),)), prune="")
+    output = BytesIO()
+    write = Mock(return_value=0) if short_write else Mock(side_effect=OSError("Restore output failed"))
 
-    with pytest.raises(OSError, match="Restore output failed"), facade.restore(_CLIENT_ID, _SET_ID, snapshot.snapshot_id):
-        raise OSError("Restore output failed")
+    with patch.object(output, "write", write), pytest.raises(OSError, match=message), facade.restore(_CLIENT_ID, _SET_ID, snapshot.snapshot_id) as reader:
+        reader.read_object(reader.root_id, output)
+    write.assert_called_once_with(_ROOT_BODY)
 
     with RepositoryLock(repository.path) as lock:
         lock.require_held()
@@ -220,7 +235,13 @@ def test_restore_marks_only_the_opened_snapshots_objects(backup_repository: tupl
         with facade.restore(_CLIENT_ID, snapshot.backup_set_id, snapshot.snapshot_id) as reader:
             assert reader.contains_object(reader.root_id)
             assert {object_id for object_id in indexed_ids if reader.contains_object(object_id)} == expected_ids
-            assert not reader.contains_object(bytes(OBJECT_ID_SIZE))
+            absent_id = bytes(OBJECT_ID_SIZE)
+            assert not reader.contains_object(absent_id)
+            output = BytesIO()
+            for object_id in (*sorted(indexed_ids - expected_ids), absent_id):
+                with pytest.raises(FileNotFoundError, match="Object is not in the snapshot catalogue"):
+                    reader.read_object(object_id, output)
+            assert output.getvalue() == b""
 
 
 @pytest.mark.parametrize("length", (OBJECT_ID_SIZE - 1, OBJECT_ID_SIZE + 1), ids=("short", "long"))
@@ -230,7 +251,7 @@ def test_restore_rejects_malformed_object_ids(backup_repository: tuple[ServerFac
 
     with facade.restore(_CLIENT_ID, _SET_ID, snapshot.snapshot_id) as reader:
         with pytest.raises(ValueError, match="Object ID must contain exactly 32 bytes"):
-            reader.contains_object(bytes(length))
+            reader.read_object(bytes(length), BytesIO())
 
 
 @pytest.mark.parametrize(
@@ -281,6 +302,98 @@ def test_restore_validates_the_selected_catalogue(backup_repository: tuple[Serve
     with facade.restore(_CLIENT_ID, _SET_ID, intact.snapshot_id) as reader:
         assert reader.contains_object(_ROOT.object_id)
         assert not reader.contains_object(_DATA.object_id)
+
+
+@pytest.mark.parametrize(
+    ("body", "write_count"),
+    (
+        pytest.param(b"", 0, id="empty"),
+        pytest.param(b"x" * (64 * 1024), 1, id="one-block"),
+        pytest.param(b"\x00\xff" * (64 * 1024) + b"x", 3, id="multiple-blocks"),
+    ),
+)
+def test_restore_streams_the_stored_body_and_returns_its_header(backup_repository: tuple[ServerFacade, Repository], body: bytes, write_count: int) -> None:
+    facade, _ = backup_repository
+    obj, source = _record(TYPE_SNAPSHOT, body)
+    snapshot = facade.backup(_CLIENT_ID, _SET_ID, iter(((obj, source),)), prune="")
+    output = BytesIO(b"prefix")
+    output.seek(0, os.SEEK_END)
+
+    with patch.object(output, "write", wraps=output.write) as write, facade.restore(_CLIENT_ID, _SET_ID, snapshot.snapshot_id) as reader:
+        assert reader.read_object(reader.root_id, output) == obj
+        assert write.call_count == write_count
+    assert output.getvalue() == b"prefix" + body
+
+
+@pytest.mark.parametrize(
+    ("location", "message"),
+    (
+        pytest.param(ObjectLocation(1, PACK_HEADER_SIZE + _DATA_RECORD_LENGTH, _DATA_RECORD_LENGTH), "Pack object ID does not match the requested object ID", id="wrong-id-same-length"),
+        pytest.param(ObjectLocation(1, PACK_HEADER_SIZE, OBJECT_HEADER_SIZE), "Object record length does not match its location", id="wrong-length"),
+        pytest.param(ObjectLocation(1, 0, _DATA_RECORD_LENGTH), "Object location lies outside the pack body", id="offset-in-pack-header"),
+        pytest.param(ObjectLocation(1, 1_000_000, _DATA_RECORD_LENGTH), "Object location lies outside the pack body", id="offset-past-pack"),
+    ),
+)
+def test_restore_rejects_a_wrong_index_location_before_writing(backup_repository: tuple[ServerFacade, Repository], location: ObjectLocation, message: str) -> None:
+    facade, repository = backup_repository
+    other = Object(TYPE_DATA, b"x" * OBJECT_ID_SIZE, _DATA.length)
+    records = iter(((_DATA, BytesIO(b"d")), (other, BytesIO(b"x")), (_ROOT, BytesIO(_ROOT_BODY))))
+    snapshot = facade.backup(_CLIENT_ID, _SET_ID, records, prune="")
+
+    index_path = repository.index_directory / str(_KEY_ID)
+    with RepositoryLock(repository.path) as lock:
+        original = LocationIndex.load_from(index_path, lock)
+        damaged = LocationIndex()
+        damaged.put(_DATA.object_id, location)
+        for obj in (other, _ROOT):
+            original_location = original.get(obj.object_id)
+            assert original_location is not None
+            damaged.put(obj.object_id, original_location)
+        damaged.save_to(index_path, lock)
+
+    output = BytesIO()
+    with facade.restore(_CLIENT_ID, _SET_ID, snapshot.snapshot_id) as reader:
+        with pytest.raises(ValueError, match=message):
+            reader.read_object(_DATA.object_id, output)
+        assert output.getvalue() == b""
+        assert _read_object_body(reader, reader.root_id, TYPE_SNAPSHOT) == _ROOT_BODY
+
+
+@pytest.mark.parametrize(
+    ("size", "exception", "message"),
+    (
+        pytest.param(None, FileNotFoundError, r"1\.pack", id="missing-pack"),
+        pytest.param(PACK_HEADER_SIZE - 1, ValueError, "Pack header must contain exactly", id="truncated-header"),
+        pytest.param(-1, ValueError, "Pack file length does not match its header", id="truncated-body"),
+    ),
+)
+def test_restore_rejects_a_missing_or_truncated_pack_before_writing(backup_repository: tuple[ServerFacade, Repository], size: int | None, exception: type[Exception], message: str) -> None:
+    facade, repository = backup_repository
+    snapshot = facade.backup(_CLIENT_ID, _SET_ID, iter(((_ROOT, BytesIO(_ROOT_BODY)),)), prune="")
+    path = repository.packs_root / str(_KEY_ID) / "1.pack"
+    if size is None:
+        path.unlink()
+    else:
+        path.write_bytes(path.read_bytes()[:size])
+
+    output = BytesIO()
+    with pytest.raises(exception, match=message), facade.restore(_CLIENT_ID, _SET_ID, snapshot.snapshot_id) as reader:
+        reader.read_object(reader.root_id, output)
+    assert output.getvalue() == b""
+
+
+def test_restore_rejects_a_pack_outside_the_locked_repository(tmp_path: Path, backup_repository: tuple[ServerFacade, Repository]) -> None:
+    facade, repository = backup_repository
+    snapshot = facade.backup(_CLIENT_ID, _SET_ID, iter(((_ROOT, BytesIO(_ROOT_BODY)),)), prune="")
+    pack = repository.packs_root / str(_KEY_ID) / "1.pack"
+    outside_pack = tmp_path / "outside.pack"
+    pack.rename(outside_pack)
+    pack.symlink_to(outside_pack)
+
+    output = BytesIO()
+    with pytest.raises(ValueError, match="Path must name a repository file"), facade.restore(_CLIENT_ID, _SET_ID, snapshot.snapshot_id) as reader:
+        reader.read_object(reader.root_id, output)
+    assert output.getvalue() == b""
 
 
 @pytest.mark.parametrize("root_is_indexed", (False, True))

@@ -33,7 +33,7 @@ class RepositoryAdminService:
             return replace(repository, snapshots=SnapshotService().list_snapshots(repository, lock))
 
     @contextmanager
-    def locked_repository(self, storage_root: Path, client_id: UUID, *, operation: str | None = None, backup_set_id: UUID | None = None) -> Generator[tuple[Repository, RepositoryLock], None, None]:
+    def locked_repository(self, storage_root: Path, client_id: UUID, *, operation: str | None = None, backup_set_id: UUID | None = None, snapshot_id: UUID | None = None) -> Generator[tuple[Repository, RepositoryLock], None, None]:
         """Load verified metadata and hold the lock through one repository operation."""
         path = storage_root / str(client_id)
         try:
@@ -49,6 +49,8 @@ class RepositoryAdminService:
                 scope = f"client_id={client_id}"
                 if backup_set_id is not None:
                     scope += f" backup_set_id={backup_set_id}"
+                if snapshot_id is not None:
+                    scope += f" snapshot_id={snapshot_id}"
                 Log.warning("Operation %s failed %s reason=%s", operation, scope, type(error).__name__)
             raise
 

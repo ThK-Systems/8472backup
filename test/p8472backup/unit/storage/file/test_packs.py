@@ -73,6 +73,19 @@ class TestPack:
         assert Pack.write_to(next_path, records, target_size=1) == Pack(1, OBJECT_HEADER_SIZE)
         assert Pack.read_object(next_path, HEADER_SIZE, OBJECT_HEADER_SIZE, BytesIO()) == third
 
+    def test_reads_a_verified_object_in_one_open_pack(self, tmp_path: Path) -> None:
+        path = tmp_path / "1.pack"
+        body = b"stored object"
+        obj = Object(TYPE_DATA, b"d" * 32, len(body))
+        Pack.write_to(path, iter(((obj, BytesIO(body)),)))
+        output = BytesIO()
+
+        with patch.object(Path, "open", autospec=True, side_effect=Path.open) as open_pack:
+            assert Pack.read_object(path, HEADER_SIZE, OBJECT_HEADER_SIZE + len(body), output, expected_object_id=obj.object_id) == obj
+
+        open_pack.assert_called_once_with(path, "rb")
+        assert output.getvalue() == body
+
     def test_truncated_body_never_publishes_pack(self, tmp_path: Path) -> None:
         path = tmp_path / "pack"
         obj = Object(TYPE_DATA, b"a" * 32, 2)

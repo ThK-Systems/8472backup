@@ -140,3 +140,37 @@ def test_lock_contention_warns_once_without_logging_storage_path(facade: ServerF
     assert caplog.record_tuples == [
         ("p8472backup", logging.WARNING, f"Operation cleanup failed client_id={_CLIENT_ID} backup_set_id={_SET_ID} reason=BlockingIOError"),
     ]
+
+
+def test_restore_logs_opening_and_completion_once(facade: ServerFacade, caplog: pytest.LogCaptureFixture) -> None:
+    with patch.object(trusted_time, "server_clock", create=True) as clock:
+        clock.now.return_value = _NOW
+        snapshot = facade.backup(_CLIENT_ID, _SET_ID, iter(((_ROOT, BytesIO(b"r")),)), prune="")
+    caplog.clear()
+
+    with facade.restore(_CLIENT_ID, _SET_ID, snapshot.snapshot_id) as reader:
+        for _ in range(2):
+            reader.read_object(reader.root_id, BytesIO())
+
+    scope = f"client_id={_CLIENT_ID} backup_set_id={_SET_ID} snapshot_id={snapshot.snapshot_id}"
+    assert caplog.record_tuples == [
+        ("p8472backup", logging.INFO, f"Snapshot opened for restore {scope}"),
+        ("p8472backup", logging.INFO, f"Restore completed {scope}"),
+    ]
+
+
+def test_restore_read_failure_logs_one_warning_with_snapshot_id(facade: ServerFacade, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    with patch.object(trusted_time, "server_clock", create=True) as clock:
+        clock.now.return_value = _NOW
+        snapshot = facade.backup(_CLIENT_ID, _SET_ID, iter(((_ROOT, BytesIO(b"r")),)), prune="")
+    (tmp_path / str(_CLIENT_ID) / "data" / "packs" / str(_KEY_ID) / "1.pack").unlink()
+    caplog.clear()
+
+    with pytest.raises(FileNotFoundError), facade.restore(_CLIENT_ID, _SET_ID, snapshot.snapshot_id) as reader:
+        reader.read_object(reader.root_id, BytesIO())
+
+    scope = f"client_id={_CLIENT_ID} backup_set_id={_SET_ID} snapshot_id={snapshot.snapshot_id}"
+    assert caplog.record_tuples == [
+        ("p8472backup", logging.INFO, f"Snapshot opened for restore {scope}"),
+        ("p8472backup", logging.WARNING, f"Operation restore failed {scope} reason=FileNotFoundError"),
+    ]

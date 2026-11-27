@@ -35,7 +35,7 @@ Connect the local `list` façade method to the authorized client command. The lo
 
 The local `ServerFacade.restore()` context opens a published snapshot and loads its key-domain index once. It validates the binary catalogue while streaming its object IDs and marks one bit per index record. The reader exposes the snapshot root ID and checks membership through `contains_object()`. The context holds the repository lock until exit. `get_snapshot()` returns the snapshot record.
 
-Serve objects for restore, recover, and mount. Require catalogue membership before looking up a pack location and verify that the record at the indexed pack offset matches the requested object ID and expected length.
+`SnapshotReader.read_object()` requires catalogue membership before looking up a pack location. With the pack open, it verifies the requested object ID and expected record length, then streams the body to the supplied output and returns the object header. Connect this shared read path to restore, recover, and mount on the client.
 
 ## 7. Directory tree and snapshot description
 
@@ -67,7 +67,7 @@ The local `backup()` persists the prune rule and applies it after commit. The lo
 
 ## 14. End-to-end verification
 
-Local tests send objects prepared by a test client, run initial and incremental backups through the façade, and verify byte-exact reconstruction of both file versions after reopening the repository. They exercise interruption immediately before the final root byte, including for a reused root. Extend the coverage with two encrypted backups, direct single-file restore through the shared read path, and acknowledgement lost after durable commit.
+Local tests send objects prepared by a test client, run initial and incremental backups through the façade, and use the shared read path to reconstruct both file versions byte for byte. They exercise interruption immediately before the final root byte, including for a reused root. Extend the coverage with two encrypted backups, direct single-file restore through the client, and acknowledgement lost after durable commit.
 
 ## 15. Object encryption session keys
 
@@ -85,4 +85,4 @@ Plan the switch to a post-quantum SSH authentication key once the supported Open
 
 The shared `Log` class reads `P8472BACKUP_ENV` at server startup. Set it to `dev` to write `INFO` to stdout and `WARNING` and `ERROR` to stderr with readable level names. In `intg` and `prod`, the class writes to stderr with syslog severity prefixes. The default is `prod`. Configure the systemd unit to collect stderr in the journal and interpret the prefixes.
 
-Backup admission, commit, and failures include the client and set IDs and a snapshot ID once assigned. The server logs repository changes, snapshot removal, cleanup, check results, scheduled dispatches, and trusted time outcomes. Apply the project logging rules to the transport when it is connected and reserve its stdout for protocol frames.
+Backup admission, commit, and failures include the client and set IDs and a snapshot ID once assigned. Restore opening, completion, and failures include the client, set, and snapshot IDs. The server logs repository changes, snapshot removal, cleanup, check results, scheduled dispatches, and trusted time outcomes. Apply the project logging rules to the transport when it is connected and reserve its stdout for protocol frames.

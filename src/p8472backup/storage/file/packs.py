@@ -172,9 +172,11 @@ class Pack:
         return obj
 
     @classmethod
-    def read_object(cls, path: Path, offset: int, length: int, output: BinaryIO) -> Object:
-        """Read a record at a known location and copy its body to output."""
+    def read_object(cls, path: Path, offset: int, length: int, output: BinaryIO, *, expected_object_id: ObjectId | None = None) -> Object:
+        """Validate the record length and any expected ID before copying its body."""
         with path.open("rb") as source:
             obj = cls._read_object_header(source, offset, length)
+            if expected_object_id is not None and obj.object_id != expected_object_id:
+                raise ValueError("Pack object ID does not match the requested object ID")
             obj.read_body(source, output)
         return obj

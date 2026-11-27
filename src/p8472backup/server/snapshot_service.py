@@ -55,11 +55,13 @@ class _SnapshotRegistry:
 
 @dataclass
 class SnapshotReader:
-    """Hold the metadata, location index, and catalogue for an opened snapshot."""
+    """Read catalogue members from an opened snapshot under the repository lock."""
 
     _metadata: _SnapshotMetadata
     _index: LocationIndex | None
     _catalogue_bits: bytearray
+    _pack_directory: Path
+    _lock: RepositoryLock
 
     @property
     def root_id(self) -> ObjectId:
@@ -68,18 +70,29 @@ class SnapshotReader:
 
     def contains_object(self, object_id: ObjectId) -> bool:
         """Return whether the object belongs to the opened snapshot."""
-        if self._index is None:
-            raise RuntimeError("Snapshot reader is closed")
-        number = self._index.record_number(object_id)
+        number = self._require_index().record_number(object_id)
         if number is None:
             return False
         byte, bit = divmod(number, 8)
         return bool(self._catalogue_bits[byte] & (1 << bit))
 
+    def read_object(self, object_id: ObjectId, output: BinaryIO) -> Object:
+        """Copy a catalogue member's body to output and return its verified header."""
+        location = self._require_index().get(object_id) if self.contains_object(object_id) else None
+        if location is None:
+            raise FileNotFoundError(f"Object is not in the snapshot catalogue: {object_id.hex()}")
+        path = self._lock.require_held_for(self._pack_directory / f"{location.pack_id}.pack")
+        return Pack.read_object(path, location.offset, location.length, output, expected_object_id=object_id)
+
     def close(self) -> None:
         """Release the in-memory index and catalogue at the end of the restore."""
         self._index = None
         self._catalogue_bits.clear()
+
+    def _require_index(self) -> LocationIndex:
+        if self._index is None:
+            raise RuntimeError("Snapshot reader is closed")
+        return self._index
 
 
 class SnapshotService:
@@ -260,13 +273,14 @@ class SnapshotService:
         backup_set_id = backup_set.backup_set_id
         self._require_published_snapshot(repository, backup_set_id, snapshot_id, lock)
         metadata = self._read_snapshot_metadata(repository, backup_set_id, snapshot_id, lock)
-        index = LocationIndex.load_from(repository.index_directory / str(backup_set.key_id), lock)
+        key_id = str(backup_set.key_id)
+        index = LocationIndex.load_from(repository.index_directory / key_id, lock)
         path = repository.snapshot_file(backup_set_id, snapshot_id)
         try:
             catalogue_bits = self._check_catalogue(path, lock, metadata, index)
         except (OSError, ValueError) as error:
             raise InconsistentStateError(self._check_file_error(repository, path.with_suffix(".catalog"), error)) from error
-        return SnapshotReader(metadata, index, catalogue_bits)
+        return SnapshotReader(metadata, index, catalogue_bits, repository.packs_root / key_id, lock)
 
     def _require_published_snapshot(self, repository: Repository, backup_set_id: UUID, snapshot_id: UUID, lock: RepositoryLock) -> None:
         if self._read_registry(repository, lock).snapshots.get(snapshot_id) != backup_set_id:

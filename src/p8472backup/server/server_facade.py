@@ -93,7 +93,7 @@ class ServerFacade:
     @contextmanager
     def restore(self, client_id: UUID, backup_set_id: UUID, snapshot_id: UUID) -> Generator[SnapshotReader, None, None]:
         """Keep a published snapshot open under the repository lock for restoration."""
-        with RepositoryAdminService().locked_repository(self._storage_root, client_id, operation="restore", backup_set_id=backup_set_id) as (repository, lock):
+        with RepositoryAdminService().locked_repository(self._storage_root, client_id, operation="restore", backup_set_id=backup_set_id, snapshot_id=snapshot_id) as (repository, lock):
             backup_set = repository.get_backup_set(backup_set_id)
             reader = SnapshotService().open_snapshot(repository, backup_set, snapshot_id, lock)
             try:
@@ -101,6 +101,7 @@ class ServerFacade:
                 yield reader
             finally:
                 reader.close()
+        Log.info("Restore completed client_id=%s backup_set_id=%s snapshot_id=%s", client_id, backup_set_id, snapshot_id)
 
     def cleanup(self, client_id: UUID, backup_set_id: UUID) -> int:
         """Clean up stopped backup runs for the selected set."""
