@@ -28,3 +28,4 @@ class Snapshot:
     protected_until: datetime
     object_catalog: ObjectCatalogue
     version: int = SNAPSHOT_VERSION
+    comment: str | None = None

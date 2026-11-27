@@ -7,26 +7,20 @@ from contextlib import contextmanager
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
-from tempfile import NamedTemporaryFile
-from typing import NoReturn, TypeGuard
+from typing import NoReturn
 from uuid import UUID
 
 from p8472backup.common.error import InconsistentStateError
 from p8472backup.server.repository import BackupMode, BackupSet, Repository
-from p8472backup.server.snapshot_service import SnapshotService
+from p8472backup.server.snapshot_service import SNAPSHOT_REGISTRY_NAME, SNAPSHOT_REGISTRY_VERSION, SnapshotService
 from p8472backup.storage.file.index import LocationIndex
+from p8472backup.storage.file.json_file import is_json_object, sync_directory, write_json
 from p8472backup.storage.file.lock import RepositoryLock
 
 
 _METADATA_NAME = "repository.json"
 _METADATA_VERSION = 1
-_SNAPSHOT_REGISTRY_NAME = "snapshot-registry.json"
-_SNAPSHOT_REGISTRY_VERSION = 1
 _INTERRUPTED_BACKUP_SET_REGISTRATION = "A previous registration may have been interrupted."
-
-
-def _is_json_object(value: object) -> TypeGuard[Mapping[object, object]]:
-    return isinstance(value, dict)
 
 
 class RepositoryAdminService:
@@ -50,17 +44,20 @@ class RepositoryAdminService:
             repository = self._read_metadata(path, lock, client_id=client_id)
             yield repository, lock
 
-    def init_repository(self, path: Path, client_id: UUID, backup_sets: Iterable[tuple[object, object]], *, mode: BackupMode = "pull") -> Repository:
+    def init_repository(self, path: Path, client_id: UUID, backup_sets: Iterable[tuple[object, object]], *, mode: BackupMode = "pull", backup_set_names: Mapping[UUID, str] | None = None) -> Repository:
         """Create the repository and register all its initial backup sets."""
+        names = backup_set_names or {}
         sets: dict[UUID, BackupSet] = {}
         for set_id, key_id in backup_sets:
             if not isinstance(set_id, UUID) or not isinstance(key_id, UUID):
                 raise ValueError("Backup set and key domain IDs must be UUIDs")
             if set_id in sets:
                 raise ValueError(f"Duplicate backup set ID: {set_id}")
-            sets[set_id] = BackupSet(set_id, key_id)
+            sets[set_id] = BackupSet(set_id, key_id, name=names.get(set_id))
         if not sets:
             raise ValueError("At least one backup set is required")
+        if not names.keys() <= sets.keys():
+            raise ValueError("Backup set names must refer to registered sets")
         repository = Repository(path, client_id, sets, mode=mode)
         try:
             path.mkdir(mode=0o700)
@@ -79,13 +76,13 @@ class RepositoryAdminService:
 
             self._create_backup_set_storage(repository, sets.values(), lock)
             for directory in (repository.data_directory, repository.path, repository.path.parent):
-                self._sync_directory(directory)
+                sync_directory(directory)
 
-            self._write_json(repository.path / _SNAPSHOT_REGISTRY_NAME, lock, {"version": _SNAPSHOT_REGISTRY_VERSION, "snapshots": {}})
+            write_json(repository.path / SNAPSHOT_REGISTRY_NAME, lock, {"version": SNAPSHOT_REGISTRY_VERSION, "snapshots": {}})
             self._write_metadata(repository, lock)
         return repository
 
-    def add_backup_set(self, repository: Repository, backup_set_id: object, key_id: object, lock: RepositoryLock) -> None:
+    def add_backup_set(self, repository: Repository, backup_set_id: object, key_id: object, lock: RepositoryLock, *, name: str | None = None) -> None:
         """Register a set using the repository and lock from locked_repository()."""
         if not isinstance(backup_set_id, UUID) or not isinstance(key_id, UUID):
             raise ValueError("Backup set and key domain IDs must be UUIDs")
@@ -96,7 +93,7 @@ class RepositoryAdminService:
         if backup_set_id in repository.backup_sets:
             raise FileExistsError("Backup set already exists.")
 
-        new_set = BackupSet(backup_set_id, key_id)
+        new_set = BackupSet(backup_set_id, key_id, name=name)
         existing_key_ids = {backup_set.key_id for backup_set in repository.backup_sets.values()}
         packs_directory = repository.packs_root / str(key_id)
         index_file = repository.index_directory / str(key_id)
@@ -121,7 +118,7 @@ class RepositoryAdminService:
 
         if backup_set.deleted:
             # An earlier attempt may have replaced the metadata before syncing its directory.
-            self._sync_directory(metadata_path.parent)
+            sync_directory(metadata_path.parent)
         else:
             backup_set = replace(backup_set, deleted=True)
             repository = replace(repository, backup_sets={**repository.backup_sets, backup_set_id: backup_set})
@@ -133,7 +130,7 @@ class RepositoryAdminService:
         """Retire the repository and remove its unprotected snapshots."""
         metadata_path = lock.require_held_for(repository.path / _METADATA_NAME)
         if repository.deleted:
-            self._sync_directory(metadata_path.parent)
+            sync_directory(metadata_path.parent)
         else:
             backup_sets = {set_id: replace(backup_set, deleted=True) for set_id, backup_set in repository.backup_sets.items()}
             repository = replace(repository, backup_sets=backup_sets, deleted=True)
@@ -157,18 +154,10 @@ class RepositoryAdminService:
 
         parents = dict.fromkeys(directory.parent for directory in directories)
         for directory in (*directories, *parents):
-            self._sync_directory(directory)
+            sync_directory(directory)
 
         for key_id in new_key_ids:
             LocationIndex().save_to(repository.index_directory / str(key_id), lock)
-
-    @staticmethod
-    def _sync_directory(directory: Path) -> None:
-        fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
 
     def set_mode(self, repository: Repository, mode: BackupMode, lock: RepositoryLock) -> None:
         """Persist the mode using the repository and lock from locked_repository()."""
@@ -188,7 +177,7 @@ class RepositoryAdminService:
                 metadata: object = json.load(source)
         except FileNotFoundError as error:
             self._raise_missing_repository_metadata(error)
-        if not _is_json_object(metadata):
+        if not is_json_object(metadata):
             raise ValueError("Unsupported repository metadata format")
         version = metadata.get("version")
         if type(version) is not int or version != _METADATA_VERSION:
@@ -197,7 +186,7 @@ class RepositoryAdminService:
         stored_id = metadata.get("client_id")
         mode = metadata.get("mode")
         backup_sets = metadata.get("backup_sets")
-        if not isinstance(stored_id, str) or not _is_json_object(backup_sets):
+        if not isinstance(stored_id, str) or not is_json_object(backup_sets):
             raise ValueError("Invalid repository metadata")
         if UUID(stored_id) != client_id:
             raise ValueError("Repository client ID does not match")
@@ -210,30 +199,25 @@ class RepositoryAdminService:
 
         sets: dict[UUID, BackupSet] = {}
         for set_id, entry in backup_sets.items():
-            if not isinstance(set_id, str) or not _is_json_object(entry):
+            if not isinstance(set_id, str) or not is_json_object(entry):
                 raise ValueError("Invalid repository backup set metadata")
             key_id, deleted = entry.get("key_id"), entry.get("deleted")
-            if not isinstance(key_id, str) or not isinstance(deleted, bool):
+            name = entry.get("name")
+            if not isinstance(key_id, str) or not isinstance(deleted, bool) or (name is not None and not isinstance(name, str)):
                 raise ValueError("Invalid repository backup set metadata")
             backup_set_id = UUID(set_id)
             if backup_set_id in sets:
                 raise ValueError(f"Duplicate backup set ID: {backup_set_id}")
-            sets[backup_set_id] = BackupSet(backup_set_id, UUID(key_id), deleted=deleted)
+            sets[backup_set_id] = BackupSet(backup_set_id, UUID(key_id), deleted=deleted, name=name)
         if repository_deleted and any(not backup_set.deleted for backup_set in sets.values()):
             raise InconsistentStateError("Deleted repository contains active backup sets.")
         return Repository(path, client_id, sets, mode=mode, deleted=repository_deleted)
 
     def _write_metadata(self, repository: Repository, lock: RepositoryLock) -> None:
-        sets: dict[str, dict[str, str | bool]] = {str(backup_set.backup_set_id): {"key_id": str(backup_set.key_id), "deleted": backup_set.deleted} for backup_set in repository.backup_sets.values()}
-        self._write_json(repository.path / _METADATA_NAME, lock, {"version": _METADATA_VERSION, "client_id": str(repository.client_id), "mode": repository.mode, "deleted": repository.deleted, "backup_sets": sets})
-
-    def _write_json(self, path: Path, lock: RepositoryLock, data: dict[str, object]) -> None:
-        path = lock.require_held_for(path)
-        with NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, prefix=f".{path.stem}-", delete_on_close=False) as output:
-            json.dump(data, output, indent=2)
-            output.write("\n")
-            output.flush()
-            os.fsync(output.fileno())
-            output.close()
-            os.replace(output.name, path)
-        self._sync_directory(path.parent)
+        sets: dict[str, dict[str, str | bool]] = {}
+        for backup_set in repository.backup_sets.values():
+            entry: dict[str, str | bool] = {"key_id": str(backup_set.key_id), "deleted": backup_set.deleted}
+            if backup_set.name is not None:
+                entry["name"] = backup_set.name
+            sets[str(backup_set.backup_set_id)] = entry
+        write_json(repository.path / _METADATA_NAME, lock, {"version": _METADATA_VERSION, "client_id": str(repository.client_id), "mode": repository.mode, "deleted": repository.deleted, "backup_sets": sets})

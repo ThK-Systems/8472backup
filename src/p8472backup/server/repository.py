@@ -14,11 +14,16 @@ type BackupMode = Literal["pull", "push"]
 
 @dataclass(frozen=True)
 class BackupSet:
-    """Identify one backup set, its key domain, and its deletion state."""
+    """Describe a registered backup set and its key domain."""
 
     backup_set_id: UUID
     key_id: UUID
     deleted: bool = False
+    name: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.name is not None and (not self.name.strip() or not self.name.isprintable()):
+            raise ValueError("Backup set name must be a single printable line")
 
 
 @dataclass(frozen=True)
@@ -75,5 +80,5 @@ class Repository:
         return self.path / "snapshots"
 
     def snapshot_file(self, backup_set_id: UUID, snapshot_id: UUID) -> Path:
-        """Return the file for the given snapshot in the selected backup set."""
-        return self.snapshots_root / str(backup_set_id) / f"{snapshot_id}.snapshot"
+        """Return the metadata file for the snapshot in the selected backup set."""
+        return self.snapshots_root / str(backup_set_id) / f"{snapshot_id}.json"

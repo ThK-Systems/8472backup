@@ -1,7 +1,7 @@
 from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 from uuid import UUID
 
 import pytest
@@ -83,6 +83,12 @@ def test_snapshot_catalogue_resolves_objects_through_saved_index(tmp_path: Path,
     restored_file = b"".join(DataContent.from_plaintext(restored[chunk_id]).data for chunk_id in metadata.chunk_ids)
     assert restored_file == chunk
 
+    catalogue_path = repository.snapshot_file(_BACKUP_SET_ID, committed.snapshot_id).with_suffix(".catalog")
+    with catalogue_path.open("ab") as catalogue_output:
+        catalogue_output.write(b"z" * 32)
+    with pytest.raises(ValueError, match="Invalid snapshot object catalogue"):
+        snapshot_service.get_snapshot(repository, _BACKUP_SET_ID, committed.snapshot_id)
+
 
 def test_create_snapshot_allocates_past_an_unindexed_pack(repository: Repository, snapshot_service: SnapshotService) -> None:
     directory = repository.packs_root / str(_KEY_DOMAIN_ID)
@@ -117,6 +123,23 @@ def test_failed_index_save_does_not_publish_snapshot(repository: Repository, sna
     assert not list((repository.snapshots_root / str(_BACKUP_SET_ID)).iterdir())
     with RepositoryLock(repository.path) as lock:
         assert LocationIndex.load_from(repository.index_directory / str(_KEY_DOMAIN_ID), lock).get(root.object_id) is None
+
+
+def test_failed_register_write_leaves_snapshot_unpublished(repository: Repository, snapshot_service: SnapshotService) -> None:
+    snapshot_id = UUID(int=42)
+    root = Object(TYPE_SNAPSHOT, b"r" * 32, 1)
+    with (
+        RepositoryAdminService().locked_repository(repository.path.parent, _CLIENT_ID) as (current, lock),
+        patch.object(SnapshotService, "_write_registry", side_effect=OSError("register write failed")),
+        pytest.raises(OSError, match="register write failed"),
+    ):
+        snapshot_service.create_snapshot(current, _BACKUP_SET_ID, iter(((root, BytesIO(b"r")),)), root.object_id, lock=lock, snapshot_id=snapshot_id)
+
+    path = repository.snapshot_file(_BACKUP_SET_ID, snapshot_id)
+    assert path.is_file()
+    assert path.with_suffix(".catalog").is_file()
+    with pytest.raises(FileNotFoundError, match="Snapshot is not published"):
+        snapshot_service.get_snapshot(repository, _BACKUP_SET_ID, snapshot_id)
 
 
 @pytest.mark.parametrize("target_size", (1, 1_000))
