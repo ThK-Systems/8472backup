@@ -408,6 +408,7 @@ def test_list_groups_published_snapshots_and_formats_protection(tmp_path: Path) 
     service = ServerFacade(tmp_path, server_fqdn=_SERVER_FQDN, protection_duration=timedelta(days=10))
     service.init_repository(_CLIENT_ID, {_FIRST_SET: _KEY_ID}, backup_set_names={_FIRST_SET: "documents"})
     service.add_backup_set(_CLIENT_ID, _SECOND_SET, _KEY_ID, name="everything")
+    service.add_backup_set(_CLIENT_ID, _THIRD_SET, _KEY_ID)
     snapshots = SnapshotService()
     root = Object(TYPE_SNAPSHOT, b"r" * 32, 1)
     started_at = datetime(2026, 1, 1, tzinfo=UTC)
@@ -433,15 +434,17 @@ def test_list_groups_published_snapshots_and_formats_protection(tmp_path: Path) 
     assert snapshots.get_snapshot(repository, _FIRST_SET, latest.snapshot_id).comment == "Before upgrade"
     date_header = f"{'COMMITTED AT (UTC)':25}  PROTECTED"
     assert str(listing).splitlines() == [
-        f"Repository  {_SERVER_FQDN}:8472backup/{_CLIENT_ID}",
-        "Backup set  documents",
+        f"# Repository  {_SERVER_FQDN}:8472backup/{_CLIENT_ID}",
         "",
+        f"## Backup set  documents ({_FIRST_SET})",
         f"{'SNAPSHOT ID':36}  {'COMMENT':14}  {date_header}",
         f"{latest.snapshot_id}  Before upgrade  2026-01-02 00:00:00 (Fri)  true",
         f"{old.snapshot_id}  {'':14}  2026-01-01 00:00:00 (Thu)  false",
         "",
-        "Backup set  everything",
-        "",
+        f"## Backup set  everything ({_SECOND_SET})",
         f"{'SNAPSHOT ID':36}  {date_header}",
         f"{other.snapshot_id}  2026-01-02 00:00:00 (Fri)  true",
+        "",
+        f"## Backup set  {_THIRD_SET}",
+        f"{'SNAPSHOT ID':36}  {date_header}",
     ]

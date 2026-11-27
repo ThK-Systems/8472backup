@@ -35,11 +35,12 @@ class SnapshotListing:
     backup_sets: tuple[BackupSetListing, ...]
 
     def __str__(self) -> str:
-        lines = [f"Repository  {self.repository_address}"]
+        lines = [f"# Repository  {self.repository_address}"]
         for backup_set in self.backup_sets:
-            if len(lines) > 1:
-                lines.append("")
-            lines.extend((f"Backup set  {backup_set.name}", ""))
+            lines.append("")
+            backup_set_id = str(backup_set.backup_set_id)
+            label = f"{backup_set.name} ({backup_set_id})" if backup_set.name != backup_set_id else backup_set_id
+            lines.append(f"## Backup set  {label}")
             comments = ["".join(character if character.isprintable() else " " for character in (snapshot.comment or "")) for snapshot in backup_set.snapshots]
             comment_width = max(map(len, comments), default=0)
             header = [f"{'SNAPSHOT ID':36}"]
