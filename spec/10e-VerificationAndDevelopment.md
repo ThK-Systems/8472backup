@@ -1,6 +1,6 @@
 # 8472backup — Verification and Development
 
-Specification version: 0.67 — Use trusted server time for snapshot protection, 2026-11-27
+Specification version: 0.68 — Retire client repositories, 2026-11-27
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 
@@ -43,7 +43,7 @@ Tests must exercise behaviour and invariants, not merely mirror implementation. 
 | A snapshot commit or expiry check encounters an invalid trusted clock | The operation reports the clock error. No snapshot is published or deleted. |
 | A backup set is retired | New backup runs stop. The server removes the set's unprotected snapshots and keeps protected snapshots available for restore. |
 | Snapshot removal fails after a set is marked deleted | The set stays deleted and a retry rechecks protection before removing the remaining eligible snapshots. |
-| A repository is retired | New backup runs stop and retained snapshots remain available until their retention and protection allow deletion. |
+| A repository is retired | The server durably marks the repository and all its sets as deleted before removing expired snapshots. New backups and set registration are rejected. Protected snapshots remain available for restore. |
 | Client supplies old/future timestamps | Trusted protection clock is unaffected |
 | Client floods new snapshots | Existing snapshots cannot be displaced inside their protection period |
 | Client submits deletion/overwrite/foreign IDs | Existing committed data and other scopes remain protected |

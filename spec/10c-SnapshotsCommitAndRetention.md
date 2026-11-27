@@ -1,6 +1,6 @@
 # 8472backup — Snapshots, Commit, and Retention
 
-Specification version: 0.67 — Use trusted server time for snapshot protection, 2026-11-27
+Specification version: 0.68 — Retire client repositories, 2026-11-27
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 
@@ -144,9 +144,9 @@ The client initiates repository setup in both modes. The server requires at leas
 
 `repository.json` in the repository root is UTF-8 JSON and contains both repository and backup-set metadata. Repository metadata includes the client UUID and mode. Set metadata is keyed by set UUID and includes its registered key-domain ID and the operational fields needed by the server. The façade must check the stored client UUID against the verified identity and resolve the key domain from the registered set. The exact schema for the pull SSH target, set names, scheduling, and retention remains OPEN.
 
-`Repository` represents the whole client repository. It holds the path, client UUID, mode, and all registered `BackupSet` records by set UUID. Each `BackupSet` holds its set UUID, key-domain UUID, and boolean `deleted` flag. `Repository.snapshots` is the immutable set of published `Snapshot` objects as of the lookup. `RepositoryAdminService` reads and writes the repository and backup-set metadata using this model. It obtains the snapshots through `SnapshotService`.
+`Repository` represents the whole client repository. It holds the path, client UUID, mode, boolean `deleted` flag, and all registered `BackupSet` records by set UUID. Each `BackupSet` holds its set UUID, key-domain UUID, and boolean `deleted` flag. `Repository.snapshots` is the immutable set of published `Snapshot` objects as of the lookup. `RepositoryAdminService` reads and writes the repository and backup-set metadata using this model. It obtains the snapshots through `SnapshotService`.
 
-`ServerService.init_repository()` takes the verified client UUID, the initial set-to-key-domain mapping, and the mode. It returns the repository with all its initial sets and an empty snapshot collection. In `repository.json` version 2, each entry in `backup_sets` is keyed by the set UUID and contains a UUID string `key_id` and a boolean `deleted`. When reading version 1, the direct UUID mapping supplies the key-domain IDs and all sets are treated as active. A metadata write stores version 2. Initialization also creates `snapshot-registry.json` with `version` set to `1` and an empty `snapshots` object.
+`ServerService.init_repository()` takes the verified client UUID, the initial set-to-key-domain mapping, and the mode. It returns the repository with all its initial sets and an empty snapshot collection. The current `repository.json` format uses version 1 and requires a repository-level boolean `deleted`. Each entry in `backup_sets` is keyed by set UUID and contains a UUID string `key_id` and a boolean `deleted`. Initialization also creates `snapshot-registry.json` with `version` set to `1` and an empty `snapshots` object. Keep the metadata format version at 1 during pre-release development.
 
 `ServerService.add_backup_set()` opens the repository through `RepositoryAdminService.locked_repository()` using the verified client UUID. This context acquires the repository lock, reads the current metadata, and checks the stored client identity. The façade passes the resulting `Repository` and the held lock to `RepositoryAdminService.add_backup_set()` along with the new set and key-domain UUIDs. The service rejects an already registered set, creates the set's snapshot directory, and prepares an empty index and pack directory for a new key domain. A registered key domain reuses its existing index and packs. After the new storage is durable, the service updates the repo's set mapping in `repository.json`. Existing unregistered storage is reported as an inconsistent state for the backup server administrator to inspect.
 
@@ -239,9 +239,11 @@ The server MUST enforce protection at every application-level deletion path, not
 
 The local implementation uses the server-side protection duration supplied at façade construction, with a seven-day default. It deletes the eligible published `.snapshot` files and syncs the set directory. Repeating the operation on a deleted set can remove snapshots whose protection has since expired. If removal fails after persisting the flag, the set stays deleted and the caller can retry. The index and packs remain available for restore and subsequent compaction.
 
-`remove_repository` will mark the repository as `removed`, stopping new backups in all its sets and preserving access to retained snapshots. The asynchronous cleanup job will check retired scopes during idle periods and call `RepositoryAdminService.delete_backup_set()` or `RepositoryAdminService.delete()` for final deletion. Under the repository lock, check the retirement state, the applicable retention and effective protection rules, and active use before deleting the set or repository. The repository's compaction rules govern reclamation of objects in shared packs.
+`ServerService.remove_repository()` acquires the repository lock for the verified client. `RepositoryAdminService` durably sets `deleted` to true for the repository and all its sets in a single metadata write. This blocks new backups and backup-set registration in that repository. Under the same lock, the service uses the existing snapshot removal logic for each set. It removes snapshots strictly past their effective protection deadline and keeps protected snapshots available for recovery. The caller can retry after a cleanup error or to remove snapshots whose protection has since expired.
 
-OPEN questions include calendar retention after repository retirement, remote removal permissions, coordination with scheduled jobs, and recovery after interrupted final deletion.
+The asynchronous cleanup job will check retired scopes during idle periods and call `RepositoryAdminService.delete_backup_set()` or `RepositoryAdminService.delete()` for final deletion. Under the repository lock, check the deletion flags, effective protection deadlines, and active use before deleting the set or repository. Repository compaction reclaims shared pack storage after set removal. Final repository deletion can reclaim the whole storage directory once all snapshots are eligible.
+
+OPEN questions include remote removal permissions, coordination with scheduled jobs, and recovery after interrupted final deletion.
 
 ### 12.1 Liveness and garbage collection
 
