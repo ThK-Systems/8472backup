@@ -53,6 +53,23 @@ class _SnapshotRegistry:
     pending_deletions: dict[UUID, UUID]
 
 
+@dataclass
+class SnapshotReader:
+    """Hold the metadata and location index for an opened snapshot."""
+
+    _metadata: _SnapshotMetadata
+    _index: LocationIndex | None
+
+    @property
+    def root_id(self) -> ObjectId:
+        """Return the object ID where restoration starts."""
+        return self._metadata.root_id
+
+    def close(self) -> None:
+        """Release the in-memory index at the end of the restore."""
+        self._index = None
+
+
 class SnapshotService:
     """Use one repository, backup set, and key domain for snapshot operations."""
 
@@ -223,9 +240,20 @@ class SnapshotService:
         """Load a committed snapshot in this service's client and backup set."""
         repository.get_backup_set(backup_set_id)
         with RepositoryLock(repository.path) as lock:
-            if self._read_registry(repository, lock).snapshots.get(snapshot_id) != backup_set_id:
-                raise FileNotFoundError(f"Snapshot is not published in this set: {snapshot_id}")
+            self._require_published_snapshot(repository, backup_set_id, snapshot_id, lock)
             return self._load_snapshot(repository, backup_set_id, snapshot_id, lock)
+
+    def open_snapshot(self, repository: Repository, backup_set: BackupSet, snapshot_id: UUID, lock: RepositoryLock) -> SnapshotReader:
+        """Open a published snapshot and its index under the caller's repository lock."""
+        backup_set_id = backup_set.backup_set_id
+        self._require_published_snapshot(repository, backup_set_id, snapshot_id, lock)
+        metadata = self._read_snapshot_metadata(repository, backup_set_id, snapshot_id, lock)
+        index = LocationIndex.load_from(repository.index_directory / str(backup_set.key_id), lock)
+        return SnapshotReader(metadata, index)
+
+    def _require_published_snapshot(self, repository: Repository, backup_set_id: UUID, snapshot_id: UUID, lock: RepositoryLock) -> None:
+        if self._read_registry(repository, lock).snapshots.get(snapshot_id) != backup_set_id:
+            raise FileNotFoundError(f"Snapshot is not published in this set: {snapshot_id}")
 
     def list_snapshots(self, repository: Repository, lock: RepositoryLock) -> frozenset[Snapshot]:
         """Load published metadata and defer catalogue reads under the given lock."""

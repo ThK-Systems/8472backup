@@ -33,7 +33,9 @@ Connect the local `list` façade method to the authorized client command. The lo
 
 ## 6. Shared object read path
 
-Serve objects for restore, recover, and mount. Check requested IDs against the selected snapshot's catalogue, find them through the location index, and verify that the record at the indexed pack offset matches the requested object ID and expected length. The current `get_snapshot()` operation returns the snapshot record.
+The local `ServerFacade.restore()` context opens a published snapshot and loads its key-domain index once. It exposes the snapshot root ID and holds the repository lock until the context exits. `get_snapshot()` returns the snapshot record.
+
+Serve objects for restore, recover, and mount. Check requested IDs against the selected snapshot's catalogue, find them through the location index, and verify that the record at the indexed pack offset matches the requested object ID and expected length.
 
 ## 7. Directory tree and snapshot description
 

@@ -1,3 +1,4 @@
+import gc
 import os
 import signal
 from collections.abc import Iterator
@@ -9,6 +10,7 @@ from pathlib import Path
 from typing import BinaryIO
 from unittest.mock import Mock, patch
 from uuid import UUID
+from weakref import ReferenceType, ref
 
 import pytest
 
@@ -31,6 +33,8 @@ from p8472backup.storage.file.packs import Pack
 _CLIENT_ID = UUID(int=1)
 _SET_ID = UUID(int=2)
 _KEY_ID = UUID(int=3)
+_OTHER_SET_ID = UUID(int=4)
+_OTHER_KEY_ID = UUID(int=5)
 _SERVER_FQDN = "backup.example.net"
 _NOW = datetime(2026, 1, 1, tzinfo=UTC)
 _CHUNK_SIZE = 8
@@ -132,6 +136,61 @@ def test_backup_and_incremental_backup_restore_both_file_versions(tmp_path: Path
         assert _read_fixture_file(original, opened, index, lock) == _ORIGINAL
         assert _read_fixture_file(current, opened, index, lock) == updated
     facade.check(_CLIENT_ID)
+
+
+def test_restore_keeps_the_selected_index_and_repository_lock_for_the_context(backup_repository: tuple[ServerFacade, Repository]) -> None:
+    facade, repository = backup_repository
+    facade.add_backup_set(_CLIENT_ID, _OTHER_SET_ID, _OTHER_KEY_ID)
+    snapshot = facade.backup(_CLIENT_ID, _OTHER_SET_ID, iter(((_ROOT, BytesIO(_ROOT_BODY)),)), prune="")
+    original_load = LocationIndex.load_from
+    loaded_indexes: list[ReferenceType[LocationIndex]] = []
+
+    def track_index_load(path: Path, lock: RepositoryLock) -> LocationIndex:
+        assert path == repository.index_directory / str(_OTHER_KEY_ID)
+        index = original_load(path, lock)
+        loaded_indexes.append(ref(index))
+        return index
+
+    with patch.object(LocationIndex, "load_from", side_effect=track_index_load), facade.restore(_CLIENT_ID, _OTHER_SET_ID, snapshot.snapshot_id) as reader:
+        assert reader.root_id == _ROOT.object_id
+        (index_ref,) = loaded_indexes
+        assert index_ref() is not None
+        with pytest.raises(BlockingIOError), RepositoryLock(repository.path):
+            pytest.fail("Restore did not hold the repository lock")
+
+    gc.collect()
+    assert index_ref() is None
+    with RepositoryLock(repository.path) as lock:
+        lock.require_held()
+
+
+def test_restore_rejects_a_snapshot_from_another_set_in_the_same_key_domain(backup_repository: tuple[ServerFacade, Repository]) -> None:
+    facade, _ = backup_repository
+    facade.add_backup_set(_CLIENT_ID, _OTHER_SET_ID, _KEY_ID)
+    snapshot = facade.backup(_CLIENT_ID, _SET_ID, iter(((_ROOT, BytesIO(_ROOT_BODY)),)), prune="")
+
+    with pytest.raises(FileNotFoundError, match="Snapshot is not published in this set"), facade.restore(_CLIENT_ID, _OTHER_SET_ID, snapshot.snapshot_id):
+        pytest.fail("Restore opened a snapshot from another set")
+
+
+def test_restore_opens_a_published_snapshot_in_a_retired_repository(backup_repository: tuple[ServerFacade, Repository]) -> None:
+    facade, _ = backup_repository
+    snapshot = facade.backup(_CLIENT_ID, _SET_ID, iter(((_ROOT, BytesIO(_ROOT_BODY)),)), prune="")
+    facade.remove_repository(_CLIENT_ID)
+
+    with facade.restore(_CLIENT_ID, _SET_ID, snapshot.snapshot_id) as reader:
+        assert reader.root_id == snapshot.root_id
+
+
+def test_restore_releases_the_repository_lock_after_an_error(backup_repository: tuple[ServerFacade, Repository]) -> None:
+    facade, repository = backup_repository
+    snapshot = facade.backup(_CLIENT_ID, _SET_ID, iter(((_ROOT, BytesIO(_ROOT_BODY)),)), prune="")
+
+    with pytest.raises(OSError, match="Restore output failed"), facade.restore(_CLIENT_ID, _SET_ID, snapshot.snapshot_id):
+        raise OSError("Restore output failed")
+
+    with RepositoryLock(repository.path) as lock:
+        lock.require_held()
 
 
 @pytest.mark.parametrize("root_is_indexed", (False, True))

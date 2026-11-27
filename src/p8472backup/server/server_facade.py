@@ -1,6 +1,7 @@
 """Server operations scoped to a verified backup client."""
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Generator, Iterator, Mapping
+from contextlib import contextmanager
 from datetime import timedelta
 from pathlib import Path
 from typing import BinaryIO
@@ -14,7 +15,7 @@ from p8472backup.server.repository_admin_service import RepositoryAdminService
 from p8472backup.server.retention.policy import parse_prune_rule
 from p8472backup.server.snapshot import Snapshot
 from p8472backup.server.snapshot_listing import SnapshotListing
-from p8472backup.server.snapshot_service import DEFAULT_PROTECTION_DURATION, SnapshotService, backup_temporary_prefix
+from p8472backup.server.snapshot_service import DEFAULT_PROTECTION_DURATION, SnapshotReader, SnapshotService, backup_temporary_prefix
 
 
 class ServerFacade:
@@ -88,6 +89,18 @@ class ServerFacade:
                 scope += f" snapshot_id={snapshot_id}"
             Log.warning("Operation backup failed %s reason=%s", scope, type(error).__name__)
             raise
+
+    @contextmanager
+    def restore(self, client_id: UUID, backup_set_id: UUID, snapshot_id: UUID) -> Generator[SnapshotReader, None, None]:
+        """Keep a published snapshot open under the repository lock for restoration."""
+        with RepositoryAdminService().locked_repository(self._storage_root, client_id, operation="restore", backup_set_id=backup_set_id) as (repository, lock):
+            backup_set = repository.get_backup_set(backup_set_id)
+            reader = SnapshotService().open_snapshot(repository, backup_set, snapshot_id, lock)
+            try:
+                Log.info("Snapshot opened for restore client_id=%s backup_set_id=%s snapshot_id=%s", client_id, backup_set_id, snapshot_id)
+                yield reader
+            finally:
+                reader.close()
 
     def cleanup(self, client_id: UUID, backup_set_id: UUID) -> int:
         """Clean up stopped backup runs for the selected set."""
