@@ -7,6 +7,7 @@ from typing import BinaryIO
 from uuid import UUID
 
 from p8472backup.archive.objects import Object, ObjectId
+from p8472backup.common.error import InconsistentStateError
 from p8472backup.server.repository import BackupMode, Repository
 from p8472backup.server.repository_admin_service import RepositoryAdminService
 from p8472backup.server.snapshot import Snapshot
@@ -84,6 +85,14 @@ class ServerFacade:
         with RepositoryAdminService().locked_repository(self._storage_root, client_id) as (repository, lock):
             groups = SnapshotService().list_snapshot_entries(repository, lock, backup_set_id=backup_set_id, protection_duration=self._protection_duration)
             return SnapshotListing(f"{self._server_fqdn}:8472backup/{repository.client_id}", groups)
+
+    def check(self, client_id: UUID) -> None:
+        """Verify repository consistency under the usual exclusive lock."""
+        try:
+            with RepositoryAdminService().locked_repository(self._storage_root, client_id) as (repository, lock):
+                SnapshotService().check(repository, lock)
+        except ValueError as error:
+            raise InconsistentStateError(f"repository.json: {error}") from error
 
     @staticmethod
     def version() -> str:

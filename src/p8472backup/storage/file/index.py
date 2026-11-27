@@ -49,6 +49,10 @@ class LocationIndex:
         self._count = 0
         self._dirty = True
 
+    def __len__(self) -> int:
+        """Return the number of indexed objects."""
+        return self._count
+
     def _find_bucket(self, object_id: ObjectId, buckets: array[int]) -> int:
         """Find the matching bucket or the first free bucket in its probe sequence."""
         # Count the available buckets.
@@ -97,6 +101,21 @@ class LocationIndex:
         pack_id, pack_offset, length = _LOCATION_FIELDS.unpack_from(self._records, offset)
         # Return the decoded location.
         return ObjectLocation(pack_id, pack_offset, length)
+
+    def record_number(self, object_id: ObjectId) -> int | None:
+        """Find an object's zero-based record number in this index."""
+        Object.validate_object_id(object_id)
+        position = self._buckets[self._find_bucket(object_id, self._buckets)]
+        return position - 1 if position else None
+
+    def pack_entry_counts(self) -> dict[int, int]:
+        """Count indexed records by pack without materializing the locations."""
+        counts: dict[int, int] = {}
+        for offset in range(OBJECT_ID_SIZE, len(self._records), _RECORD_SIZE):
+            pack_id: int
+            pack_id, _, _ = _LOCATION_FIELDS.unpack_from(self._records, offset)
+            counts[pack_id] = counts.get(pack_id, 0) + 1
+        return counts
 
     def put(self, object_id: ObjectId, location: ObjectLocation) -> None:
         """Insert a location only if the supplied object ID is absent.

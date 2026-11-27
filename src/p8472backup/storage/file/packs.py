@@ -142,6 +142,24 @@ class Pack:
         return pack
 
     @classmethod
+    def iter_object_headers(cls, path: Path) -> Iterator[tuple[int, Object]]:
+        """Validate a pack's record boundaries as its object headers are consumed."""
+        with path.open("rb") as source:
+            pack = cls._load_header(source)
+            end = HEADER_SIZE + pack.body_length
+            offset = HEADER_SIZE
+            for _ in range(pack.object_count):
+                source.seek(offset)
+                obj = Object.from_header(source.read(OBJECT_HEADER_SIZE))
+                next_offset = offset + OBJECT_HEADER_SIZE + obj.length
+                if next_offset > end:
+                    raise ValueError("Object record extends past the pack body")
+                yield offset, obj
+                offset = next_offset
+            if offset != end:
+                raise ValueError("Object records do not fill the declared pack body")
+
+    @classmethod
     def read_object(cls, path: Path, offset: int, length: int, output: BinaryIO) -> Object:
         """Read a record at a known location and copy its body to output."""
         with path.open("rb") as source:

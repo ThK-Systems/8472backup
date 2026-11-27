@@ -13,7 +13,7 @@ from tempfile import NamedTemporaryFile
 from typing import BinaryIO
 from uuid import UUID, uuid4
 
-from p8472backup.archive.objects import OBJECT_ID_SIZE, TYPE_SNAPSHOT, Object, ObjectId
+from p8472backup.archive.objects import HEADER_SIZE as OBJECT_HEADER_SIZE, OBJECT_ID_SIZE, TYPE_SNAPSHOT, Object, ObjectId
 from p8472backup.common.error import InconsistentStateError
 from p8472backup.server import trusted_time
 from p8472backup.server.repository import BackupSet, Repository
@@ -142,6 +142,84 @@ class SnapshotService:
             rows.sort(key=lambda entry: (entry.committed_at, entry.snapshot_id), reverse=True)
             groups.append(BackupSetListing(set_id, backup_set.name or str(set_id), tuple(rows)))
         return tuple(groups)
+
+    def check(self, repository: Repository, lock: RepositoryLock) -> None:
+        """Verify published snapshots and indexed packs without modifying repository data."""
+        try:
+            registry = self._read_registry(repository, lock)
+        except (OSError, ValueError, InconsistentStateError) as error:
+            raise InconsistentStateError(self._check_file_error(repository, repository.path / SNAPSHOT_REGISTRY_NAME, error)) from error
+
+        domains: dict[UUID, list[tuple[UUID, UUID]]] = {backup_set.key_id: [] for backup_set in repository.backup_sets.values()}
+        for snapshot_id, set_id in registry.snapshots.items():
+            domains[repository.get_backup_set(set_id).key_id].append((set_id, snapshot_id))
+
+        findings: list[str] = []
+        for key_id, snapshots in domains.items():
+            self._check_key_domain(repository, lock, key_id, snapshots, findings)
+        if findings:
+            raise InconsistentStateError("\n".join(findings))
+
+    def _check_key_domain(self, repository: Repository, lock: RepositoryLock, key_id: UUID, snapshots: list[tuple[UUID, UUID]], findings: list[str]) -> None:
+        index_path = repository.index_directory / str(key_id)
+        try:
+            index: LocationIndex | None = LocationIndex.load_from(index_path, lock)
+        except (OSError, ValueError) as error:
+            findings.append(self._check_file_error(repository, index_path, error))
+            index = None
+
+        roots: set[ObjectId] = set()
+        for set_id, snapshot_id in snapshots:
+            path = repository.snapshot_file(set_id, snapshot_id)
+            try:
+                metadata = self._read_snapshot_metadata(repository, set_id, snapshot_id, lock)
+            except (OSError, ValueError, OverflowError) as error:
+                findings.append(self._check_file_error(repository, path, error))
+                continue
+            roots.add(metadata.root_id)
+            try:
+                self._check_catalogue(path, lock, metadata, index)
+            except (OSError, ValueError) as error:
+                findings.append(self._check_file_error(repository, path.with_suffix(".catalog"), error))
+
+        if index is None:
+            return
+        for pack_id, unmatched in index.pack_entry_counts().items():
+            path = repository.packs_root / str(key_id) / f"{pack_id}.pack"
+            try:
+                for offset, obj in Pack.iter_object_headers(lock.require_held_for(path)):
+                    if index.get(obj.object_id) != ObjectLocation(pack_id, offset, OBJECT_HEADER_SIZE + obj.length):
+                        continue
+                    unmatched -= 1
+                    if obj.object_type != TYPE_SNAPSHOT and obj.object_id in roots:
+                        findings.append(f"{path.relative_to(repository.path)}: snapshot root {obj.object_id.hex()} has unexpected object type {obj.object_type}")
+            except (OSError, ValueError) as error:
+                findings.append(self._check_file_error(repository, path, error))
+                continue
+            if unmatched:
+                findings.append(f"{path.relative_to(repository.path)}: indexed locations missing from pack headers: {unmatched}")
+
+    def _check_file_error(self, repository: Repository, path: Path, error: Exception) -> str:
+        detail = error.strerror if isinstance(error, OSError) and error.strerror else str(error)
+        return f"{path.relative_to(repository.path)}: {detail}"
+
+    def _check_catalogue(self, path: Path, lock: RepositoryLock, metadata: _SnapshotMetadata, index: LocationIndex | None) -> None:
+        seen = bytearray((len(index) + 7) // 8) if index is not None else bytearray()
+        missing = duplicates = 0
+        for object_id in self._iter_catalogue_ids(path, lock, metadata):
+            if index is None:
+                continue
+            number = index.record_number(object_id)
+            if number is None:
+                missing += 1
+                continue
+            byte, bit = divmod(number, 8)
+            mask = 1 << bit
+            if seen[byte] & mask:
+                duplicates += 1
+            seen[byte] |= mask
+        if missing or duplicates:
+            raise ValueError(f"Invalid snapshot object catalogue (missing index references: {missing}, duplicate entries: {duplicates})")
 
     def prune(self, repository: Repository, backup_set: BackupSet, lock: RepositoryLock, *, prune_rule: str, protection_duration: timedelta) -> tuple[UUID, ...]:
         """Apply the calendar policy to the published snapshots of one active set."""
@@ -327,17 +405,27 @@ class SnapshotService:
             raise ValueError("Snapshot protection deadline precedes commit time")
         return _SnapshotMetadata(root_id, committed_at.astimezone(UTC), protected_until.astimezone(UTC), checksum, comment)
 
-    def _read_catalogue(self, path: Path, lock: RepositoryLock, metadata: _SnapshotMetadata) -> ObjectCatalogue:
+    def _iter_catalogue_ids(self, path: Path, lock: RepositoryLock, metadata: _SnapshotMetadata) -> Iterator[ObjectId]:
         checksum = sha256()
-        object_ids: set[ObjectId] = set()
+        root_found = False
         with lock.require_held_for(path.with_suffix(".catalog")).open("rb") as source:
             while object_id := source.read(OBJECT_ID_SIZE):
-                if len(object_id) != OBJECT_ID_SIZE or object_id in object_ids:
-                    raise ValueError("Invalid snapshot object catalogue")
+                if len(object_id) != OBJECT_ID_SIZE:
+                    raise ValueError("Invalid snapshot object catalogue: truncated object ID")
                 checksum.update(object_id)
-                object_ids.add(object_id)
-        if metadata.root_id not in object_ids or checksum.digest() != metadata.catalogue_checksum:
-            raise ValueError("Invalid snapshot object catalogue")
+                root_found |= object_id == metadata.root_id
+                yield object_id
+        if checksum.digest() != metadata.catalogue_checksum:
+            raise ValueError("Invalid snapshot object catalogue: checksum mismatch")
+        if not root_found:
+            raise ValueError("Invalid snapshot object catalogue: snapshot root is missing")
+
+    def _read_catalogue(self, path: Path, lock: RepositoryLock, metadata: _SnapshotMetadata) -> ObjectCatalogue:
+        object_ids: set[ObjectId] = set()
+        for object_id in self._iter_catalogue_ids(path, lock, metadata):
+            if object_id in object_ids:
+                raise ValueError("Invalid snapshot object catalogue: duplicate object ID")
+            object_ids.add(object_id)
         return ObjectCatalogue(frozenset(object_ids))
 
     def _load_snapshot(self, repository: Repository, backup_set_id: UUID, snapshot_id: UUID, lock: RepositoryLock, *, defer_catalogue: bool = False) -> Snapshot:
