@@ -28,7 +28,7 @@ class RepositoryAdminService:
 
     @classmethod
     def find_by_client_id(cls, storage_root: Path, client_id: UUID) -> Repository:
-        """Load the repository for a verified client."""
+        """Load repository and published snapshot metadata for a verified client."""
         with cls().locked_repository(storage_root, client_id) as (repository, lock):
             return replace(repository, snapshots=SnapshotService().list_snapshots(repository, lock))
 

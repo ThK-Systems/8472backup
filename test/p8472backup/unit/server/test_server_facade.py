@@ -425,17 +425,17 @@ def test_list_groups_published_snapshots_and_formats_protection(tmp_path: Path) 
 
     assert tuple(group.backup_set_id for group in filtered.backup_sets) == (_SECOND_SET,)
     assert snapshots.get_snapshot(repository, _FIRST_SET, latest.snapshot_id).comment == "Before upgrade"
-    date_header = f"{'COMMITTED AT (UTC)':19}  PROTECTED"
+    date_header = f"{'COMMITTED AT (UTC)':25}  PROTECTED"
     assert str(listing).splitlines() == [
         f"Repository  {_SERVER_FQDN}:8472backup/{_CLIENT_ID}",
         "Backup set  documents",
         "",
         f"{'SNAPSHOT ID':36}  {'COMMENT':14}  {date_header}",
-        f"{latest.snapshot_id}  Before upgrade  2026-01-02 00:00:00  true",
-        f"{old.snapshot_id}  {'':14}  2026-01-01 00:00:00  false",
+        f"{latest.snapshot_id}  Before upgrade  2026-01-02 00:00:00 (Fri)  true",
+        f"{old.snapshot_id}  {'':14}  2026-01-01 00:00:00 (Thu)  false",
         "",
         "Backup set  everything",
         "",
         f"{'SNAPSHOT ID':36}  {date_header}",
-        f"{other.snapshot_id}  2026-01-02 00:00:00  true",
+        f"{other.snapshot_id}  2026-01-02 00:00:00 (Fri)  true",
     ]

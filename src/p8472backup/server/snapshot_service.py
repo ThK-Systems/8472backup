@@ -5,6 +5,7 @@ import os
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from hashlib import sha256
 from itertools import chain, count
 from pathlib import Path
@@ -95,7 +96,7 @@ class SnapshotService:
             root_id=root_id,
             committed_at=committed_at,
             protected_until=committed_at + protection_duration,
-            object_catalog=catalogue,
+            _catalogue=catalogue,
             comment=comment,
         )
         self._save_snapshot(snapshot, repository, path, lock)
@@ -112,9 +113,9 @@ class SnapshotService:
             return self._load_snapshot(repository, backup_set_id, snapshot_id, lock)
 
     def list_snapshots(self, repository: Repository, lock: RepositoryLock) -> frozenset[Snapshot]:
-        """Load the published snapshots and their catalogues."""
+        """Load published metadata and defer catalogue reads under the given lock."""
         registry = self._read_registry(repository, lock)
-        return frozenset(self._load_snapshot(repository, set_id, snapshot_id, lock) for snapshot_id, set_id in registry.items())
+        return frozenset(self._load_snapshot(repository, set_id, snapshot_id, lock, defer_catalogue=True) for snapshot_id, set_id in registry.items())
 
     def list_snapshot_entries(self, repository: Repository, lock: RepositoryLock, *, backup_set_id: UUID | None, protection_duration: timedelta) -> tuple[BackupSetListing, ...]:
         """Load the published metadata needed for the listing."""
@@ -282,17 +283,17 @@ class SnapshotService:
             raise ValueError("Invalid snapshot object catalogue")
         return ObjectCatalogue(frozenset(object_ids))
 
-    def _load_snapshot(self, repository: Repository, backup_set_id: UUID, snapshot_id: UUID, lock: RepositoryLock) -> Snapshot:
-        """Read a published snapshot and verify its catalogue."""
+    def _load_snapshot(self, repository: Repository, backup_set_id: UUID, snapshot_id: UUID, lock: RepositoryLock, *, defer_catalogue: bool = False) -> Snapshot:
+        """Read a published snapshot and load or defer its catalogue."""
         metadata = self._read_snapshot_metadata(repository, backup_set_id, snapshot_id, lock)
-        catalogue = self._read_catalogue(repository.snapshot_file(backup_set_id, snapshot_id), lock, metadata)
+        load_catalogue = partial(self._read_catalogue, repository.snapshot_file(backup_set_id, snapshot_id), lock, metadata)
         return Snapshot(
             snapshot_id=snapshot_id,
             backup_set_id=backup_set_id,
             root_id=metadata.root_id,
             committed_at=metadata.committed_at,
             protected_until=metadata.protected_until,
-            object_catalog=catalogue,
+            _catalogue=load_catalogue if defer_catalogue else load_catalogue(),
             comment=metadata.comment,
         )
 

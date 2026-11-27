@@ -88,6 +88,41 @@ def test_snapshot_catalogue_resolves_objects_through_saved_index(tmp_path: Path,
         catalogue_output.write(b"z" * 32)
     with pytest.raises(ValueError, match="Invalid snapshot object catalogue"):
         snapshot_service.get_snapshot(repository, _BACKUP_SET_ID, committed.snapshot_id)
+    with RepositoryAdminService().locked_repository(tmp_path, _CLIENT_ID) as (current, lock):
+        (deferred,) = snapshot_service.list_snapshots(current, lock)
+        with pytest.raises(ValueError, match="Invalid snapshot object catalogue"):
+            _ = deferred.object_catalog
+
+
+def test_snapshot_catalogue_loads_once_under_the_original_lock(repository: Repository, snapshot_service: SnapshotService) -> None:
+    admin = RepositoryAdminService()
+    storage_root = repository.path.parent
+    root = Object(TYPE_SNAPSHOT, b"r" * 32, 1)
+    with admin.locked_repository(storage_root, _CLIENT_ID) as (current, lock):
+        committed = snapshot_service.create_snapshot(current, _BACKUP_SET_ID, iter(((root, BytesIO(b"r")),)), root.object_id, lock=lock)
+
+    catalogue_path = repository.snapshot_file(_BACKUP_SET_ID, committed.snapshot_id).with_suffix(".catalog")
+    contents = catalogue_path.read_bytes()
+    catalogue_path.unlink()
+
+    reopened = admin.find_by_client_id(storage_root, _CLIENT_ID)
+    (detached,) = reopened.snapshots
+    assert reopened.snapshots == {committed}
+
+    with admin.locked_repository(storage_root, _CLIENT_ID) as (current, lock):
+        (deferred,) = snapshot_service.list_snapshots(current, lock)
+        with pytest.raises(RuntimeError, match="Repository lock is not held"):
+            _ = detached.object_catalog
+        with pytest.raises(FileNotFoundError):
+            _ = deferred.object_catalog
+
+        catalogue_path.write_bytes(contents)
+        catalogue = deferred.object_catalog
+        assert catalogue.object_ids == {root.object_id}
+        catalogue_path.unlink()
+        assert deferred.object_catalog is catalogue
+
+    assert deferred.object_catalog is catalogue
 
 
 def test_create_snapshot_allocates_past_an_unindexed_pack(repository: Repository, snapshot_service: SnapshotService) -> None:

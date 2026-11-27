@@ -5,6 +5,9 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 
+_WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+
+
 @dataclass(frozen=True)
 class SnapshotListEntry:
     """One published snapshot and its protection status at listing time."""
@@ -43,12 +46,13 @@ class SnapshotListing:
             if comment_width:
                 comment_width = max(comment_width, len("COMMENT"))
                 header.append(f"{'COMMENT':{comment_width}}")
-            header.extend((f"{'COMMITTED AT (UTC)':19}", "PROTECTED"))
+            header.extend((f"{'COMMITTED AT (UTC)':25}", "PROTECTED"))
             lines.append("  ".join(header))
             for snapshot, comment in zip(backup_set.snapshots, comments, strict=True):
                 fields = [str(snapshot.snapshot_id)]
                 if comment_width:
                     fields.append(f"{comment:{comment_width}}")
-                fields.extend((f"{snapshot.committed_at.astimezone(UTC):%Y-%m-%d %H:%M:%S}", str(snapshot.protected).lower()))
+                committed_at = snapshot.committed_at.astimezone(UTC)
+                fields.extend((f"{committed_at:%Y-%m-%d %H:%M:%S} ({_WEEKDAYS[committed_at.weekday()]})", str(snapshot.protected).lower()))
                 lines.append("  ".join(fields))
         return "\n".join(lines)

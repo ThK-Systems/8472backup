@@ -10,7 +10,7 @@ requirements and agreed architectural direction; early design phase. No producti
 
 Each completed snapshot MUST have its own stable identity and an encrypted root object describing how to reach its complete recoverable file selection. The server generates the snapshot UUID with `uuid4()` for every new snapshot.
 
-The immutable `Snapshot` dataclass in `server/snapshot.py` contains `snapshot_id` and `backup_set_id` as UUIDs, `root_id` as `ObjectId`, `committed_at` and `protected_until` as UTC `datetime` values, an optional `comment`, an `object_catalog` reference, and `version`, initially 1. `ObjectCatalogue` contains a `frozenset` of object IDs. `SnapshotService` uses the repository client ID and the selected backup-set ID when saving or loading a record. Section 11 defines the persistent representation.
+The immutable `Snapshot` dataclass in `server/snapshot.py` contains `snapshot_id` and `backup_set_id` as UUIDs, `root_id` as `ObjectId`, `committed_at` and `protected_until` as UTC `datetime` values, an optional `comment`, and `version`, initially 1. Its `object_catalog` property returns an `ObjectCatalogue` containing a `frozenset` of object IDs. `SnapshotService` uses the repository client ID and the selected backup-set ID when saving or loading a record. Section 11 defines the persistent representation.
 
 Snapshot annotations use the shared `ObjectId` alias from `archive/objects.py` for the root ID and catalogue members.
 
@@ -155,6 +155,8 @@ The client initiates repository setup in both modes. The server requires at leas
 `server.snapshot_service.SnapshotService` is stateless. Its create and read operations accept a `Repository` and an explicit backup-set UUID. The service uses the selected set's key domain for index and pack access. It owns snapshot reads, writes, and listing.
 
 The caller passes `create_snapshot()` the repository and exclusive lock from `RepositoryAdminService.locked_repository()`. The service uses that repository's set state to reject deleted sets before reading the input. It validates the first record as the root. The switch to final-root ordering and removal of the optional `snapshot_id` parameter are pending. The service stores missing objects and saves the index, assigns the UTC commit time, and calculates the protection deadline using the configured minimum duration, which defaults to seven days. `get_snapshot()` loads the committed record under the repository lock and verifies its identity and scope.
+
+`list_snapshots()` reads the published snapshot metadata and defers catalogue reads. The first access to `Snapshot.object_catalog` loads and verifies the catalogue under the same repository lock and caches it for the lifetime of the instance. Snapshot equality and hashing use its metadata fields. `find_by_client_id()` returns after releasing its lock. Use the returned metadata to select a snapshot and call `get_snapshot()` to load its catalogue under a new lock.
 
 The agreed format stores two server-owned files in the backup set's snapshot directory. Both are stored without compression or encryption.
 
