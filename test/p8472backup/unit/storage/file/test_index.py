@@ -1,13 +1,66 @@
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
+from p8472backup.archive.objects import HEADER_SIZE as OBJECT_HEADER_SIZE, TYPE_DATA, Object
 from p8472backup.storage.file.index import LocationIndex, ObjectLocation
 from p8472backup.storage.file.lock import RepositoryLock
+from p8472backup.storage.file.packs import HEADER_SIZE as PACK_HEADER_SIZE, Pack
 
 
 class TestLocationIndex:
+    def test_rebuild_keeps_the_first_record_for_duplicate_ids(self, tmp_path: Path) -> None:
+        earlier = tmp_path / "2.pack"
+        later = tmp_path / "10.pack"
+        first = Object(TYPE_DATA, b"a" * 32, 3)
+        duplicate = Object(TYPE_DATA, first.object_id, 1)
+        second = Object(TYPE_DATA, b"b" * 32, 0)
+        third = Object(TYPE_DATA, b"c" * 32, 2)
+        Pack.write_to(earlier, iter(((first, BytesIO(b"abc")), (duplicate, BytesIO(b"x")), (second, BytesIO()))))
+        Pack.write_to(later, iter(((duplicate, BytesIO(b"y")), (third, BytesIO(b"de")))))
+
+        with RepositoryLock(tmp_path) as lock, patch.object(Object, "read_body", side_effect=AssertionError("Rebuild must only read headers")):
+            index = LocationIndex.rebuild_from_packs({10: later, 2: earlier}, lock)
+
+        assert len(index) == 3
+        assert index.get(first.object_id) == ObjectLocation(2, PACK_HEADER_SIZE, OBJECT_HEADER_SIZE + 3)
+        assert index.get(second.object_id) == ObjectLocation(2, PACK_HEADER_SIZE + 2 * OBJECT_HEADER_SIZE + 4, OBJECT_HEADER_SIZE)
+        assert index.get(third.object_id) == ObjectLocation(10, PACK_HEADER_SIZE + OBJECT_HEADER_SIZE + 1, OBJECT_HEADER_SIZE + 2)
+
+    def test_rebuild_requires_the_lock_even_with_no_packs(self, tmp_path: Path) -> None:
+        lock = RepositoryLock(tmp_path)
+        with pytest.raises(RuntimeError, match="lock is not held"):
+            LocationIndex.rebuild_from_packs({}, lock)
+        with lock:
+            assert len(LocationIndex.rebuild_from_packs({}, lock)) == 0
+
+    def test_rebuild_rejects_a_pack_outside_the_locked_repository(self, tmp_path: Path) -> None:
+        repository = tmp_path / "repository"
+        repository.mkdir()
+        with RepositoryLock(repository) as lock, pytest.raises(ValueError, match="must name a repository file"):
+            LocationIndex.rebuild_from_packs({1: tmp_path / "1.pack"}, lock)
+
+    @pytest.mark.parametrize("pack_id", (0, 2**64 - 1))
+    def test_rebuild_accepts_the_checkpoint_pack_id_boundaries(self, tmp_path: Path, pack_id: int) -> None:
+        obj = Object(TYPE_DATA, b"a" * 32, 1)
+        path = tmp_path / f"{pack_id}.pack"
+        Pack.write_to(path, iter(((obj, BytesIO(b"a")),)))
+
+        with RepositoryLock(tmp_path) as lock:
+            index = LocationIndex.rebuild_from_packs({pack_id: path}, lock)
+        assert index.get(obj.object_id) == ObjectLocation(pack_id, PACK_HEADER_SIZE, OBJECT_HEADER_SIZE + 1)
+
+    @pytest.mark.parametrize("pack_id", (-1, 2**64))
+    def test_rebuild_rejects_pack_ids_outside_the_checkpoint_range(self, tmp_path: Path, pack_id: int) -> None:
+        obj = Object(TYPE_DATA, b"a" * 32, 1)
+        path = tmp_path / f"{pack_id}.pack"
+        Pack.write_to(path, iter(((obj, BytesIO(b"a")),)))
+
+        with RepositoryLock(tmp_path) as lock, pytest.raises(ValueError, match="Pack ID, offset, and length must fit"):
+            LocationIndex.rebuild_from_packs({pack_id: path}, lock)
+
     def test_put_and_get_three_object_ids(self) -> None:
         index = LocationIndex()
         first_id = (1).to_bytes(4, "big") + b"A" * 28

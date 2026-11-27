@@ -174,3 +174,27 @@ def test_restore_read_failure_logs_one_warning_with_snapshot_id(facade: ServerFa
         ("p8472backup", logging.INFO, f"Snapshot opened for restore {scope}"),
         ("p8472backup", logging.WARNING, f"Operation restore failed {scope} reason=FileNotFoundError"),
     ]
+
+
+def test_index_rebuild_logs_start_and_durable_completion(facade: ServerFacade, caplog: pytest.LogCaptureFixture) -> None:
+    with patch.object(trusted_time, "server_clock", create=True) as clock:
+        clock.now.return_value = _NOW
+        facade.backup(_CLIENT_ID, _SET_ID, iter(((_ROOT, BytesIO(b"r")),)), prune="")
+    caplog.clear()
+
+    facade.rebuild_index(_CLIENT_ID, _SET_ID)
+
+    assert caplog.record_tuples == [
+        ("p8472backup", logging.INFO, f"Location index rebuild started client_id={_CLIENT_ID} backup_set_id={_SET_ID} key_id={_KEY_ID}"),
+        ("p8472backup", logging.INFO, f"Location index rebuild completed client_id={_CLIENT_ID} key_id={_KEY_ID} packs_scanned=1 objects_indexed=1 snapshots_checked=1"),
+    ]
+
+
+def test_index_rebuild_logs_one_warning_on_checkpoint_failure(facade: ServerFacade, caplog: pytest.LogCaptureFixture) -> None:
+    with patch("p8472backup.storage.file.index.os.replace", side_effect=OSError("replace failed")), pytest.raises(OSError, match="replace failed"):
+        facade.rebuild_index(_CLIENT_ID, _SET_ID)
+
+    assert caplog.record_tuples == [
+        ("p8472backup", logging.INFO, f"Location index rebuild started client_id={_CLIENT_ID} backup_set_id={_SET_ID} key_id={_KEY_ID}"),
+        ("p8472backup", logging.WARNING, f"Operation rebuild_index failed client_id={_CLIENT_ID} backup_set_id={_SET_ID} reason=OSError"),
+    ]

@@ -206,6 +206,12 @@ The regular client CLI will expose `cleanup` to the client administrator for an 
 The per-set `auto-cleanup` client setting maps to the local backup operation's `auto_cleanup` argument and defaults to `false`. An outstanding marker requires an explicit cleanup before the next backup can start with the default setting. With `auto-cleanup = true`, the server uses the same cleanup operation after an aborted run stops writing and before starting a new run when an outstanding marker exists. Automatic cleanup uses the lock already held by the backup operation.
 
 The handling and reconciliation of a commit whose acknowledgement is lost is deferred to a later edge-case discussion. This does not change the durable publication and acknowledgement ordering in chapter 11. The coarse server-side storage model is agreed; this documentation does not authorize implementation of snapshots or run management.
+### Location index recovery
+
+`ServerFacade.rebuild_index(client_id, backup_set_id)` selects the registered set's key domain and holds the exclusive repository lock throughout recovery. It reads the headers of finalized packs in ascending numeric pack ID order and reconstructs object locations in memory. For repeated object IDs, the first record in that order supplies the location.
+
+The server validates the metadata and catalogue of every published snapshot in the key domain against the rebuilt index, including snapshots in retired sets. It also verifies the packed root headers. Once validation succeeds, it syncs the pack directory and atomically replaces the selected index checkpoint through the regular durable save path.
+
 ## 12. Retention, minimum protection, and garbage collection
 
 Each repository has a server-controlled minimum protection duration. Default: seven days.

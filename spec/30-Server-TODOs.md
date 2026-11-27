@@ -59,7 +59,9 @@ Keep the existing exclusive repository lock and enforce one active backup run pe
 
 ## 12. Interrupted runs and recovery
 
-Connect the local `cleanup()` façade method to the regular client CLI and forward each set's `auto-cleanup` option to `backup()`. The local service applies the repository-locked cleanup rules in chapter 11.3. Define recovery and acknowledgement on the transport. Determine reclaimability of orphaned objects in finalized packs from published snapshots and active operations. Implement `LocationIndex.rebuild_from_packs()`, which is currently a stub.
+Connect the local `cleanup()` façade method to the regular client CLI and forward each set's `auto-cleanup` option to `backup()`. The local service applies the repository-locked cleanup rules in chapter 11.3. Define recovery and acknowledgement on the transport. Determine reclaimability of orphaned objects in finalized packs from published snapshots and active operations.
+
+The local `rebuild_index()` façade operation rebuilds one key-domain index from finalized packs under the repository lock. It validates the published snapshot catalogues for every set in the domain before replacing the checkpoint. See [location index recovery](10c-SnapshotsCommitAndRetention.md#location-index-recovery).
 
 ## 13. Prune and compact
 
@@ -67,7 +69,7 @@ The local `backup()` persists the prune rule and applies it after commit. The lo
 
 ## 14. End-to-end verification
 
-Local tests send objects prepared by a test client, run initial and incremental backups through the façade, and use the shared read path to reconstruct both file versions byte for byte. They exercise interruption immediately before the final root byte, including for a reused root. Extend the coverage with two encrypted backups, direct single-file restore through the client, and acknowledgement lost after durable commit.
+Local tests send objects prepared by a test client, run initial and incremental backups through the façade, and use the shared read path to reconstruct both file versions byte for byte, including after rebuilding a missing or corrupt index. They exercise interruption immediately before the final root byte, including for a reused root. Extend the coverage with two encrypted backups, direct single-file restore through the client, and acknowledgement lost after durable commit.
 
 ## 15. Object encryption session keys
 
@@ -85,4 +87,4 @@ Plan the switch to a post-quantum SSH authentication key once the supported Open
 
 The shared `Log` class reads `P8472BACKUP_ENV` at server startup. Set it to `dev` to write `INFO` to stdout and `WARNING` and `ERROR` to stderr with readable level names. In `intg` and `prod`, the class writes to stderr with syslog severity prefixes. The default is `prod`. Configure the systemd unit to collect stderr in the journal and interpret the prefixes.
 
-Backup admission, commit, and failures include the client and set IDs and a snapshot ID once assigned. Restore opening, completion, and failures include the client, set, and snapshot IDs. The server logs repository changes, snapshot removal, cleanup, check results, scheduled dispatches, and trusted time outcomes. Apply the project logging rules to the transport when it is connected and reserve its stdout for protocol frames.
+Backup admission, commit, and failures include the client and set IDs and a snapshot ID once assigned. Restore opening, completion, and failures include the client, set, and snapshot IDs. Index recovery logs its start and durable completion, with one warning on failure. The server logs repository changes, snapshot removal, cleanup, check results, scheduled dispatches, and trusted time outcomes. Apply the project logging rules to the transport when it is connected and reserve its stdout for protocol frames.

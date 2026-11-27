@@ -102,7 +102,8 @@ def _read_fixture_file(reader: SnapshotReader) -> bytes:
         pytest.param(_ORIGINAL, 0, id="unchanged-file"),
     ),
 )
-def test_backup_and_incremental_backup_restore_both_file_versions(tmp_path: Path, backup_repository: tuple[ServerFacade, Repository], updated: bytes, new_objects: int) -> None:
+@pytest.mark.parametrize("index_damage", (None, "missing", "corrupt"), ids=("existing-index", "rebuild-missing-index", "rebuild-corrupt-index"))
+def test_backup_and_incremental_backup_restore_both_file_versions(tmp_path: Path, backup_repository: tuple[ServerFacade, Repository], updated: bytes, new_objects: int, index_damage: str | None) -> None:
     facade, repository = backup_repository
     path = tmp_path / "report.txt"
     path.write_bytes(_ORIGINAL)
@@ -133,8 +134,16 @@ def test_backup_and_incremental_backup_restore_both_file_versions(tmp_path: Path
     assert {path.name for path in directory.glob("*.pack")} == ({"1.pack", "2.pack"} if new_objects else {"1.pack"})
     if new_objects:
         assert Pack.load_from(directory / "2.pack").object_count == new_objects
+    index_path = opened.index_directory / str(_KEY_ID)
+    if index_damage == "missing":
+        index_path.unlink()
+    elif index_damage == "corrupt":
+        index_path.write_bytes(b"corrupt checkpoint")
+    if index_damage is not None:
+        facade.rebuild_index(_CLIENT_ID, _SET_ID)
+
     with RepositoryLock(opened.path) as lock:
-        index = LocationIndex.load_from(opened.index_directory / str(_KEY_ID), lock)
+        index = LocationIndex.load_from(index_path, lock)
         location = index.get(reused)
         assert location is not None and location.pack_id == 1
     with facade.restore(_CLIENT_ID, _SET_ID, original.snapshot_id) as reader:

@@ -12,8 +12,9 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Self
 
-from p8472backup.archive.objects import OBJECT_ID_SIZE, Object, ObjectId
+from p8472backup.archive.objects import HEADER_SIZE as OBJECT_HEADER_SIZE, OBJECT_ID_SIZE, Object, ObjectId
 from p8472backup.storage.file.lock import RepositoryLock
+from p8472backup.storage.file.packs import Pack
 
 
 _LOCATION_FIELDS = struct.Struct("<QQQ")
@@ -237,6 +238,16 @@ class LocationIndex:
     def rebuild_from_packs(cls, packs: Mapping[int, Path], lock: RepositoryLock) -> Self:
         """Rebuild the location index from finalized packs in one key domain.
 
+        For repeated IDs, keep the first record in ascending pack order.
         This method is part of the public location index API.
         """
-        raise NotImplementedError("Not implemented")
+        lock.require_held()
+        index = cls()
+        for pack_id in sorted(packs):
+            path = lock.require_held_for(packs[pack_id])
+            try:
+                for offset, obj in Pack.iter_object_headers(path):
+                    index.put(obj.object_id, ObjectLocation(pack_id, offset, OBJECT_HEADER_SIZE + obj.length))
+            except (ValueError, OverflowError) as error:
+                raise ValueError(f"{path.name}: {error}") from error
+        return index

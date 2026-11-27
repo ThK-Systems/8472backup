@@ -130,6 +130,12 @@ class ServerFacade:
         except ValueError as error:
             raise InconsistentStateError(f"repository.json: {error}") from error
 
+    def rebuild_index(self, client_id: UUID, backup_set_id: UUID) -> None:
+        """Rebuild and validate the location index for the set's key domain."""
+        with RepositoryAdminService().locked_repository(self._storage_root, client_id, operation="rebuild_index", backup_set_id=backup_set_id) as (repository, lock):
+            backup_set = repository.get_backup_set(backup_set_id)
+            SnapshotService().rebuild_index(repository, backup_set, lock)
+
     @staticmethod
     def version() -> str:
         """Return the running server's version string."""
