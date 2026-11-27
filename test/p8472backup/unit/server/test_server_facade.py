@@ -28,6 +28,12 @@ _OTHER_KEY_ID = UUID(int=6)
 _SERVER_FQDN = "backup.example.net"
 
 
+def test_version_returns_the_server_version() -> None:
+    version = "0.1-dev (git 0123456789abcdef0123456789abcdef01234567)"
+    with patch("p8472backup.server.main.VERSION", version):
+        assert ServerFacade.version() == version
+
+
 def test_server_facade_rejects_an_empty_fqdn(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="A server FQDN is required"):
         ServerFacade(tmp_path, server_fqdn="")

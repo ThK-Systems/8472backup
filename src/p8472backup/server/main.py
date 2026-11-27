@@ -7,6 +7,9 @@ from p8472backup.server import trusted_time
 from p8472backup.server.trusted_time import TrustedTime, TrustedTimeError
 
 
+VERSION: str = "0.1-dev"
+
+
 def main() -> None:
     """Start the server daemon."""
     try:

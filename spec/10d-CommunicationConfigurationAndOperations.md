@@ -92,7 +92,7 @@ The façade covers `init_repository`, `add_backup_set`, `remove_backup_set`, `re
 The text form prints the repository address once and one block per selected set. Print the set name or its UUID when a name is absent. Within a block, sort snapshots by UTC commit time with the newest first and include `SNAPSHOT ID`, `COMMENT`, `COMMITTED AT (UTC)`, and `PROTECTED` in that order. Append the three-letter English weekday in parentheses to each UTC commit timestamp, such as `(Thu)`. Show the comment column for a set with at least one comment. The exact remote permissions and wire encoding remain OPEN.
 
 - `check` is a separate administrator command backed by the façade. Acquire the regular repository lock and report consistency findings for the snapshot register, the expected snapshot metadata and catalogues, and their location-index references into packs. The check is read-only.
-- `version` is a separate command backed by the façade. It returns the running server's software version and requires neither a repository lookup nor a repository lock.
+- `version` is a separate command backed by `ServerFacade.version()`. It returns `VERSION` from `server/main.py` and requires neither a repository lookup nor a repository lock. The current value is `0.1-dev`. Deployment will stamp the string with the full Git commit ID of the built source, for example `0.1-dev (git <commit-id>)`.
 - `cleanup` is a command in the regular client CLI for the client administrator. It calls the façade for an authorized backup set in either mode, following chapter 11.3.
 
 Push/pull MUST have its own small, explicit boundary for mode-specific scheduling and invocation, connection establishment, and handoff to the common backup session:

@@ -57,3 +57,10 @@ class ServerFacade:
         with RepositoryAdminService().locked_repository(self._storage_root, client_id) as (repository, lock):
             groups = SnapshotService().list_snapshot_entries(repository, lock, backup_set_id=backup_set_id, protection_duration=self._protection_duration)
             return SnapshotListing(f"{self._server_fqdn}:8472backup/{repository.client_id}", groups)
+
+    @staticmethod
+    def version() -> str:
+        """Return the running server's version string."""
+        from p8472backup.server.main import VERSION
+
+        return VERSION
