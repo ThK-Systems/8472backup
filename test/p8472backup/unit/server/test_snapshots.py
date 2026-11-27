@@ -35,7 +35,7 @@ def repository(tmp_path: Path) -> Repository:
 def snapshot_service(monkeypatch: pytest.MonkeyPatch) -> SnapshotService:
     clock = Mock(spec=TrustedTime)
     clock.now.return_value = _COMMITTED_AT
-    monkeypatch.setattr(trusted_time, "server_clock", clock)
+    monkeypatch.setattr(trusted_time, "server_clock", clock, raising=False)
     return SnapshotService()
 
 

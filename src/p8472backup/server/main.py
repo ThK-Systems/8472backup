@@ -20,10 +20,12 @@ async def _run_server() -> None:
     try:
         await clock.synchronize()
         trusted_time.server_clock = clock
-        clock_task = asyncio.create_task(clock.run(), name="trusted-time")
-        await clock_task
+        try:
+            clock_task = asyncio.create_task(clock.run(), name="trusted-time")
+            await clock_task
+        finally:
+            del trusted_time.server_clock
     finally:
-        trusted_time.server_clock = None
         clock.close()
 
 

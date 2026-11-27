@@ -315,7 +315,7 @@ def test_daemon_exits_on_startup_failure(monkeypatch: pytest.MonkeyPatch) -> Non
     for _ in range(2):
         with pytest.raises(SystemExit, match="No trusted time quorum"):
             main.main()
-        assert trusted_time.server_clock is None
+        assert not hasattr(trusted_time, "server_clock")
     assert collect.await_count == 2
     refresh.assert_not_called()
 
@@ -336,4 +336,4 @@ def test_daemon_starts_refresh_task_after_synchronization(monkeypatch: pytest.Mo
         main.main()
     clock.run.assert_awaited_once_with()
     clock.close.assert_called_once_with()
-    assert trusted_time.server_clock is None
+    assert not hasattr(trusted_time, "server_clock")
