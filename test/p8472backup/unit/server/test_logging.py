@@ -1,17 +1,14 @@
 import logging
-import os
-import subprocess
-import sys
 from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from pathlib import Path
-from textwrap import dedent
 from unittest.mock import AsyncMock, patch
 from uuid import UUID
 
 import pytest
 
 from p8472backup.archive.objects import OBJECT_ID_SIZE, TYPE_SNAPSHOT, Object
+from p8472backup.common.log import Log
 from p8472backup.server import main, trusted_time
 from p8472backup.server.server_facade import ServerFacade
 from p8472backup.storage.file.lock import RepositoryLock
@@ -34,32 +31,35 @@ def facade(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> ServerFacade:
 
 
 @pytest.mark.parametrize("mode", (None, "dev", "intg", "prod"))
-def test_logging_routes_each_message_once_for_the_configured_mode(mode: str | None) -> None:
-    script = dedent("""\
-        import logging
-        from p8472backup.common.log import Log
-
-        logging.basicConfig(level=logging.INFO)
-        Log.configure()
-        Log.configure()
-        Log.info("Server %s", "started")
-        Log.warning("Operation deferred")
-        Log.error("Server stopped")
-        print("protocol output")
-        """)
-    env = dict(os.environ, PYTHONPATH=os.pathsep.join(sys.path))
-    env.pop("P8472BACKUP_ENV", None)
-    if mode is not None:
-        env["P8472BACKUP_ENV"] = mode
-    result = subprocess.run(  # noqa: S603 -- Run the current interpreter with a fixed test script.
-        [sys.executable, "-c", script], env=env, check=True, capture_output=True, text=True
-    )
-    if mode == "dev":
-        assert result.stdout.splitlines() == ["INFO Server started", "protocol output"]
-        assert result.stderr.splitlines() == ["WARNING Operation deferred", "ERROR Server stopped"]
+def test_logging_routes_each_message_once_for_the_configured_mode(mode: str | None, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], caplog: pytest.LogCaptureFixture) -> None:
+    if mode is None:
+        monkeypatch.delenv("P8472BACKUP_ENV", raising=False)
     else:
-        assert result.stdout == "protocol output\n"
-        assert result.stderr.splitlines() == ["<6>Server started", "<4>Operation deferred", "<3>Server stopped"]
+        monkeypatch.setenv("P8472BACKUP_ENV", mode)
+
+    logger = logging.getLogger("p8472backup")
+    monkeypatch.setattr(logger, "handlers", [])
+    monkeypatch.setattr(logger, "propagate", True)
+    with caplog.at_level(logging.WARNING, logger=logger.name):
+        try:
+            Log.configure()
+            Log.configure()
+            Log.info("Server %s", "started")
+            Log.warning("Operation deferred")
+            Log.error("Server stopped")
+            print("protocol output")
+        finally:
+            for handler in logger.handlers:
+                handler.close()
+
+    result = capsys.readouterr()
+    assert caplog.records == []
+    if mode == "dev":
+        assert result.out.splitlines() == ["INFO Server started", "protocol output"]
+        assert result.err.splitlines() == ["WARNING Operation deferred", "ERROR Server stopped"]
+    else:
+        assert result.out == "protocol output\n"
+        assert result.err.splitlines() == ["<6>Server started", "<4>Operation deferred", "<3>Server stopped"]
 
 
 def test_invalid_log_mode_reports_one_fatal_error_before_startup(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
@@ -73,6 +73,31 @@ def test_invalid_log_mode_reports_one_fatal_error_before_startup(monkeypatch: py
     assert failure.value.code == 1
     assert caplog.record_tuples == [("p8472backup", logging.ERROR, "Server could not configure logging: P8472BACKUP_ENV must be dev, intg, or prod")]
     server.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("error", "exit_code", "level", "message"),
+    (
+        pytest.param(None, None, logging.INFO, "Server stopped", id="normal"),
+        pytest.param(KeyboardInterrupt(), 130, logging.INFO, "Server stopped by operator", id="interrupted"),
+        pytest.param(RuntimeError("private error details"), 1, logging.ERROR, "Server stopped unexpectedly reason=RuntimeError", id="fatal"),
+    ),
+)
+def test_server_reports_shutdown_once(error: BaseException | None, exit_code: int | None, level: int, message: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    server = AsyncMock(side_effect=error)
+    monkeypatch.setattr(main, "_run_server", server)
+    monkeypatch.setattr(Log, "configure", lambda: None)
+
+    with caplog.at_level(logging.INFO, logger="p8472backup"):
+        if exit_code is None:
+            main.main()
+        else:
+            with pytest.raises(SystemExit) as failure:
+                main.main()
+            assert failure.value.code == exit_code
+
+    server.assert_awaited_once_with()
+    assert caplog.record_tuples == [("p8472backup", level, message)]
 
 
 def test_backup_logging_records_admission_commit_and_retention(facade: ServerFacade, caplog: pytest.LogCaptureFixture) -> None:
