@@ -1,6 +1,6 @@
 # 8472backup — Snapshots, Commit, and Retention
 
-Specification version: 0.66 — Pass verified backup sets and repository locks to services, 2026-11-24
+Specification version: 0.67 — Use trusted server time for snapshot protection, 2026-11-27
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 
@@ -205,6 +205,8 @@ The handling and reconciliation of a commit whose acknowledgement is lost is def
 ## 12. Retention, minimum protection, and garbage collection
 
 Each repository has a server-controlled minimum protection duration. Default: seven days.
+
+The server MUST obtain current UTC time through `TrustedTime.now()` on the shared clock that the daemon synchronizes with its HTTPS quorum. Snapshot commit timestamps, retention, and expiry decisions use this clock. If the clock cannot provide a valid reading, the operation raises `TrustedTimeError` before publishing or deleting a snapshot.
 
 For a completed snapshot:
 

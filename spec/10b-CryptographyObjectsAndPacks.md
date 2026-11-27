@@ -1,6 +1,6 @@
 # 8472backup — Cryptography, Objects, and Packs
 
-Specification version: 0.66 — Pass verified backup sets and repository locks to services, 2026-11-24
+Specification version: 0.67 — Use trusted server time for snapshot protection, 2026-11-27
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 

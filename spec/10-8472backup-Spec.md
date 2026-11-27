@@ -1,6 +1,6 @@
 # 8472backup — Project Specification for Codex
 
-Version: 0.66 — Pass verified backup sets and repository locks to services, 2026-11-24
+Version: 0.67 — Use trusted server time for snapshot protection, 2026-11-27
 
 Status: requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 
