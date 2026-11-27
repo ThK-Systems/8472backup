@@ -365,5 +365,28 @@ def test_remove_repository_retires_all_sets_before_snapshot_cleanup_and_can_retr
 
         with pytest.raises(ValueError, match="Repository is deleted"):
             service.add_backup_set(_CLIENT_ID, _THIRD_SET, _OTHER_KEY_ID)
+        with pytest.raises(ValueError, match="Repository is deleted"):
+            service.set_mode(_CLIENT_ID, "push")
         with admin.locked_repository(tmp_path, _CLIENT_ID) as (current, lock), pytest.raises(ValueError, match="Repository is deleted"):
             snapshots.create_snapshot(current, _SECOND_SET, iter(((root, BytesIO(b"r")),)), root.object_id, lock=lock)
+
+
+def test_set_mode_persists_client_mode_under_repository_lock(tmp_path: Path) -> None:
+    service = ServerService(tmp_path)
+    repository = service.init_repository(_CLIENT_ID, {_FIRST_SET: _KEY_ID, _SECOND_SET: _KEY_ID})
+
+    service.set_mode(_CLIENT_ID, "push")
+    reopened = RepositoryAdminService.find_by_client_id(tmp_path, _CLIENT_ID)
+    assert reopened.mode == "push"
+    assert reopened.backup_sets == repository.backup_sets
+
+    with patch.object(RepositoryAdminService, "_write_metadata") as write_metadata:
+        service.set_mode(_CLIENT_ID, "push")
+    write_metadata.assert_not_called()
+
+    with RepositoryLock(repository.path), pytest.raises(BlockingIOError):
+        service.set_mode(_CLIENT_ID, "pull")
+    assert RepositoryAdminService.find_by_client_id(tmp_path, _CLIENT_ID).mode == "push"
+
+    service.set_mode(_CLIENT_ID, "pull")
+    assert RepositoryAdminService.find_by_client_id(tmp_path, _CLIENT_ID).mode == "pull"

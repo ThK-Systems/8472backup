@@ -41,3 +41,9 @@ class ServerService:
         service = RepositoryAdminService()
         with service.locked_repository(self._storage_root, client_id) as (repository, lock):
             service.remove_repository(repository, lock, protection_duration=self._protection_duration)
+
+    def set_mode(self, client_id: UUID, mode: BackupMode) -> None:
+        """Set the backup mode for all sets of the verified client."""
+        service = RepositoryAdminService()
+        with service.locked_repository(self._storage_root, client_id) as (repository, lock):
+            service.set_mode(repository, mode, lock)

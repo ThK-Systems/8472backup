@@ -173,6 +173,8 @@ class RepositoryAdminService:
     def set_mode(self, repository: Repository, mode: BackupMode, lock: RepositoryLock) -> None:
         """Persist the mode using the repository and lock from locked_repository()."""
         lock.require_held_for(repository.path / _METADATA_NAME)
+        if repository.deleted:
+            raise ValueError(f"Repository is deleted: {repository.client_id}")
         if not Repository.is_backup_mode(mode):
             raise ValueError(f"Unsupported backup mode: {mode!r}")
         if repository.mode != mode:
