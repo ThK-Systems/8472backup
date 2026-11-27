@@ -92,16 +92,30 @@ class ServerFacade:
 
     @contextmanager
     def restore(self, client_id: UUID, backup_set_id: UUID, snapshot_id: UUID) -> Generator[SnapshotReader, None, None]:
-        """Keep a published snapshot open under the repository lock for restoration."""
-        with RepositoryService().locked_repository(self._storage_root, client_id, operation="restore", backup_set_id=backup_set_id, snapshot_id=snapshot_id) as (repository, lock):
+        """Open a published snapshot for a full restore."""
+        yield from self._open_snapshot_reader(client_id, backup_set_id, snapshot_id, operation="restore")
+
+    @contextmanager
+    def recover(self, client_id: UUID, backup_set_id: UUID, snapshot_id: UUID) -> Generator[SnapshotReader, None, None]:
+        """Open a published snapshot for file or directory recovery."""
+        yield from self._open_snapshot_reader(client_id, backup_set_id, snapshot_id, operation="recover")
+
+    @contextmanager
+    def mount(self, client_id: UUID, backup_set_id: UUID, snapshot_id: UUID) -> Generator[SnapshotReader, None, None]:
+        """Open a published snapshot for a read-only mount."""
+        yield from self._open_snapshot_reader(client_id, backup_set_id, snapshot_id, operation="mount")
+
+    def _open_snapshot_reader(self, client_id: UUID, backup_set_id: UUID, snapshot_id: UUID, *, operation: str) -> Generator[SnapshotReader, None, None]:
+        """Keep the snapshot reader and repository lock active for the operation."""
+        with RepositoryService().locked_repository(self._storage_root, client_id, operation=operation, backup_set_id=backup_set_id, snapshot_id=snapshot_id) as (repository, lock):
             backup_set = repository.get_backup_set(backup_set_id)
             reader = SnapshotService().open_snapshot(repository, backup_set, snapshot_id, lock)
             try:
-                Log.info("Snapshot opened for restore client_id=%s backup_set_id=%s snapshot_id=%s", client_id, backup_set_id, snapshot_id)
+                Log.info("Snapshot opened for %s client_id=%s backup_set_id=%s snapshot_id=%s", operation, client_id, backup_set_id, snapshot_id)
                 yield reader
             finally:
                 reader.close()
-        Log.info("Restore completed client_id=%s backup_set_id=%s snapshot_id=%s", client_id, backup_set_id, snapshot_id)
+        Log.info("%s completed client_id=%s backup_set_id=%s snapshot_id=%s", operation.capitalize(), client_id, backup_set_id, snapshot_id)
 
     def cleanup(self, client_id: UUID, backup_set_id: UUID) -> int:
         """Clean up stopped backup runs for the selected set."""

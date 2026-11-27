@@ -167,7 +167,7 @@ See the [configuration roadmap](70-ConfigurationRoadmap.md) for planned settings
 
 - Restore is initiated on a client with the required recovery keys.
 - `restore` restores a complete snapshot to a client-side destination. `recover` restores a selected file or a complete directory tree without mounting. The client resolves the selected path using decrypted metadata.
-- Restore, recover, and mount use the same server-side object read path. Check membership in the selected snapshot and match the stored record's ID and length to the requested object before sending its body.
+- The local façade methods `restore()`, `recover()`, and `mount()` take the client, backup-set, and snapshot UUIDs and provide a `SnapshotReader` under the repository lock for the lifetime of the context. The reader checks catalogue membership and the stored record's ID and length before streaming its body.
 - The server returns encrypted metadata and objects; the client decrypts and verifies them locally.
 - Read-only FUSE mounting is a planned Linux 1.0 feature and runs on the client.
 - Mount support is optional to the core backup/restore installation and not a universal future-platform requirement.

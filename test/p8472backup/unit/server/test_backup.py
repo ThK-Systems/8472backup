@@ -153,8 +153,10 @@ def test_backup_and_incremental_backup_restore_both_file_versions(tmp_path: Path
     facade.check(_CLIENT_ID)
 
 
-def test_restore_keeps_the_selected_index_and_repository_lock_for_the_context(backup_repository: tuple[ServerFacade, Repository]) -> None:
+@pytest.mark.parametrize("operation", ("restore", "recover", "mount"))
+def test_snapshot_read_keeps_the_selected_index_and_lock_for_the_context(backup_repository: tuple[ServerFacade, Repository], operation: str) -> None:
     facade, repository = backup_repository
+    open_reader = {"restore": facade.restore, "recover": facade.recover, "mount": facade.mount}[operation]
     facade.add_backup_set(_CLIENT_ID, _OTHER_SET_ID, _OTHER_KEY_ID)
     snapshot = facade.backup(_CLIENT_ID, _OTHER_SET_ID, iter(((_ROOT, BytesIO(_ROOT_BODY)),)), prune="")
     original_load = LocationIndex.load_from
@@ -166,13 +168,13 @@ def test_restore_keeps_the_selected_index_and_repository_lock_for_the_context(ba
         loaded_indexes.append(ref(index))
         return index
 
-    with patch.object(LocationIndex, "load_from", side_effect=track_index_load), facade.restore(_CLIENT_ID, _OTHER_SET_ID, snapshot.snapshot_id) as reader:
+    with patch.object(LocationIndex, "load_from", side_effect=track_index_load), open_reader(_CLIENT_ID, _OTHER_SET_ID, snapshot.snapshot_id) as reader:
         assert reader.root_id == _ROOT.object_id
         assert _read_object_body(reader, reader.root_id, TYPE_SNAPSHOT) == _ROOT_BODY
         (index_ref,) = loaded_indexes
         assert index_ref() is not None
         with pytest.raises(BlockingIOError), RepositoryLock(repository.path):
-            pytest.fail("Restore did not hold the repository lock")
+            pytest.fail(f"{operation} did not hold the repository lock")
 
     gc.collect()
     assert index_ref() is None
