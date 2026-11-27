@@ -8,6 +8,9 @@ license = "AGPL-3.0"
 license-files = ["LICENSE"]
 requires-python = ">=3.12,<4"
 
+[project.scripts]
+8472backupd = "p8472backup.server.main:main"
+
 [project.optional-dependencies]
 dev = [
     "ruff>=0.15.10",
