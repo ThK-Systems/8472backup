@@ -22,7 +22,7 @@ from p8472backup.archive.snapshotrootcontent import SnapshotRootContent
 from p8472backup.common.error import InconsistentStateError
 from p8472backup.server import trusted_time
 from p8472backup.server.repository import Repository
-from p8472backup.server.repository_admin_service import RepositoryAdminService
+from p8472backup.server.repository_service import RepositoryService
 from p8472backup.server.server_facade import ServerFacade
 from p8472backup.server.snapshot_service import SNAPSHOT_REGISTRY_NAME, SnapshotReader, SnapshotService
 from p8472backup.server.trusted_time import TrustedTime
@@ -120,7 +120,7 @@ def test_backup_and_incremental_backup_restore_both_file_versions(tmp_path: Path
     assert updated_records[0][1].tell() == 0
     assert updated_records[-1][1].tell() == updated_records[-1][0].length
 
-    opened = RepositoryAdminService.find_by_client_id(tmp_path, _CLIENT_ID)
+    opened = RepositoryService.find_by_client_id(tmp_path, _CLIENT_ID)
     assert opened.snapshots == {original, current}
     snapshots = SnapshotService()
     original = snapshots.get_snapshot(opened, _SET_ID, original.snapshot_id)

@@ -13,7 +13,7 @@ from p8472backup.archive.snapshotrootcontent import SnapshotRootContent
 from p8472backup.common.error import InconsistentStateError
 from p8472backup.server import trusted_time
 from p8472backup.server.repository import BackupMode
-from p8472backup.server.repository_admin_service import RepositoryAdminService
+from p8472backup.server.repository_service import RepositoryService
 from p8472backup.server.snapshot_service import SnapshotService
 
 
@@ -25,7 +25,7 @@ _KEY_ID = UUID(int=3)
 def test_init_repository_rejects_second_init_and_preserves_backup(tmp_path: Path) -> None:
     path = tmp_path / str(_CLIENT_ID)
     other_set_id = UUID(int=6)
-    admin_service = RepositoryAdminService()
+    admin_service = RepositoryService()
     repository = admin_service.init_repository(path, _CLIENT_ID, ((other_set_id, _KEY_ID), (_BACKUP_SET_ID, _KEY_ID)))
     assert repository.mode == "pull"
 
@@ -41,12 +41,12 @@ def test_init_repository_rejects_second_init_and_preserves_backup(tmp_path: Path
     contents = tuple(file.read_bytes() for file in files)
 
     with pytest.raises(FileExistsError):
-        RepositoryAdminService().init_repository(path, _CLIENT_ID, ((_BACKUP_SET_ID, _KEY_ID),))
+        RepositoryService().init_repository(path, _CLIENT_ID, ((_BACKUP_SET_ID, _KEY_ID),))
     with pytest.raises(FileExistsError):
-        RepositoryAdminService().init_repository(path, _CLIENT_ID, ((UUID(int=4), UUID(int=5)),))
+        RepositoryService().init_repository(path, _CLIENT_ID, ((UUID(int=4), UUID(int=5)),))
 
     assert tuple(file.read_bytes() for file in files) == contents
-    reopened = RepositoryAdminService.find_by_client_id(tmp_path, _CLIENT_ID)
+    reopened = RepositoryService.find_by_client_id(tmp_path, _CLIENT_ID)
     assert reopened.snapshots == {snapshot, other_snapshot}
     assert snapshot.backup_set_id == _BACKUP_SET_ID
     assert other_snapshot.backup_set_id == other_set_id
@@ -60,14 +60,14 @@ def test_init_repository_rejects_second_init_and_preserves_backup(tmp_path: Path
 @pytest.mark.parametrize("checkpoint", (None, b"damaged"))
 def test_init_repository_leaves_missing_or_damaged_index_untouched(tmp_path: Path, checkpoint: bytes | None) -> None:
     path = tmp_path / "repo"
-    repository = RepositoryAdminService().init_repository(path, _CLIENT_ID, ((_BACKUP_SET_ID, _KEY_ID),))
+    repository = RepositoryService().init_repository(path, _CLIENT_ID, ((_BACKUP_SET_ID, _KEY_ID),))
     if checkpoint is None:
         (repository.index_directory / str(_KEY_ID)).unlink()
     else:
         (repository.index_directory / str(_KEY_ID)).write_bytes(checkpoint)
 
     with pytest.raises(FileExistsError):
-        RepositoryAdminService().init_repository(path, _CLIENT_ID, ((_BACKUP_SET_ID, _KEY_ID),))
+        RepositoryService().init_repository(path, _CLIENT_ID, ((_BACKUP_SET_ID, _KEY_ID),))
     if checkpoint is None:
         assert not (repository.index_directory / str(_KEY_ID)).exists()
     else:
@@ -78,13 +78,13 @@ def test_init_repository_requires_a_new_path(tmp_path: Path) -> None:
     path = tmp_path / "repo"
     path.mkdir()
     with pytest.raises(InconsistentStateError):
-        RepositoryAdminService().init_repository(path, _CLIENT_ID, ((_BACKUP_SET_ID, _KEY_ID),))
+        RepositoryService().init_repository(path, _CLIENT_ID, ((_BACKUP_SET_ID, _KEY_ID),))
     assert not list(path.iterdir())
 
 
 def test_repository_can_change_mode(tmp_path: Path) -> None:
-    RepositoryAdminService().init_repository(tmp_path / str(_CLIENT_ID), _CLIENT_ID, ((_BACKUP_SET_ID, _KEY_ID),), mode="push")
-    repository = RepositoryAdminService.find_by_client_id(tmp_path, _CLIENT_ID)
+    RepositoryService().init_repository(tmp_path / str(_CLIENT_ID), _CLIENT_ID, ((_BACKUP_SET_ID, _KEY_ID),), mode="push")
+    repository = RepositoryService.find_by_client_id(tmp_path, _CLIENT_ID)
     original_hash = hash(repository)
     initial_mode = repository.mode
     assert initial_mode == "push"
@@ -100,17 +100,17 @@ def test_repository_can_change_mode(tmp_path: Path) -> None:
 def test_invalid_mode_does_not_create_repository(tmp_path: Path) -> None:
     path = tmp_path / "repo"
     with pytest.raises(ValueError, match="Unsupported backup mode"):
-        RepositoryAdminService().init_repository(path, _CLIENT_ID, ((_BACKUP_SET_ID, _KEY_ID),), mode=cast(BackupMode, "invalid"))
+        RepositoryService().init_repository(path, _CLIENT_ID, ((_BACKUP_SET_ID, _KEY_ID),), mode=cast(BackupMode, "invalid"))
     assert not path.exists()
 
 
 def test_find_by_client_id_loads_scope_and_persisted_mode(tmp_path: Path) -> None:
-    service = RepositoryAdminService()
+    service = RepositoryService()
     service.init_repository(tmp_path / str(_CLIENT_ID), _CLIENT_ID, ((_BACKUP_SET_ID, _KEY_ID),))
     with service.locked_repository(tmp_path, _CLIENT_ID) as (repository, lock):
         service.set_mode(repository, "push", lock)
 
-    reopened = RepositoryAdminService.find_by_client_id(tmp_path, _CLIENT_ID)
+    reopened = RepositoryService.find_by_client_id(tmp_path, _CLIENT_ID)
     assert reopened == repository
     assert reopened.mode == "push"
     with pytest.raises(ValueError, match="Backup set is not registered"):
@@ -123,4 +123,4 @@ def test_find_by_client_id_rejects_invalid_metadata(tmp_path: Path) -> None:
     (path / "repository.json").write_bytes(b"{}")
 
     with pytest.raises(ValueError, match="Unsupported repository metadata format"):
-        RepositoryAdminService.find_by_client_id(tmp_path, _CLIENT_ID)
+        RepositoryService.find_by_client_id(tmp_path, _CLIENT_ID)

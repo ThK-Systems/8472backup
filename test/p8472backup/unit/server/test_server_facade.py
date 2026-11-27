@@ -10,7 +10,7 @@ import pytest
 from p8472backup.archive.objects import TYPE_SNAPSHOT, Object
 from p8472backup.common.error import InconsistentStateError
 from p8472backup.server import trusted_time
-from p8472backup.server.repository_admin_service import RepositoryAdminService
+from p8472backup.server.repository_service import RepositoryService
 from p8472backup.server.server_facade import ServerFacade
 from p8472backup.server.snapshot import Snapshot
 from p8472backup.server.snapshot_service import SnapshotService
@@ -46,7 +46,7 @@ def test_init_repository_registers_sets_and_prepares_each_key_domain(tmp_path: P
     path = tmp_path / str(_CLIENT_ID)
 
     assert repository.mode == "push"
-    assert RepositoryAdminService.find_by_client_id(tmp_path, _CLIENT_ID) == repository
+    assert RepositoryService.find_by_client_id(tmp_path, _CLIENT_ID) == repository
     assert repository.backup_sets.keys() == backup_sets.keys()
     assert not repository.snapshots
     assert json.loads((path / "repository.json").read_text()) == {
@@ -76,7 +76,7 @@ def test_init_repository_registers_sets_and_prepares_each_key_domain(tmp_path: P
 def test_init_repository_keeps_existing_repositories_and_scopes_paths_by_client(tmp_path: Path) -> None:
     service = ServerFacade(tmp_path, server_fqdn=_SERVER_FQDN)
     service.init_repository(_CLIENT_ID, {_FIRST_SET: _KEY_ID})
-    first = RepositoryAdminService.find_by_client_id(tmp_path, _CLIENT_ID)
+    first = RepositoryService.find_by_client_id(tmp_path, _CLIENT_ID)
     metadata_path = first.path / "repository.json"
     original_metadata = metadata_path.read_bytes()
 
@@ -85,7 +85,7 @@ def test_init_repository_keeps_existing_repositories_and_scopes_paths_by_client(
 
     other_client = UUID(int=7)
     service.init_repository(other_client, {_FIRST_SET: _OTHER_KEY_ID})
-    second = RepositoryAdminService.find_by_client_id(tmp_path, other_client)
+    second = RepositoryService.find_by_client_id(tmp_path, other_client)
     assert second.path == tmp_path / str(other_client)
     assert second.get_backup_set(_FIRST_SET).key_id == _OTHER_KEY_ID
     assert first.mode == "pull"
@@ -102,7 +102,7 @@ def test_init_repository_requires_a_backup_set_before_creating_anything(tmp_path
 def test_init_repository_rejects_invalid_set_ids_before_creating_anything(tmp_path: Path) -> None:
     path = tmp_path / str(_CLIENT_ID)
     with pytest.raises(ValueError, match="IDs must be UUIDs"):
-        RepositoryAdminService().init_repository(path, _CLIENT_ID, ((_FIRST_SET, _KEY_ID), ("invalid", _KEY_ID)))
+        RepositoryService().init_repository(path, _CLIENT_ID, ((_FIRST_SET, _KEY_ID), ("invalid", _KEY_ID)))
 
     assert not path.exists()
 
@@ -130,7 +130,7 @@ def test_add_backup_set_with_shared_and_new_key_domains(tmp_path: Path) -> None:
     service = ServerFacade(tmp_path, server_fqdn=_SERVER_FQDN)
     service.init_repository(_CLIENT_ID, {_FIRST_SET: _KEY_ID}, mode="push")
     path = tmp_path / str(_CLIENT_ID)
-    repository = RepositoryAdminService.find_by_client_id(tmp_path, _CLIENT_ID)
+    repository = RepositoryService.find_by_client_id(tmp_path, _CLIENT_ID)
     index_file = repository.index_directory / str(_KEY_ID)
     registry = (path / "snapshot-registry.json").read_bytes()
     marker = repository.packs_root / str(_KEY_ID) / "1.pack"
@@ -144,7 +144,7 @@ def test_add_backup_set_with_shared_and_new_key_domains(tmp_path: Path) -> None:
     service.add_backup_set(_CLIENT_ID, _SECOND_SET, _KEY_ID)
     service.add_backup_set(_CLIENT_ID, _THIRD_SET, _OTHER_KEY_ID)
 
-    reopened = RepositoryAdminService.find_by_client_id(tmp_path, _CLIENT_ID)
+    reopened = RepositoryService.find_by_client_id(tmp_path, _CLIENT_ID)
     assert reopened.get_backup_set(_SECOND_SET).key_id == _KEY_ID
     assert reopened.get_backup_set(_THIRD_SET).key_id == _OTHER_KEY_ID
     assert (reopened.snapshots_root / str(_SECOND_SET)).is_dir()
@@ -176,22 +176,22 @@ def test_add_backup_set_checks_client_identity(tmp_path: Path) -> None:
 
 def test_find_by_client_id_requires_initialized_repository(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError, match="Backup repository not found for client"):
-        RepositoryAdminService.find_by_client_id(tmp_path, _CLIENT_ID)
+        RepositoryService.find_by_client_id(tmp_path, _CLIENT_ID)
 
     (tmp_path / str(_CLIENT_ID)).mkdir()
     with pytest.raises(InconsistentStateError, match="Repository metadata is missing"):
-        RepositoryAdminService.find_by_client_id(tmp_path, _CLIENT_ID)
+        RepositoryService.find_by_client_id(tmp_path, _CLIENT_ID)
 
 
 def test_add_backup_set_rejects_invalid_ids(tmp_path: Path) -> None:
     service = ServerFacade(tmp_path, server_fqdn=_SERVER_FQDN)
     service.init_repository(_CLIENT_ID, {_FIRST_SET: _KEY_ID})
-    repository_admin_service = RepositoryAdminService()
-    with repository_admin_service.locked_repository(tmp_path, _CLIENT_ID) as (repository, lock):
+    repository_service = RepositoryService()
+    with repository_service.locked_repository(tmp_path, _CLIENT_ID) as (repository, lock):
         with pytest.raises(ValueError, match="IDs must be UUIDs"):
-            repository_admin_service.add_backup_set(repository, "invalid", _KEY_ID, lock)
+            repository_service.add_backup_set(repository, "invalid", _KEY_ID, lock)
         with pytest.raises(ValueError, match="IDs must be UUIDs"):
-            repository_admin_service.add_backup_set(repository, _SECOND_SET, "invalid", lock)
+            repository_service.add_backup_set(repository, _SECOND_SET, "invalid", lock)
     assert not (tmp_path / str(_CLIENT_ID) / "snapshots" / str(_SECOND_SET)).exists()
 
 
@@ -211,14 +211,14 @@ def test_add_backup_set_detects_interrupted_registration(tmp_path: Path, monkeyp
     with pytest.raises(InconsistentStateError, match="previous registration may have been interrupted"):
         service.add_backup_set(_CLIENT_ID, _SECOND_SET, _OTHER_KEY_ID)
     assert (path / "repository.json").read_bytes() == metadata
-    assert RepositoryAdminService.find_by_client_id(tmp_path, _CLIENT_ID).get_backup_set(_FIRST_SET).key_id == _KEY_ID
+    assert RepositoryService.find_by_client_id(tmp_path, _CLIENT_ID).get_backup_set(_FIRST_SET).key_id == _KEY_ID
 
 
 def test_add_backup_set_rejects_incomplete_shared_key_domain(tmp_path: Path) -> None:
     service = ServerFacade(tmp_path, server_fqdn=_SERVER_FQDN)
     service.init_repository(_CLIENT_ID, {_FIRST_SET: _KEY_ID})
     path = tmp_path / str(_CLIENT_ID)
-    repository = RepositoryAdminService.find_by_client_id(tmp_path, _CLIENT_ID)
+    repository = RepositoryService.find_by_client_id(tmp_path, _CLIENT_ID)
     (repository.index_directory / str(_KEY_ID)).unlink()
     with pytest.raises(InconsistentStateError, match="key domain storage is incomplete"):
         service.add_backup_set(_CLIENT_ID, _SECOND_SET, _KEY_ID)
@@ -246,7 +246,7 @@ def test_remove_backup_set_respects_effective_protection_and_shared_packs(tmp_pa
     started_at = datetime(2026, 1, 1, tzinfo=UTC)
 
     def take_snapshot(set_id: UUID, days: int = 7) -> Snapshot:
-        with RepositoryAdminService().locked_repository(tmp_path, _CLIENT_ID) as (current, lock):
+        with RepositoryService().locked_repository(tmp_path, _CLIENT_ID) as (current, lock):
             return snapshots.create_snapshot(current, set_id, iter(((root, BytesIO(b"r")),)), lock=lock, protection_duration=timedelta(days=days))
 
     with patch.object(trusted_time, "server_clock", create=True) as clock:
@@ -263,7 +263,7 @@ def test_remove_backup_set_respects_effective_protection_and_shared_packs(tmp_pa
 
         clock.now.return_value = started_at + timedelta(days=11)
         service.remove_backup_set(_CLIENT_ID, _FIRST_SET)
-        reopened = RepositoryAdminService.find_by_client_id(tmp_path, _CLIENT_ID)
+        reopened = RepositoryService.find_by_client_id(tmp_path, _CLIENT_ID)
         assert reopened.get_backup_set(_FIRST_SET).deleted
         assert not reopened.get_backup_set(_SECOND_SET).deleted
         assert reopened.snapshots == {stored_protection, extended_protection, other_set}
@@ -276,7 +276,7 @@ def test_remove_backup_set_respects_effective_protection_and_shared_packs(tmp_pa
 
         clock.now.return_value = started_at + timedelta(days=11, microseconds=1)
         service.remove_backup_set(_CLIENT_ID, _FIRST_SET)
-        assert RepositoryAdminService.find_by_client_id(tmp_path, _CLIENT_ID).snapshots == {stored_protection, other_set}
+        assert RepositoryService.find_by_client_id(tmp_path, _CLIENT_ID).snapshots == {stored_protection, other_set}
 
     assert index_file.read_bytes() == index_bytes
     assert pack_file.read_bytes() == pack_bytes
@@ -288,7 +288,7 @@ def test_remove_backup_set_persists_state_and_can_retry_failed_register_write(tm
     root = Object(TYPE_SNAPSHOT, b"r" * 32, 1)
     with patch.object(trusted_time, "server_clock", create=True) as clock:
         clock.now.return_value = datetime(2026, 1, 1, tzinfo=UTC)
-        with RepositoryAdminService().locked_repository(tmp_path, _CLIENT_ID) as (current, lock):
+        with RepositoryService().locked_repository(tmp_path, _CLIENT_ID) as (current, lock):
             snapshot = SnapshotService().create_snapshot(current, _FIRST_SET, iter(((root, BytesIO(b"r")),)), lock=lock)
         path = repository.snapshot_file(_FIRST_SET, snapshot.snapshot_id)
 
@@ -296,12 +296,12 @@ def test_remove_backup_set_persists_state_and_can_retry_failed_register_write(tm
         with patch.object(SnapshotService, "_write_registry", side_effect=PermissionError("Register write failed")), pytest.raises(PermissionError, match="Register write failed"):
             service.remove_backup_set(_CLIENT_ID, _FIRST_SET)
         assert path.is_file()
-        assert RepositoryAdminService.find_by_client_id(tmp_path, _CLIENT_ID).get_backup_set(_FIRST_SET).deleted
+        assert RepositoryService.find_by_client_id(tmp_path, _CLIENT_ID).get_backup_set(_FIRST_SET).deleted
         service.remove_backup_set(_CLIENT_ID, _FIRST_SET)
 
     assert not path.exists()
     service.add_backup_set(_CLIENT_ID, _SECOND_SET, _KEY_ID)
-    reopened = RepositoryAdminService.find_by_client_id(tmp_path, _CLIENT_ID)
+    reopened = RepositoryService.find_by_client_id(tmp_path, _CLIENT_ID)
     assert reopened.get_backup_set(_FIRST_SET).deleted
     assert not reopened.get_backup_set(_SECOND_SET).deleted
 
@@ -309,7 +309,7 @@ def test_remove_backup_set_persists_state_and_can_retry_failed_register_write(tm
 def test_invalid_trusted_time_blocks_snapshot_publication_and_deletion(tmp_path: Path) -> None:
     service = ServerFacade(tmp_path, server_fqdn=_SERVER_FQDN)
     service.init_repository(_CLIENT_ID, {_FIRST_SET: _KEY_ID})
-    admin = RepositoryAdminService()
+    admin = RepositoryService()
     snapshots = SnapshotService()
     root = Object(TYPE_SNAPSHOT, b"r" * 32, 1)
 
@@ -340,13 +340,13 @@ def test_repository_lookup_rejects_obsolete_metadata(tmp_path: Path, version: in
     (path / "repository.json").write_text(json.dumps(metadata), encoding="utf-8")
 
     with pytest.raises(ValueError, match=error):
-        RepositoryAdminService.find_by_client_id(tmp_path, _CLIENT_ID)
+        RepositoryService.find_by_client_id(tmp_path, _CLIENT_ID)
 
 
 def test_remove_repository_retires_all_sets_before_snapshot_cleanup_and_can_retry(tmp_path: Path) -> None:
     service = ServerFacade(tmp_path, server_fqdn=_SERVER_FQDN)
     repository = service.init_repository(_CLIENT_ID, {_FIRST_SET: _KEY_ID, _SECOND_SET: _KEY_ID})
-    admin = RepositoryAdminService()
+    admin = RepositoryService()
     snapshots = SnapshotService()
     root = Object(TYPE_SNAPSHOT, b"r" * 32, 1)
     started_at = datetime(2026, 1, 1, tzinfo=UTC)
@@ -391,20 +391,20 @@ def test_set_mode_persists_client_mode_under_repository_lock(tmp_path: Path) -> 
     repository = service.init_repository(_CLIENT_ID, {_FIRST_SET: _KEY_ID, _SECOND_SET: _KEY_ID})
 
     service.set_mode(_CLIENT_ID, "push")
-    reopened = RepositoryAdminService.find_by_client_id(tmp_path, _CLIENT_ID)
+    reopened = RepositoryService.find_by_client_id(tmp_path, _CLIENT_ID)
     assert reopened.mode == "push"
     assert reopened.backup_sets == repository.backup_sets
 
-    with patch.object(RepositoryAdminService, "_write_metadata") as write_metadata:
+    with patch.object(RepositoryService, "_write_metadata") as write_metadata:
         service.set_mode(_CLIENT_ID, "push")
     write_metadata.assert_not_called()
 
     with RepositoryLock(repository.path), pytest.raises(BlockingIOError):
         service.set_mode(_CLIENT_ID, "pull")
-    assert RepositoryAdminService.find_by_client_id(tmp_path, _CLIENT_ID).mode == "push"
+    assert RepositoryService.find_by_client_id(tmp_path, _CLIENT_ID).mode == "push"
 
     service.set_mode(_CLIENT_ID, "pull")
-    assert RepositoryAdminService.find_by_client_id(tmp_path, _CLIENT_ID).mode == "pull"
+    assert RepositoryService.find_by_client_id(tmp_path, _CLIENT_ID).mode == "pull"
 
 
 def test_set_mode_retries_sync_for_a_visible_replacement(tmp_path: Path) -> None:
@@ -414,8 +414,8 @@ def test_set_mode_retries_sync_for_a_visible_replacement(tmp_path: Path) -> None
         with pytest.raises(OSError, match="Metadata directory sync failed"):
             service.set_mode(_CLIENT_ID, "push")
 
-    assert RepositoryAdminService.find_by_client_id(tmp_path, _CLIENT_ID).mode == "push"
-    with patch("p8472backup.server.repository_admin_service.sync_directory") as sync:
+    assert RepositoryService.find_by_client_id(tmp_path, _CLIENT_ID).mode == "push"
+    with patch("p8472backup.server.repository_service.sync_directory") as sync:
         service.set_mode(_CLIENT_ID, "push")
     sync.assert_called_once_with(repository.path)
 
@@ -430,7 +430,7 @@ def test_list_groups_published_snapshots_and_formats_protection(tmp_path: Path) 
     started_at = datetime(2026, 1, 1, tzinfo=UTC)
 
     with patch.object(trusted_time, "server_clock", create=True) as clock:
-        with RepositoryAdminService().locked_repository(tmp_path, _CLIENT_ID) as (repository, lock):
+        with RepositoryService().locked_repository(tmp_path, _CLIENT_ID) as (repository, lock):
             clock.now.return_value = started_at
             with pytest.raises(ValueError, match="at most 40 characters"):
                 snapshots.create_snapshot(repository, _FIRST_SET, iter(((root, BytesIO(b"r")),)), lock=lock, comment="x" * 41)

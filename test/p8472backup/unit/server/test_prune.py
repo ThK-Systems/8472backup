@@ -15,7 +15,7 @@ import pytest
 from p8472backup.archive.objects import TYPE_DATA, TYPE_SNAPSHOT, Object
 from p8472backup.common.error import InconsistentStateError
 from p8472backup.server import trusted_time
-from p8472backup.server.repository_admin_service import RepositoryAdminService
+from p8472backup.server.repository_service import RepositoryService
 from p8472backup.server.server_facade import ServerFacade
 from p8472backup.server.snapshot_service import SnapshotService
 from p8472backup.storage.file.lock import RepositoryLock
@@ -47,7 +47,7 @@ def test_backup_prunes_its_set_after_commit_and_keeps_shared_objects(tmp_path: P
     old_metadata = repository.snapshot_file(_BACKUP_SET_ID, old.snapshot_id)
     assert not old_metadata.exists()
     assert not old_metadata.with_suffix(".catalog").exists()
-    assert RepositoryAdminService.find_by_client_id(tmp_path, _CLIENT_ID).snapshots == {newest, other}
+    assert RepositoryService.find_by_client_id(tmp_path, _CLIENT_ID).snapshots == {newest, other}
     assert json.loads(repository.backup_set_file(_BACKUP_SET_ID).read_bytes()) == {"prune": "1d"}
     assert json.loads(repository.backup_set_file(_OTHER_SET_ID).read_bytes()) == {"prune": ""}
     assert index_file.read_bytes() == index_contents
@@ -66,7 +66,7 @@ def test_invalid_backup_comment_preserves_the_saved_prune_rule(tmp_path: Path) -
         facade.backup(_CLIENT_ID, _BACKUP_SET_ID, iter(()), prune="1d", comment="x" * 41)
 
     assert json.loads(repository.backup_set_file(_BACKUP_SET_ID).read_bytes()) == {"prune": "7d"}
-    assert RepositoryAdminService.find_by_client_id(tmp_path, _CLIENT_ID).snapshots == {snapshot}
+    assert RepositoryService.find_by_client_id(tmp_path, _CLIENT_ID).snapshots == {snapshot}
 
 
 def test_prune_preserves_an_older_snapshot_if_the_retained_catalogue_is_missing(tmp_path: Path) -> None:
@@ -113,7 +113,7 @@ def test_prune_uses_the_latest_valid_rule_and_honors_protection_at_the_deadline(
             facade.backup(_CLIENT_ID, _BACKUP_SET_ID, interrupted_upload(), prune="1d2d")
 
         assert json.loads(repository.backup_set_file(_BACKUP_SET_ID).read_bytes()) == {"prune": "1d"}
-        assert RepositoryAdminService.find_by_client_id(tmp_path, _CLIENT_ID).snapshots == {old, newest}
+        assert RepositoryService.find_by_client_id(tmp_path, _CLIENT_ID).snapshots == {old, newest}
         configured = ServerFacade(tmp_path, server_fqdn=_SERVER_FQDN, protection_duration=timedelta(days=10))
         with RepositoryLock(repository.path), pytest.raises(BlockingIOError):
             configured.prune(_CLIENT_ID, _BACKUP_SET_ID)
@@ -123,7 +123,7 @@ def test_prune_uses_the_latest_valid_rule_and_honors_protection_at_the_deadline(
         with patch.object(SnapshotService, "_read_catalogue", side_effect=AssertionError("Prune must use snapshot metadata")):
             assert configured.prune(_CLIENT_ID, _BACKUP_SET_ID) == (old.snapshot_id,)
             assert configured.prune(_CLIENT_ID, _BACKUP_SET_ID) == ()
-    assert RepositoryAdminService.find_by_client_id(tmp_path, _CLIENT_ID).snapshots == {newest}
+    assert RepositoryService.find_by_client_id(tmp_path, _CLIENT_ID).snapshots == {newest}
 
 
 @pytest.mark.parametrize(
@@ -175,7 +175,7 @@ def test_prune_resumes_a_partial_deletion_after_the_next_backup(tmp_path: Path) 
         with patch.object(Path, "unlink", fail_catalogue_unlink), pytest.raises(PermissionError, match="Catalogue unlink failed") as failure:
             facade.backup(_CLIENT_ID, _BACKUP_SET_ID, iter(((_ROOT, BytesIO(b"r")),)), prune="1d")
 
-        (newest,) = RepositoryAdminService.find_by_client_id(tmp_path, _CLIENT_ID).snapshots
+        (newest,) = RepositoryService.find_by_client_id(tmp_path, _CLIENT_ID).snapshots
         assert failure.value.__notes__ == [f"Snapshot {newest.snapshot_id} committed before prune failed."]
         assert not metadata.exists()
         assert catalogue.is_file()
@@ -186,7 +186,7 @@ def test_prune_resumes_a_partial_deletion_after_the_next_backup(tmp_path: Path) 
 
     assert not catalogue.exists()
     assert "pending_deletions" not in json.loads((repository.path / "snapshot-registry.json").read_bytes())
-    assert RepositoryAdminService.find_by_client_id(tmp_path, _CLIENT_ID).snapshots == {newest, other}
+    assert RepositoryService.find_by_client_id(tmp_path, _CLIENT_ID).snapshots == {newest, other}
 
 
 def _prune_until_killed(storage_root: Path, now: datetime, register: Path, replace_number: int | None, unlink_target: Path | None) -> None:
@@ -265,6 +265,6 @@ def test_prune_recovers_after_a_process_is_killed(tmp_path: Path, replace_number
 
     assert not any(path.exists() for path in files)
     assert "pending_deletions" not in json.loads(register.read_bytes())
-    reopened = RepositoryAdminService.find_by_client_id(tmp_path, _CLIENT_ID)
+    reopened = RepositoryService.find_by_client_id(tmp_path, _CLIENT_ID)
     assert reopened.snapshots == {newest}
     assert SnapshotService().get_snapshot(reopened, _BACKUP_SET_ID, newest.snapshot_id).object_catalog == newest.object_catalog

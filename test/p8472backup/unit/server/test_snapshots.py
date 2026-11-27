@@ -13,7 +13,7 @@ from p8472backup.archive.snapshotrootcontent import SnapshotRootContent
 from p8472backup.common.error import InconsistentStateError
 from p8472backup.server import trusted_time
 from p8472backup.server.repository import Repository
-from p8472backup.server.repository_admin_service import RepositoryAdminService
+from p8472backup.server.repository_service import RepositoryService
 from p8472backup.server.snapshot_service import SnapshotService
 from p8472backup.server.trusted_time import TrustedTime
 from p8472backup.storage.file.index import LocationIndex, ObjectLocation
@@ -29,7 +29,7 @@ _COMMITTED_AT = datetime(2026, 1, 1, tzinfo=UTC)
 
 @pytest.fixture
 def repository(tmp_path: Path) -> Repository:
-    return RepositoryAdminService().init_repository(tmp_path / str(_CLIENT_ID), _CLIENT_ID, ((_BACKUP_SET_ID, _KEY_DOMAIN_ID),))
+    return RepositoryService().init_repository(tmp_path / str(_CLIENT_ID), _CLIENT_ID, ((_BACKUP_SET_ID, _KEY_DOMAIN_ID),))
 
 
 @pytest.fixture
@@ -54,7 +54,7 @@ def test_snapshot_catalogue_resolves_objects_through_saved_index(tmp_path: Path,
     )
     records = ((Object(object_type, object_id, len(body)), BytesIO(body)) for object_type, object_id, body in bodies)
     pack_path = repository.packs_root / str(_KEY_DOMAIN_ID) / "1.pack"
-    with RepositoryAdminService().locked_repository(tmp_path, _CLIENT_ID) as (current, lock):
+    with RepositoryService().locked_repository(tmp_path, _CLIENT_ID) as (current, lock):
         committed = snapshot_service.create_snapshot(current, _BACKUP_SET_ID, records, lock=lock)
     snapshot = snapshot_service.get_snapshot(repository, _BACKUP_SET_ID, committed.snapshot_id)
     assert snapshot == committed
@@ -89,14 +89,14 @@ def test_snapshot_catalogue_resolves_objects_through_saved_index(tmp_path: Path,
         catalogue_output.write(b"z" * 32)
     with pytest.raises(ValueError, match="Invalid snapshot object catalogue"):
         snapshot_service.get_snapshot(repository, _BACKUP_SET_ID, committed.snapshot_id)
-    with RepositoryAdminService().locked_repository(tmp_path, _CLIENT_ID) as (current, lock):
+    with RepositoryService().locked_repository(tmp_path, _CLIENT_ID) as (current, lock):
         (deferred,) = snapshot_service.list_snapshots(current, lock)
         with pytest.raises(ValueError, match="Invalid snapshot object catalogue"):
             _ = deferred.object_catalog
 
 
 def test_snapshot_catalogue_loads_once_under_the_original_lock(repository: Repository, snapshot_service: SnapshotService) -> None:
-    admin = RepositoryAdminService()
+    admin = RepositoryService()
     storage_root = repository.path.parent
     root = Object(TYPE_SNAPSHOT, b"r" * 32, 1)
     with admin.locked_repository(storage_root, _CLIENT_ID) as (current, lock):
@@ -131,7 +131,7 @@ def test_create_snapshot_allocates_past_an_unindexed_pack(repository: Repository
     previous = Object(TYPE_DATA, b"d" * 32, 1)
     Pack.write_to(directory / "1.pack", iter(((previous, BytesIO(b"d")),)))
     root = Object(TYPE_SNAPSHOT, b"r" * 32, 1)
-    with RepositoryAdminService().locked_repository(repository.path.parent, _CLIENT_ID) as (current, lock):
+    with RepositoryService().locked_repository(repository.path.parent, _CLIENT_ID) as (current, lock):
         snapshot = snapshot_service.create_snapshot(current, _BACKUP_SET_ID, iter(((root, BytesIO(b"r")),)), lock=lock)
         index = LocationIndex.load_from(repository.index_directory / str(_KEY_DOMAIN_ID), lock)
         assert index.get(root.object_id) == ObjectLocation(2, PACK_HEADER_SIZE, OBJECT_HEADER_SIZE + 1)
@@ -142,7 +142,7 @@ def test_create_snapshot_allocates_past_an_unindexed_pack(repository: Repository
 @pytest.mark.parametrize("obj", (None, Object(TYPE_DATA, b"d" * 32, 1), Object(TYPE_METADATA, b"m" * 32, 1)))
 def test_creating_snapshot_requires_final_root(repository: Repository, snapshot_service: SnapshotService, obj: Object | None) -> None:
     records = iter(()) if obj is None else iter(((obj, BytesIO(b"a")),))
-    with RepositoryAdminService().locked_repository(repository.path.parent, _CLIENT_ID) as (current, lock):
+    with RepositoryService().locked_repository(repository.path.parent, _CLIENT_ID) as (current, lock):
         with pytest.raises(ValueError, match="Backup input ended before the final snapshot root"):
             snapshot_service.create_snapshot(current, _BACKUP_SET_ID, records, lock=lock)
         assert snapshot_service.list_snapshots(current, lock) == frozenset()
@@ -156,7 +156,7 @@ def test_failed_index_save_does_not_publish_snapshot(repository: Repository, sna
 
     monkeypatch.setattr(LocationIndex, "save_to", fail_save)
     root = Object(TYPE_SNAPSHOT, b"r" * 32, 1)
-    with RepositoryAdminService().locked_repository(repository.path.parent, _CLIENT_ID) as (current, lock), pytest.raises(OSError, match="index sync failed"):
+    with RepositoryService().locked_repository(repository.path.parent, _CLIENT_ID) as (current, lock), pytest.raises(OSError, match="index sync failed"):
         snapshot_service.create_snapshot(current, _BACKUP_SET_ID, iter(((root, BytesIO(b"r")),)), lock=lock)
     assert not list((repository.snapshots_root / str(_BACKUP_SET_ID)).iterdir())
     with RepositoryLock(repository.path) as lock:
@@ -167,7 +167,7 @@ def test_failed_register_write_leaves_snapshot_unpublished(repository: Repositor
     snapshot_id = UUID(int=42)
     root = Object(TYPE_SNAPSHOT, b"r" * 32, 1)
     with (
-        RepositoryAdminService().locked_repository(repository.path.parent, _CLIENT_ID) as (current, lock),
+        RepositoryService().locked_repository(repository.path.parent, _CLIENT_ID) as (current, lock),
         patch.object(SnapshotService, "_write_registry", side_effect=OSError("register write failed")),
         pytest.raises(OSError, match="register write failed"),
     ):
@@ -197,7 +197,7 @@ def test_snapshot_filter_stores_missing_objects_and_indexes_locations(repository
         index.save_to(index_path, lock)
 
     records = iter(((first, BytesIO(b"b")), (known, known_body), (first, duplicate_body), (root, BytesIO(b"c"))))
-    with RepositoryAdminService().locked_repository(repository.path.parent, _CLIENT_ID) as (current, lock):
+    with RepositoryService().locked_repository(repository.path.parent, _CLIENT_ID) as (current, lock):
         snapshot = snapshot_service.create_snapshot(current, _BACKUP_SET_ID, records, lock=lock, target_size=target_size)
 
     length = OBJECT_HEADER_SIZE + first.length
@@ -223,7 +223,7 @@ def test_snapshot_filter_stores_missing_objects_and_indexes_locations(repository
 
 def test_snapshot_filter_needs_no_pack_when_all_objects_are_known(repository: Repository, snapshot_service: SnapshotService) -> None:
     obj = Object(TYPE_SNAPSHOT, b"a" * 32, 1)
-    with RepositoryAdminService().locked_repository(repository.path.parent, _CLIENT_ID) as (current, lock):
+    with RepositoryService().locked_repository(repository.path.parent, _CLIENT_ID) as (current, lock):
         snapshot_service.create_snapshot(current, _BACKUP_SET_ID, iter(((obj, BytesIO(b"a")),)), lock=lock)
         snapshot = snapshot_service.create_snapshot(current, _BACKUP_SET_ID, iter(((obj, BytesIO(b"a")),)), lock=lock)
     assert snapshot.object_catalog.object_ids == {obj.object_id}
@@ -233,7 +233,7 @@ def test_snapshot_filter_needs_no_pack_when_all_objects_are_known(repository: Re
 def test_snapshot_rejects_a_root_indexed_as_a_data_object(repository: Repository, snapshot_service: SnapshotService) -> None:
     root = Object(TYPE_SNAPSHOT, b"r" * 32, 1)
     data = Object(TYPE_DATA, b"d" * 32, 1)
-    with RepositoryAdminService().locked_repository(repository.path.parent, _CLIENT_ID) as (current, lock):
+    with RepositoryService().locked_repository(repository.path.parent, _CLIENT_ID) as (current, lock):
         committed = snapshot_service.create_snapshot(current, _BACKUP_SET_ID, iter(((data, BytesIO(b"d")), (root, BytesIO(b"r")))), lock=lock)
         reused = Object(TYPE_SNAPSHOT, data.object_id, 1)
         with pytest.raises(InconsistentStateError, match="Indexed snapshot root"):
@@ -246,7 +246,7 @@ def test_snapshot_rejects_a_root_id_used_by_an_earlier_record(repository: Reposi
     data = Object(TYPE_DATA, b"d" * 32, 1)
     root = Object(TYPE_SNAPSHOT, data.object_id, 1)
     records = iter(((data, BytesIO(b"d")), (root, BytesIO(b"r"))))
-    with RepositoryAdminService().locked_repository(repository.path.parent, _CLIENT_ID) as (current, lock):
+    with RepositoryService().locked_repository(repository.path.parent, _CLIENT_ID) as (current, lock):
         with pytest.raises(ValueError, match="Snapshot root ID matches an earlier object"):
             snapshot_service.create_snapshot(current, _BACKUP_SET_ID, records, lock=lock, target_size=target_size)
         assert snapshot_service.list_snapshots(current, lock) == frozenset()
@@ -256,7 +256,7 @@ def test_snapshot_rejects_a_root_id_used_by_an_earlier_record(repository: Reposi
 def test_snapshot_rejects_a_missing_indexed_pack_before_writing_new_packs(repository: Repository, snapshot_service: SnapshotService) -> None:
     root = Object(TYPE_SNAPSHOT, b"r" * 32, 1)
     data = Object(TYPE_DATA, b"d" * 32, 1)
-    with RepositoryAdminService().locked_repository(repository.path.parent, _CLIENT_ID) as (current, lock):
+    with RepositoryService().locked_repository(repository.path.parent, _CLIENT_ID) as (current, lock):
         committed = snapshot_service.create_snapshot(current, _BACKUP_SET_ID, iter(((data, BytesIO(b"d")), (root, BytesIO(b"r")))), lock=lock)
         pack = repository.packs_root / str(_KEY_DOMAIN_ID) / "1.pack"
         pack.unlink()
@@ -271,7 +271,7 @@ def test_snapshot_rejects_a_missing_indexed_pack_before_writing_new_packs(reposi
 
 def test_incomplete_pack_adds_no_index_entries(repository: Repository, snapshot_service: SnapshotService) -> None:
     obj = Object(TYPE_SNAPSHOT, b"a" * 32, 2)
-    with RepositoryAdminService().locked_repository(repository.path.parent, _CLIENT_ID) as (current, lock), pytest.raises(ValueError, match="Truncated object body"):
+    with RepositoryService().locked_repository(repository.path.parent, _CLIENT_ID) as (current, lock), pytest.raises(ValueError, match="Truncated object body"):
         snapshot_service.create_snapshot(current, _BACKUP_SET_ID, iter(((obj, BytesIO(b"a")),)), lock=lock)
     with RepositoryLock(repository.path) as lock:
         index = LocationIndex.load_from(repository.index_directory / str(_KEY_DOMAIN_ID), lock)

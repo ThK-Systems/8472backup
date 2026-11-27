@@ -23,7 +23,7 @@ _METADATA_VERSION = 1
 _INTERRUPTED_BACKUP_SET_REGISTRATION = "A previous registration may have been interrupted."
 
 
-class RepositoryAdminService:
+class RepositoryService:
     """Manage storage for one client repository."""
 
     @classmethod

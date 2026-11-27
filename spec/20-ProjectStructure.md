@@ -6,7 +6,7 @@ Explicitly approved increment, 2026-11-19: the immutable `Object` class and its 
 
 Also explicitly approved: the immutable `Pack` header class in `src/p8472backup/storage/file/packs.py`, with four focused tests in `test/p8472backup/unit/storage/file/test_packs.py`. It implements the 14-byte header; record I/O and compaction remain unimplemented.
 
-The immutable `Snapshot` and `ObjectCatalogue` classes live in `src/p8472backup/server/snapshot.py`. `repository.py` defines `Repository` and its `BackupSet` records. `repository_admin_service.py` handles repository metadata and set registration. The stateless `SnapshotService` assembles object membership and reads and publishes local snapshot records.
+The immutable `Snapshot` and `ObjectCatalogue` classes live in `src/p8472backup/server/snapshot.py`. `repository.py` defines `Repository` and its `BackupSet` records. `repository_service.py` handles repository metadata and set registration. The stateless `SnapshotService` assembles object membership and reads and publishes local snapshot records.
 
 Also explicitly approved: the data-only immutable `ObjectLocation` class in `src/p8472backup/storage/file/index.py`. Benchmark libraries are optional development tools.
 
@@ -39,7 +39,7 @@ src/
     server/
       snapshot.py
       repository.py
-      repository_admin_service.py
+      repository_service.py
       snapshot_service.py
       catalogue.py
       retention/
