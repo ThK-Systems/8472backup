@@ -1,6 +1,6 @@
 # 8472backup — Purpose, Scope, and Architecture
 
-Specification version: 0.69 — Set the backup mode per client, 2026-11-27
+Specification version: 0.70 — Publish and list snapshot metadata, 2026-11-27
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 

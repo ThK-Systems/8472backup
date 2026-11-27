@@ -1,6 +1,6 @@
 # 8472backup — Communication, Configuration, and Operations
 
-Specification version: 0.69 — Set the backup mode per client, 2026-11-27
+Specification version: 0.70 — Publish and list snapshot metadata, 2026-11-27
 
 requirements and agreed architectural direction; early design phase. No production-ready implementation is implied.
 
@@ -85,7 +85,11 @@ OPEN: exact framing fields and serialization, pipelining limits and detailed seq
 
 The server service façade is the common entry point for operations between the server and its clients. It addresses each client by its stable `client_id` UUID and resolves the repository from the authorized server context. The Unix-socket handler and pull scheduler both call the façade. The socket handler is a separate entry point, and the SSH relay to that socket is a later increment. The scheduler supplies the registered client and set for a due pull job. Both callers use the common backup session and snapshot commit path.
 
-The façade covers `init_repository`, `add_backup_set`, `remove_backup_set`, `remove_repository`, `backup`, `list`, `restore`, `recover`, `mount`, `set_mode`, `cleanup`, `check`, and `version`. Adding a set registers it in the existing repository under that client's mode. Chapter 12 defines retirement and reclamation. `list` reads the register and snapshot JSON for committed snapshots across the client's authorized sets, optionally filtered by set. The exact method inputs, results, errors, and permissions remain OPEN.
+The façade covers `init_repository`, `add_backup_set`, `remove_backup_set`, `remove_repository`, `backup`, `list`, `restore`, `recover`, `mount`, `set_mode`, `cleanup`, `check`, and `version`. Adding a set registers it in the existing repository under that client's mode. Chapter 12 defines retirement and reclamation.
+
+`ServerFacade.list(client_id, *, backup_set_id=None)` returns a `SnapshotListing` for the verified client's repository. Under the repository lock it reads the published register entries and snapshot JSON for the requested sets. It reads trusted server time once and applies the effective protection rule from chapter 12 to each row. The façade requires a configured `server_fqdn` at construction. The result uses the address `<fqdn>:8472backup/<client_id>`.
+
+The text form prints the repository address once and one block per selected set. Print the set name or its UUID when a name is absent. Within a block, sort snapshots by UTC commit time with the newest first and include `SNAPSHOT ID`, `COMMENT`, `COMMITTED AT (UTC)`, and `PROTECTED` in that order. Show the comment column for a set with at least one comment. The exact remote permissions and wire encoding remain OPEN.
 
 - `check` is a separate administrator command backed by the façade. Acquire the regular repository lock and report consistency findings for the snapshot register, the expected snapshot metadata and catalogues, and their location-index references into packs. The check is read-only.
 - `version` is a separate command backed by the façade. It returns the running server's software version and requires neither a repository lookup nor a repository lock.
